@@ -547,8 +547,14 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <script src="vendor/qrcode.min.js"></script>
-    <script src="vendor/html5-qrcode.min.js"></script>
+    <script
+      src="vendor/qrcode.min.js"
+      onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';"
+    ></script>
+    <script
+      src="vendor/html5-qrcode.min.js"
+      onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
+    ></script>
     <script src="app.js"></script>
   </body>
 </html>
