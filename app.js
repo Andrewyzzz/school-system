@@ -584,6 +584,14 @@ let state = loadSavedState();
 let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
 let qrScanner = null;
+let teacherWorkloadState = {
+  teacherId: "",
+  month: "2026-06",
+  loading: false,
+  loaded: false,
+  error: "",
+  data: null,
+};
 let financeTeacherPage = {
   items: [],
   meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
@@ -828,6 +836,17 @@ function clearBackendSession() {
   } catch (error) {
     // Nothing else to do.
   }
+}
+
+function resetTeacherWorkloadState() {
+  teacherWorkloadState = {
+    teacherId: "",
+    month: "2026-06",
+    loading: false,
+    loaded: false,
+    error: "",
+    data: null,
+  };
 }
 
 async function apiRequest(path, options = {}) {
@@ -1569,6 +1588,94 @@ async function loadBackendTeacherContext(teacherId, weekStart = state.selectedSc
   } catch (error) {
     showToast(error.message || "老师课表加载失败");
   }
+}
+
+async function loadBackendWorkload(teacherId = currentTeacherId(), month = "2026-06") {
+  if (!backendMode() || !teacherId) return;
+  teacherWorkloadState = {
+    ...teacherWorkloadState,
+    teacherId,
+    month,
+    loading: true,
+    error: "",
+  };
+
+  try {
+    const data = await apiRequest(`/api/teachers/${teacherId}/workload?month=${month}`);
+    teacherWorkloadState = {
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: "",
+      data,
+    };
+  } catch (error) {
+    teacherWorkloadState = {
+      ...teacherWorkloadState,
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: error.message || "月度工作内容加载失败",
+      data: null,
+    };
+  }
+
+  if (state.activeView === "confirm") {
+    render();
+  }
+}
+
+function backendWorkloadStage(data) {
+  const status = data?.confirmation?.status || "";
+  if (status === "locked") return 3;
+  if (status === "school_approved") return 3;
+  if (status === "academic_approved") return 2;
+  if (status === "teacher_confirmed") return 1;
+  return 0;
+}
+
+async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2026-06") {
+  if (!backendMode() || currentRole() !== "teacher" || !teacherId) return;
+  teacherWorkloadState = {
+    ...teacherWorkloadState,
+    teacherId,
+    month,
+    loading: true,
+    error: "",
+  };
+  render();
+
+  try {
+    const data = await apiRequest(`/api/teachers/${teacherId}/workload/confirm`, {
+      method: "POST",
+      body: { month },
+    });
+    teacherWorkloadState = {
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: "",
+      data,
+    };
+    state.confirmationStages[teacherId] = backendWorkloadStage(data);
+    const pendingCount = data.summary?.pendingCount || 0;
+    showToast(pendingCount > 0 ? "已确认，未完成考勤项目暂不计入工资" : "本月工作量已确认");
+  } catch (error) {
+    teacherWorkloadState = {
+      ...teacherWorkloadState,
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: error.message || "月度工作量确认失败",
+    };
+    showToast(error.message || "月度工作量确认失败");
+  }
+
+  render();
 }
 
 async function loadFinanceTeacherPage(overrides = {}) {
@@ -2963,6 +3070,11 @@ function renderRecords() {
 }
 
 function renderConfirmation() {
+  if (backendMode() && currentRole() === "teacher") {
+    renderBackendConfirmation();
+    return;
+  }
+
   const teacherId = currentTeacherId();
   const stage = state.confirmationStages[teacherId] || 0;
   document.querySelector("#confirmSteps").innerHTML = confirmSteps
@@ -3007,6 +3119,70 @@ function renderConfirmation() {
 
   document.querySelector("#confirmWorkload").disabled = stage > 0;
   document.querySelector("#simulateApproval").disabled = stage === 0 || stage === 3;
+}
+
+function renderBackendConfirmation() {
+  const teacherId = currentTeacherId();
+  const month = "2026-06";
+  if (
+    (!teacherWorkloadState.loaded && !teacherWorkloadState.loading) ||
+    teacherWorkloadState.teacherId !== teacherId ||
+    teacherWorkloadState.month !== month
+  ) {
+    loadBackendWorkload(teacherId, month);
+  }
+  const data =
+    teacherWorkloadState.teacherId === teacherId && teacherWorkloadState.month === month
+      ? teacherWorkloadState.data
+      : null;
+  const stage = backendWorkloadStage(data);
+
+  document.querySelector("#confirmSteps").innerHTML = confirmSteps
+    .map((step, index) => {
+      const completed = index <= stage;
+      return `
+        <article class="confirm-step ${completed ? "active" : ""}">
+          <span>${step.label}</span>
+          <strong>${step.title}</strong>
+          <small>${completed ? "已完成" : "待处理"}</small>
+        </article>
+      `;
+    })
+    .join("");
+
+  const list = document.querySelector("#workloadList");
+  if (teacherWorkloadState.loading && !data) {
+    list.innerHTML = `<div class="empty-state">正在读取后端月度工作内容...</div>`;
+  } else if (teacherWorkloadState.error) {
+    list.innerHTML = `<div class="empty-state">${teacherWorkloadState.error}</div>`;
+  } else if (!data) {
+    list.innerHTML = `<div class="empty-state">暂无后端月度工作内容</div>`;
+  } else {
+    const categories = data.categories || [];
+    const summary = data.summary || {};
+    list.innerHTML = [
+      ...categories.map((category) => [category.label, `${category.units} 节`, `${category.description}，金额 ${formatCurrency(category.amount)}`]),
+      ["待处理考勤", `${summary.pendingCount || 0} 节`, "未完成签入和签出，暂不计入工资"],
+      ["异常记录", `${summary.exceptionCount || 0} 条`, "待教务复核后处理"],
+      ["可计薪课时", `${summary.payableUnits || 0} 节`, `后端生成，应发试算 ${formatCurrency(summary.grossPay || 0)}`],
+      ["预计实发", formatCurrency(summary.netPay || 0), "按当前规则自动试算"],
+    ]
+      .map(
+        ([label, value, desc]) => `
+          <div class="workload-item">
+            <div>
+              <span>${label}</span>
+              <p class="muted">${desc}</p>
+            </div>
+            <strong>${value}</strong>
+          </div>
+        `,
+      )
+      .join("");
+  }
+
+  document.querySelector("#confirmWorkload").disabled = stage > 0 || teacherWorkloadState.loading || Boolean(teacherWorkloadState.error);
+  document.querySelector("#simulateApproval").disabled = true;
 }
 
 function renderFinanceDashboard() {
@@ -3594,6 +3770,8 @@ async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
     } else {
       state.lessons.push(normalized);
     }
+    teacherWorkloadState.loaded = false;
+    teacherWorkloadState.data = null;
     const label = action === "checkIn" ? "签入" : "签出";
     showToast(`${normalized.className} ${normalized.course} 后端${label}成功`);
     render();
@@ -3808,6 +3986,7 @@ function loginAccount(accountId) {
   const account = state.accounts.find((item) => item.id === accountId);
   if (!account) return;
   if (qrScanner) stopCameraScanner();
+  resetTeacherWorkloadState();
   sessionAccountId = accountId;
   state.currentAccountId = accountId;
   state.activeView = defaultViewByRole[account.role];
@@ -4037,7 +4216,12 @@ document.querySelector("#resetDemo").addEventListener("click", () => {
   render();
 });
 
-document.querySelector("#confirmWorkload").addEventListener("click", () => {
+document.querySelector("#confirmWorkload").addEventListener("click", async () => {
+  if (backendMode() && currentRole() === "teacher") {
+    await confirmBackendWorkload();
+    return;
+  }
+
   const teacherId = currentTeacherId();
   const pendingCount = teacherLessons(teacherId).filter(
     (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
@@ -4048,6 +4232,11 @@ document.querySelector("#confirmWorkload").addEventListener("click", () => {
 });
 
 document.querySelector("#simulateApproval").addEventListener("click", () => {
+  if (backendMode()) {
+    showToast("后端模式下需由教务和总校角色审批，当前先禁止老师端模拟审批");
+    return;
+  }
+
   const teacherId = currentTeacherId();
   if ((state.confirmationStages[teacherId] || 0) === 0) {
     showToast("请先由老师确认本月工作量");

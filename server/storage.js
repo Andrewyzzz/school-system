@@ -269,6 +269,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
       taxRate: 0.03,
     },
     scheduleDrafts: [],
+    workloadConfirmations: [],
     payrollBatches: [],
     auditLogs: [],
   };
@@ -466,4 +467,172 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     netPay: Math.round((grossPay - tax) * 100) / 100,
     lines,
   };
+}
+
+function workloadTypeLabel(type) {
+  if (type === "morning") return "早自习";
+  if (type === "evening") return "晚自习";
+  if (type === "weekend") return "周末补课";
+  return "正常课时";
+}
+
+function workloadDescription(type, rate) {
+  if (type === "morning" || type === "evening") return `签入签出完成后按每节 ${rate} 元计入补贴`;
+  if (type === "weekend") return `签入签出完成后按每节 ${rate} 元计入补课补贴`;
+  return `签入签出完成后按每节 ${rate} 元计入课时津贴`;
+}
+
+function ensureWorkloadConfirmations(db) {
+  if (!Array.isArray(db.workloadConfirmations)) db.workloadConfirmations = [];
+  return db.workloadConfirmations;
+}
+
+function publicWorkloadConfirmation(confirmation) {
+  if (!confirmation) return null;
+  return {
+    id: confirmation.id,
+    teacherId: confirmation.teacherId,
+    month: confirmation.month,
+    status: confirmation.status,
+    stage: confirmation.stage,
+    confirmedAt: confirmation.confirmedAt,
+    confirmedByName: confirmation.confirmedByName,
+    summarySnapshot: confirmation.summarySnapshot,
+  };
+}
+
+export function findMonthlyWorkloadConfirmation(db, teacherId, month = "2026-06") {
+  return ensureWorkloadConfirmations(db).find(
+    (item) => item.teacherId === teacherId && item.month === month,
+  );
+}
+
+export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
+  const teacher = findTeacher(db, teacherId);
+  if (!teacher) return null;
+
+  const lessons = db.lessonInstances
+    .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const payroll = teacherPayrollPreview(db, teacherId, month);
+
+  const categories = ["regular", "morning", "evening", "weekend"].map((type) => {
+    const rate = db.payrollRules[type] || db.payrollRules.regular;
+    const completed = lessons.filter((lesson) => lesson.type === type && lesson.status === "completed");
+    const units = completed.reduce((sum, lesson) => sum + lesson.units, 0);
+    return {
+      type,
+      label: workloadTypeLabel(type),
+      units,
+      rate,
+      amount: units * rate,
+      description: workloadDescription(type, rate),
+    };
+  });
+
+  const payableLines = lessons
+    .filter((lesson) => lesson.status === "completed")
+    .map((lesson) => ({
+      lessonId: lesson.id,
+      date: lesson.date,
+      time: lesson.time,
+      className: lesson.className,
+      subjectName: lesson.subjectName,
+      room: lessonRoomName(db, lesson),
+      type: lesson.type,
+      units: lesson.units,
+      status: lesson.status,
+      checkInAt: lesson.checkInAt || "",
+      checkOutAt: lesson.checkOutAt || "",
+      amount: lesson.units * (db.payrollRules[lesson.type] || db.payrollRules.regular),
+    }));
+  const pendingLines = lessons
+    .filter((lesson) => ["scheduled", "pending", "checkedIn"].includes(lesson.status))
+    .map((lesson) => ({
+      lessonId: lesson.id,
+      date: lesson.date,
+      time: lesson.time,
+      className: lesson.className,
+      subjectName: lesson.subjectName,
+      room: lessonRoomName(db, lesson),
+      status: lesson.status,
+      checkInAt: lesson.checkInAt || "",
+      checkOutAt: lesson.checkOutAt || "",
+    }));
+  const exceptionLines = lessons
+    .filter((lesson) => lesson.status === "exception")
+    .map((lesson) => ({
+      lessonId: lesson.id,
+      date: lesson.date,
+      time: lesson.time,
+      className: lesson.className,
+      subjectName: lesson.subjectName,
+      room: lessonRoomName(db, lesson),
+      note: lesson.attendanceNote || lesson.note || "待复核",
+    }));
+
+  return {
+    teacher,
+    month,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      plannedUnits: lessons.reduce((sum, lesson) => sum + lesson.units, 0),
+      payableUnits: payableLines.reduce((sum, lesson) => sum + lesson.units, 0),
+      pendingCount: pendingLines.length,
+      exceptionCount: exceptionLines.length,
+      payableAmount: categories.reduce((sum, category) => sum + category.amount, 0),
+      grossPay: payroll?.grossPay || 0,
+      netPay: payroll?.netPay || 0,
+    },
+    categories,
+    payableLines,
+    pendingLines,
+    exceptionLines,
+    payroll,
+    confirmation: publicWorkloadConfirmation(findMonthlyWorkloadConfirmation(db, teacherId, month)),
+  };
+}
+
+export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAccount = null) {
+  const workload = teacherMonthlyWorkload(db, teacherId, month);
+  if (!workload) {
+    const error = new Error("教师不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const confirmations = ensureWorkloadConfirmations(db);
+  const existing = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  if (existing?.status === "locked") {
+    const error = new Error("本月工作量已锁定，不能重复确认");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const confirmation = {
+    id: existing?.id || `WLC-${teacherId}-${month.replace("-", "")}`,
+    teacherId,
+    month,
+    status: "teacher_confirmed",
+    stage: 1,
+    confirmedAt: now,
+    confirmedByAccountId: actorAccount?.id || "",
+    confirmedByName: actorAccount?.name || workload.teacher.name,
+    summarySnapshot: workload.summary,
+    payableLessonIds: workload.payableLines.map((line) => line.lessonId),
+    pendingLessonIds: workload.pendingLines.map((line) => line.lessonId),
+    exceptionLessonIds: workload.exceptionLines.map((line) => line.lessonId),
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+
+  if (existing) {
+    Object.assign(existing, confirmation);
+  } else {
+    confirmations.push(confirmation);
+  }
+
+  db.meta.updatedAt = now;
+  return teacherMonthlyWorkload(db, teacherId, month);
 }
