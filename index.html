@@ -3,29 +3,60 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>任课老师任务与薪资 Demo</title>
+    <title>富源学校管理系统 - 教师任务与薪资 Demo</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
+      <div class="login-card">
+        <div class="brand login-brand">
+          <img class="brand-logo" src="assets/school-logo.jpeg" alt="富源学校校徽" />
+          <div>
+            <strong>富源学校管理系统</strong>
+            <span>课时签入签出与财务结算</span>
+          </div>
+        </div>
+        <div class="login-heading">
+          <p class="eyebrow">本地演示 · 2026 年 6 月</p>
+          <h1 id="loginTitle">账号登录</h1>
+        </div>
+        <form class="login-form" id="loginForm">
+          <label for="loginUsername">用户名</label>
+          <input id="loginUsername" name="username" autocomplete="username" value="teacher" />
+          <label for="loginPassword">密码</label>
+          <input id="loginPassword" name="password" type="password" autocomplete="current-password" value="123456" />
+          <p class="login-error" id="loginError"></p>
+          <button class="primary-button" type="submit">
+            <span aria-hidden="true">✓</span>
+            登录
+          </button>
+        </form>
+        <div class="demo-login-grid" aria-label="演示账号">
+          <button class="ghost-button" data-demo-login="teacher" type="button">老师账号</button>
+          <button class="ghost-button" data-demo-login="finance" type="button">财务账号</button>
+          <button class="ghost-button" data-demo-login="admin" type="button">行政账号</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="app-shell is-hidden" id="appShell">
       <aside class="sidebar" aria-label="主导航">
         <div class="brand">
-          <div class="brand-mark" aria-hidden="true">薪</div>
+          <img class="brand-logo" src="assets/school-logo.jpeg" alt="富源学校校徽" />
           <div>
-            <strong>教师薪资 Demo</strong>
-            <span>课时任务核算</span>
+            <strong>富源学校管理系统</strong>
+            <span>教师课时与薪资 Demo</span>
           </div>
         </div>
 
-        <div class="account-switch" aria-label="演示账号切换">
-          <p>演示账号</p>
-          <button class="account-button active" data-account="teacher-li" type="button">
-            <strong>老师账号</strong>
-            <span>李明 · 小学数学</span>
-          </button>
-          <button class="account-button" data-account="finance-zhang" type="button">
-            <strong>财务账号</strong>
-            <span>张会计 · 薪资结算</span>
+        <div class="account-switch" aria-label="当前账号">
+          <p>当前账号</p>
+          <div class="account-button active" id="accountSummary">
+            <strong id="accountSummaryTitle">老师账号</strong>
+            <span id="accountSummaryMeta">李明 · 小学数学</span>
+          </div>
+          <button class="ghost-button logout-button" id="logoutButton" type="button">
+            退出登录
           </button>
         </div>
 
@@ -38,21 +69,29 @@
             <span aria-hidden="true">✓</span>
             课时任务
           </button>
+          <button class="nav-item" data-view="schedule" data-role="teacher" type="button">
+            <span aria-hidden="true">▦</span>
+            我的课表
+          </button>
+          <button class="nav-item" data-view="adminScheduling" data-role="admin" type="button">
+            <span aria-hidden="true">▦</span>
+            行政排课
+          </button>
+          <button class="nav-item" data-view="notifications" data-role="teacher,finance" type="button">
+            <span aria-hidden="true">✉</span>
+            通知中心
+          </button>
           <button class="nav-item" data-view="scanner" data-role="teacher" type="button">
             <span aria-hidden="true">⌖</span>
-            签到入口
+            签入/签出入口
           </button>
           <button class="nav-item" data-view="records" data-role="teacher" type="button">
             <span aria-hidden="true">≡</span>
-            签到记录
+            考勤记录
           </button>
           <button class="nav-item" data-view="confirm" data-role="teacher" type="button">
             <span aria-hidden="true">○</span>
             月度确认
-          </button>
-          <button class="nav-item" data-view="payroll" data-role="teacher" type="button">
-            <span aria-hidden="true">¥</span>
-            我的薪资
           </button>
           <button class="nav-item" data-view="finance" data-role="finance" type="button">
             <span aria-hidden="true">□</span>
@@ -66,7 +105,7 @@
             <span aria-hidden="true">¥</span>
             薪资结算
           </button>
-          <button class="nav-item" data-view="warnings" data-role="both" type="button">
+          <button class="nav-item" data-view="warnings" data-role="teacher,finance" type="button">
             <span aria-hidden="true">!</span>
             异常提醒
           </button>
@@ -90,16 +129,30 @@
               <span aria-hidden="true">↻</span>
               重置演示
             </button>
+            <button class="ghost-button top-logout-button" id="topLogoutButton" type="button" title="退出当前账号">
+              退出登录
+            </button>
             <button class="ghost-button" data-role-action="teacher" data-view-jump="scanner" type="button" title="打开真实扫码演示">
               <span aria-hidden="true">⌖</span>
-              签到入口
+              签入/签出入口
             </button>
-            <button class="primary-button" data-role-action="teacher" id="quickScan" type="button" title="模拟教师在教室扫码销课">
+            <button class="primary-button" data-role-action="teacher" id="quickScan" type="button" title="模拟教师在教室扫码签入或签出">
               <span aria-hidden="true">✓</span>
-              模拟扫码
+              模拟签入/签出
             </button>
           </div>
         </header>
+
+        <section class="notice-bar" id="noticeBar" aria-labelledby="noticeTitle">
+          <div class="notice-heading">
+            <div>
+              <p class="eyebrow">通知栏</p>
+              <h2 id="noticeTitle">最新通知</h2>
+            </div>
+            <span class="status-pill" id="noticeCount">0 条</span>
+          </div>
+          <div class="notice-list" id="noticeList"></div>
+        </section>
 
         <section class="view is-active" id="dashboardView" aria-labelledby="dashboardTitle">
           <div class="summary-grid">
@@ -109,12 +162,12 @@
               <small>来自期初课表</small>
             </article>
             <article class="metric">
-              <span>已销课课时</span>
+              <span>已完成课时</span>
               <strong id="completedLessons">0</strong>
-              <small>仅扫码记录计入薪资</small>
+              <small>签入和签出完成后计薪</small>
             </article>
             <article class="metric">
-              <span>待销课任务</span>
+              <span>待处理任务</span>
               <strong id="pendingLessons">0</strong>
               <small>今日优先处理</small>
             </article>
@@ -130,9 +183,9 @@
               <div class="panel-heading">
                 <div>
                   <h2 id="dashboardTitle">下一节课任务</h2>
-                  <p>教师到教室后扫码，系统把该课时作为工资核算凭证。</p>
+                  <p>老师按课表任务在教室扫码签入，课程结束后再签出，两次完成才计入工资。</p>
                 </div>
-                <span class="status-pill" id="nextLessonStatus">待销课</span>
+                <span class="status-pill" id="nextLessonStatus">待签入</span>
               </div>
               <div class="lesson-hero">
                 <div class="qr-visual" aria-label="教室二维码模拟图">
@@ -146,7 +199,7 @@
               <div class="action-row">
                 <button class="primary-button" id="scanNextLesson" type="button">
                   <span aria-hidden="true">✓</span>
-                  扫码销课
+                  签入
                 </button>
                 <button class="ghost-button" data-view-jump="tasks" type="button">
                   查看全部任务
@@ -187,7 +240,7 @@
             <div class="panel-heading">
               <div>
                 <h2 id="todayTasksTitle">今日课时任务</h2>
-                <p>演示重点：计划课表、扫码销课、异常标记、薪资联动。</p>
+                <p>演示重点：计划课表、课前签入、课后签出、异常标记、薪资联动。</p>
               </div>
             </div>
             <div class="table-wrap">
@@ -218,8 +271,9 @@
               </div>
               <div class="segmented" role="group" aria-label="课时筛选">
                 <button class="segment active" data-filter="all" type="button">全部</button>
-                <button class="segment" data-filter="pending" type="button">待销课</button>
-                <button class="segment" data-filter="completed" type="button">已销课</button>
+                <button class="segment" data-filter="pending" type="button">待签入</button>
+                <button class="segment" data-filter="checkedIn" type="button">待签出</button>
+                <button class="segment" data-filter="completed" type="button">已完成</button>
                 <button class="segment" data-filter="exception" type="button">异常</button>
               </div>
             </div>
@@ -244,26 +298,180 @@
           </section>
         </section>
 
+        <section class="view" id="scheduleView" aria-labelledby="scheduleTitle">
+          <section class="panel schedule-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="scheduleTitle">我的课表</h2>
+                <p>按自然周查看教务排班，老师可切换每一周确认之后的课程安排。</p>
+              </div>
+              <span class="status-pill done" id="scheduleSyncStatus">教务已分发</span>
+            </div>
+            <div class="schedule-toolbar">
+              <div>
+                <span class="field-label">自然周</span>
+                <strong id="scheduleWeekTitle">本周课表</strong>
+                <p class="muted" id="scheduleWeekRange">请选择周次</p>
+              </div>
+              <label class="week-select-label" for="scheduleWeekSelect">
+                <span>选择周次</span>
+                <select class="lesson-select" id="scheduleWeekSelect"></select>
+              </label>
+            </div>
+            <div class="schedule-summary" id="scheduleSummary"></div>
+            <div class="schedule-week-grid" id="scheduleWeekGrid"></div>
+          </section>
+        </section>
+
+        <section class="view" id="adminSchedulingView" aria-labelledby="adminSchedulingTitle">
+          <div class="summary-grid">
+            <article class="metric">
+              <span>排课学部</span>
+              <strong id="adminDivisionName">小学部</strong>
+              <small>选择后联动年级</small>
+            </article>
+            <article class="metric">
+              <span>排课年级</span>
+              <strong id="adminGradeName">一年级</strong>
+              <small id="adminClassCount">10 个班</small>
+            </article>
+            <article class="metric">
+              <span>周课时任务</span>
+              <strong id="adminRequiredLessons">0</strong>
+              <small>按科目课时规则</small>
+            </article>
+            <article class="metric">
+              <span>教师冲突</span>
+              <strong id="adminConflictCount">0</strong>
+              <small>同一时间重复上课</small>
+            </article>
+            <article class="metric">
+              <span>发布状态</span>
+              <strong id="adminPublishStatus">未生成</strong>
+              <small id="adminPublishTime">等待生成</small>
+            </article>
+          </div>
+
+          <div class="admin-schedule-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="adminSchedulingTitle">多学部自动排课</h2>
+                  <p id="adminSchedulingIntro">先选择小学、初中或高中，再选择对应年级生成自然周课表。</p>
+                </div>
+                <span class="status-pill" id="adminScheduleStatus">未生成</span>
+              </div>
+              <div class="admin-schedule-selectors">
+                <label class="field-label" for="adminDivisionSelect">
+                  <span>选择学部</span>
+                  <select class="lesson-select" id="adminDivisionSelect"></select>
+                </label>
+                <label class="field-label" for="adminGradeSelect">
+                  <span>选择年级</span>
+                  <select class="lesson-select" id="adminGradeSelect"></select>
+                </label>
+              </div>
+              <div class="admin-schedule-actions">
+                <button class="primary-button" id="generateSchedule" type="button">
+                  <span aria-hidden="true">✓</span>
+                  一键生成排课
+                </button>
+                <button class="ghost-button" id="confirmSchedule" type="button">
+                  确认并发布到老师端
+                </button>
+              </div>
+              <div class="rule-list">
+                <div>
+                  <strong>硬性约束</strong>
+                  <p>老师、班级在同一时间只能有一节课；教师冲突为 0 才能确认发布。</p>
+                </div>
+                <div>
+                  <strong>排课范围</strong>
+                  <p id="adminScopeText">小学部一年级 10 个班，按本年级科目规则自动生成。</p>
+                </div>
+                <div>
+                  <strong>发布结果</strong>
+                  <p>确认后生成老师端课时任务，老师可在“我的课表”按自然周查看。</p>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>科目与老师配置</h2>
+                  <p id="subjectConfigHelp">每门课配置多位老师，系统自动均衡老师课量。</p>
+                </div>
+              </div>
+              <div class="subject-config-list" id="subjectConfigList"></div>
+            </section>
+          </div>
+
+          <section class="panel conflict-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>冲突校验</h2>
+                <p>生成后自动检查教师是否在同一时间被安排到多个班级。</p>
+              </div>
+              <span class="status-pill" id="conflictStatus">等待生成</span>
+            </div>
+            <div class="conflict-list" id="conflictList"></div>
+          </section>
+
+          <section class="panel schedule-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>排课预览</h2>
+                <p id="adminSchedulePreviewHelp">按班级查看生成结果，确认前为草稿，确认后同步到老师端。</p>
+              </div>
+              <label class="week-select-label" for="adminClassSelect">
+                <span>选择班级</span>
+                <select class="lesson-select" id="adminClassSelect"></select>
+              </label>
+            </div>
+            <div class="schedule-week-grid" id="adminScheduleGrid"></div>
+          </section>
+        </section>
+
+        <section class="view" id="notificationsView" aria-labelledby="notificationsTitle">
+          <section class="panel notification-center">
+            <div class="panel-heading">
+              <div>
+                <h2 id="notificationsTitle">通知中心</h2>
+                <p>像邮件一样集中查看系统、教务和总校通知，首页只保留标题提醒。</p>
+              </div>
+              <span class="status-pill" id="notificationCenterCount">0 条</span>
+            </div>
+            <div class="notification-mail-list" id="notificationMailList"></div>
+          </section>
+        </section>
+
         <section class="view" id="scannerView" aria-labelledby="scannerTitle">
           <div class="scanner-layout">
             <section class="panel">
               <div class="panel-heading">
                 <div>
                   <h2 id="scannerTitle">教室二维码</h2>
-                  <p>演示教室墙上的二维码。真实系统会由后台生成带签名和有效期的课时凭证。</p>
+                  <p>演示固定贴在教室里的二维码。扫码后由系统按老师账号、当前时间和课表匹配课时。</p>
                 </div>
               </div>
               <label class="field-label" for="qrLessonSelect">选择要演示的课时</label>
               <select class="lesson-select" id="qrLessonSelect"></select>
               <div class="generated-qr" id="qrCodeBox" aria-label="课时二维码"></div>
               <div class="qr-payload">
-                <span>二维码内容</span>
+                <span>固定教室码内容</span>
                 <code id="qrPayloadText"></code>
               </div>
               <div class="action-row">
                 <button class="primary-button" id="simulateQrRead" type="button">
                   <span aria-hidden="true">✓</span>
                   模拟读到此码
+                </button>
+                <button class="ghost-button" id="simulateOutOfWindowQr" type="button">
+                  模拟非上课时间
+                </button>
+                <button class="ghost-button" id="simulateTamperedQr" type="button">
+                  模拟伪造教室码
                 </button>
                 <button class="ghost-button" id="copyQrText" type="button">
                   复制码内容
@@ -298,7 +506,18 @@
 
           <section class="panel scanner-note" aria-label="扫码落地说明">
             <strong>落地时的关键校验</strong>
-            <p>二维码只代表“某教室、某时间段、某课时任务”的入口，扫码后还要校验老师身份、是否本人课程、是否在允许时间窗口内、是否重复销课、是否存在已审批调课记录。</p>
+            <p>二维码只代表固定教室，扫码后还要校验老师身份、绑定设备、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
+          </section>
+
+          <section class="panel security-panel" aria-label="防作弊校验结果">
+            <div class="panel-heading">
+              <div>
+                <h2>防作弊校验结果</h2>
+                <p>Demo 中由前端模拟，正式产品必须由后端根据固定教室码和当前时间校验。</p>
+              </div>
+              <span class="status-pill" id="securitySummary">等待扫码</span>
+            </div>
+            <div class="security-check-list" id="securityCheckList"></div>
           </section>
         </section>
 
@@ -306,8 +525,8 @@
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="recordsTitle">我的签到记录</h2>
-                <p>老师账号只展示本人上课签到、异常和销课结果。</p>
+                <h2 id="recordsTitle">我的考勤记录</h2>
+                <p>老师账号只展示本人课程签入、签出、异常和完成结果。</p>
               </div>
             </div>
             <div class="table-wrap">
@@ -319,7 +538,7 @@
                     <th>班级</th>
                     <th>课程</th>
                     <th>教室</th>
-                    <th>签到结果</th>
+                    <th>考勤状态</th>
                     <th>记录说明</th>
                   </tr>
                 </thead>
@@ -354,50 +573,12 @@
               <div class="panel-heading">
                 <div>
                   <h2>本月可计薪工作量</h2>
-                  <p>异常和未销课项目不会进入最终工资。</p>
+                  <p>未完成签入和签出的项目不会进入最终工资。</p>
                 </div>
               </div>
               <div class="workload-list" id="workloadList"></div>
             </section>
           </div>
-        </section>
-
-        <section class="view" id="payrollView" aria-labelledby="payrollTitle">
-          <section class="panel table-panel">
-            <div class="panel-heading">
-              <div>
-                <h2 id="payrollTitle">薪资明细</h2>
-                <p>演示规则：固定工资 + 课时津贴 + 补贴奖励 - 考勤扣款 - 个税。</p>
-              </div>
-              <span class="status-pill" id="payrollLockStatus">试算中</span>
-            </div>
-            <div class="salary-total">
-              <div>
-                <span>应发工资</span>
-                <strong id="grossSalary">¥0</strong>
-              </div>
-              <div>
-                <span>代扣个税</span>
-                <strong id="taxSalary">¥0</strong>
-              </div>
-              <div>
-                <span>实发工资</span>
-                <strong id="netSalary">¥0</strong>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>薪资项目</th>
-                    <th>计算口径</th>
-                    <th>金额</th>
-                  </tr>
-                </thead>
-                <tbody id="salaryTable"></tbody>
-              </table>
-            </div>
-          </section>
         </section>
 
         <section class="view" id="financeView" aria-labelledby="financeTitle">
@@ -408,9 +589,9 @@
               <small>当前演示样本</small>
             </article>
             <article class="metric">
-              <span>待签到课时</span>
+              <span>待处理课时</span>
               <strong id="financePendingCount">0</strong>
-              <small>未签到不计薪</small>
+              <small>未签入/签出不计薪</small>
             </article>
             <article class="metric alert">
               <span>异常记录</span>
@@ -422,13 +603,53 @@
               <strong id="financeSettledCount">0</strong>
               <small>财务锁定工资</small>
             </article>
+            <article class="metric">
+              <span>全校应发</span>
+              <strong id="financeGrossTotal">¥0</strong>
+              <small>当前演示工资总额</small>
+            </article>
+            <article class="metric">
+              <span>全校实发</span>
+              <strong id="financeNetTotal">¥0</strong>
+              <small>扣款和个税后</small>
+            </article>
           </div>
+
+          <section class="panel table-panel finance-group-panel" aria-labelledby="financeGroupTitle">
+            <div class="panel-heading">
+              <div>
+                <h2 id="financeGroupTitle">财务分组汇总</h2>
+                <p>按学部、学科、年级查看工资总数、待处理课时和异常，避免只能逐个老师筛选。</p>
+              </div>
+              <div class="segmented" role="group" aria-label="财务分组维度">
+                <button class="segment active" data-finance-group="department" type="button">按学部</button>
+                <button class="segment" data-finance-group="subject" type="button">按学科</button>
+                <button class="segment" data-finance-group="grade" type="button">按年级</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>分组</th>
+                    <th>人数</th>
+                    <th>已完成课时</th>
+                    <th>待处理</th>
+                    <th>异常</th>
+                    <th>应发合计</th>
+                    <th>实发合计</th>
+                  </tr>
+                </thead>
+                <tbody id="financeGroupTable"></tbody>
+              </table>
+            </div>
+          </section>
 
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
                 <h2 id="financeTitle">老师薪资结算概览</h2>
-                <p>财务账号可以查看不同老师的签到记录和工资试算，并完成月度结算。</p>
+                <p>财务账号可以查看不同老师的考勤记录和工资试算，并完成月度结算。</p>
               </div>
             </div>
             <div class="table-wrap">
@@ -437,8 +658,8 @@
                   <tr>
                     <th>老师</th>
                     <th>学部/学科</th>
-                    <th>已签到课时</th>
-                    <th>待签到</th>
+                    <th>已完成课时</th>
+                    <th>待处理</th>
                     <th>异常</th>
                     <th>预计实发</th>
                     <th>结算状态</th>
@@ -455,8 +676,8 @@
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="financeRecordsTitle">老师签到记录</h2>
-                <p>财务可按老师查看课时任务、签到结果和异常状态。</p>
+                <h2 id="financeRecordsTitle">老师考勤记录</h2>
+                <p>财务可按老师查看课时任务、签入签出结果和异常状态。</p>
               </div>
               <div class="finance-filter">
                 <label class="field-label" for="financeTeacherSelect">选择老师</label>
@@ -473,7 +694,7 @@
                     <th>班级</th>
                     <th>课程</th>
                     <th>教室</th>
-                    <th>签到状态</th>
+                    <th>考勤状态</th>
                     <th>说明</th>
                   </tr>
                 </thead>
