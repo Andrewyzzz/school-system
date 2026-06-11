@@ -10,6 +10,8 @@ import {
   findScheduleDraft,
   generateScheduleDraft,
   publishScheduleDraft,
+  regenerateUnlockedScheduleAssignments,
+  setScheduleAssignmentLock,
 } from "./scheduling.js";
 import {
   ensureDatabase,
@@ -209,6 +211,26 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = adjustScheduleAssignment(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/lock") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = setScheduleAssignmentLock(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/regenerate-unlocked") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = regenerateUnlockedScheduleAssignments(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
       return;

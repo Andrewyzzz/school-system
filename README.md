@@ -60,6 +60,8 @@ http://127.0.0.1:4173/api/health
 - `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
 - `POST /api/scheduling/generate`：行政生成无教师/班级/教室时间冲突的排课草稿
 - `POST /api/scheduling/adjust`：行政调整草稿中的任课老师、日期、节次或教室，并重新校验冲突
+- `POST /api/scheduling/lock`：行政锁定或解锁草稿中的某节课，重排时保留已锁定课节
+- `POST /api/scheduling/regenerate-unlocked`：行政保留已锁定课节，重新自动排未锁定课程
 - `POST /api/scheduling/publish`：行政确认发布课表，生成老师端课次任务
 - `GET /api/teachers/me`：老师查看本人教师信息
 - `GET /api/teachers/:teacherId/schedule`：查看老师自然周课表
@@ -73,6 +75,7 @@ http://127.0.0.1:4173/api/health
 - 行政端新增教师导入页面，可粘贴 CSV、预览校验并确认写入教师档案和账号。
 - 行政排课页在后端模式下可调用真实排课接口，生成草稿、校验冲突并发布到老师端课表。
 - 行政排课草稿支持手动调整老师、日期、节次和教室，调整后会重新展示教师/班级/教室冲突，存在冲突时不能发布。
+- 行政可锁定已确认课节，再触发“重排未锁定课程”，系统会保留锁定课节并补排剩余课程。
 
 第一阶段文档和模板：
 

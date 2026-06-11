@@ -225,24 +225,31 @@ export function requiredScheduleLessonCount(config) {
   return config.classes.length * weeklyPerClass;
 }
 
-function buildClassSubjectQueue(config, classIndex) {
-  const counters = new Map(config.subjects.map((subject) => [subject.id, subject.weeklyLessons]));
-  const targetCount = config.subjects.reduce((sum, subject) => sum + subject.weeklyLessons, 0);
+function buildSubjectQueueFromCounters(config, classIndex, counters) {
+  const targetCount = Array.from(counters.values()).reduce((sum, count) => sum + Math.max(count, 0), 0);
   const queue = [];
   let round = 0;
 
   while (queue.length < targetCount) {
+    let pushed = 0;
     config.subjects.forEach((subject, subjectIndex) => {
       if ((counters.get(subject.id) || 0) <= 0) return;
       if ((round + classIndex + subjectIndex) % 2 === 0 || counters.get(subject.id) > 2) {
         queue.push(subject);
         counters.set(subject.id, counters.get(subject.id) - 1);
+        pushed += 1;
       }
     });
+    if (pushed === 0) break;
     round += 1;
   }
 
   return queue;
+}
+
+function buildClassSubjectQueue(config, classIndex) {
+  const counters = new Map(config.subjects.map((subject) => [subject.id, subject.weeklyLessons]));
+  return buildSubjectQueueFromCounters(config, classIndex, counters);
 }
 
 function countClassSubjectOnDay(assignments, classId, subjectId, date) {
@@ -267,26 +274,95 @@ function roomById(config, roomId) {
   return config.rooms?.find((room) => room.id === roomId) || null;
 }
 
+function classById(config, classId) {
+  return config.classes.find((schoolClass) => schoolClass.id === classId) || null;
+}
+
 function dayIndexForDate(config, date) {
   return weekDateKeys(config).indexOf(date);
 }
 
-export function generateScheduleAssignments(config) {
+function slotKeyFor(date, period) {
+  return `${date}-${period}`;
+}
+
+function markBusy(map, ownerId, slotKey) {
+  if (!map.has(ownerId)) map.set(ownerId, new Set());
+  map.get(ownerId).add(slotKey);
+}
+
+function countAssignmentsByClassSubject(assignments) {
+  return assignments.reduce((map, assignment) => {
+    const key = `${assignment.classId}:${assignment.subjectId}`;
+    map.set(key, (map.get(key) || 0) + 1);
+    return map;
+  }, new Map());
+}
+
+function nextAssignmentId(usedIds, classId, subjectId, nextIndex) {
+  let index = nextIndex;
+  let id = `SCH-${classId}-${subjectId}-${pad(index)}`;
+  while (usedIds.has(id)) {
+    index += 1;
+    id = `SCH-${classId}-${subjectId}-${pad(index)}`;
+  }
+  usedIds.add(id);
+  return { id, index };
+}
+
+function normalizeLockedAssignment(config, assignment) {
+  const schoolClass = classById(config, assignment.classId);
+  const period = config.periods.find((item) => item.period === assignment.period);
+  const room = roomById(config, assignment.roomId) || roomById(config, schoolClass?.roomId);
+  return {
+    ...assignment,
+    className: assignment.className || schoolClass?.name || assignment.classId,
+    teacherName: assignment.teacherName || teacherName(config, assignment.teacherId),
+    dayIndex: dayIndexForDate(config, assignment.date),
+    time: assignment.time || period?.time || "",
+    roomId: room?.id || assignment.roomId || schoolClass?.roomId || "",
+    room: room?.name || assignment.room || schoolClass?.room || "",
+    locked: true,
+  };
+}
+
+export function generateScheduleAssignments(config, options = {}) {
   const slots = schedulingSlots(config);
-  const assignments = [];
+  const assignments = (options.lockedAssignments || [])
+    .filter((assignment) => assignment.locked)
+    .map((assignment) => normalizeLockedAssignment(config, assignment));
   const teacherBusy = new Map();
   const classBusy = new Map();
+  const roomBusy = new Map();
   const teacherLoad = new Map(config.teachers.map((teacher) => [teacher.id, 0]));
+  const usedIds = new Set(assignments.map((assignment) => assignment.id));
+
+  assignments.forEach((assignment) => {
+    const busySlotKey = slotKeyFor(assignment.date, assignment.period);
+    markBusy(classBusy, assignment.classId, busySlotKey);
+    markBusy(teacherBusy, assignment.teacherId, busySlotKey);
+    markBusy(roomBusy, assignment.roomId || assignment.room, busySlotKey);
+    teacherLoad.set(assignment.teacherId, (teacherLoad.get(assignment.teacherId) || 0) + 1);
+  });
 
   config.classes.forEach((schoolClass, classIndex) => {
-    classBusy.set(schoolClass.id, new Set());
-    const subjectQueue = buildClassSubjectQueue(config, classIndex);
+    if (!classBusy.has(schoolClass.id)) classBusy.set(schoolClass.id, new Set());
+    const existingCounts = countAssignmentsByClassSubject(assignments);
+    const counters = new Map(
+      config.subjects.map((subject) => [
+        subject.id,
+        Math.max(subject.weeklyLessons - (existingCounts.get(`${schoolClass.id}:${subject.id}`) || 0), 0),
+      ]),
+    );
+    const subjectQueue = buildSubjectQueueFromCounters(config, classIndex, counters);
 
     subjectQueue.forEach((subject, lessonIndex) => {
       let best = null;
 
       slots.forEach((slot) => {
         if (classBusy.get(schoolClass.id).has(slot.slotKey)) return;
+        const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
+        if (busyRooms.has(slot.slotKey)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
         if (sameSubjectDayCount >= 2) return;
 
@@ -304,8 +380,12 @@ export function generateScheduleAssignments(config) {
 
       if (!best) return;
 
+      const countKey = `${schoolClass.id}:${subject.id}`;
+      const lessonNumber = (existingCounts.get(countKey) || 0) + 1;
+      const nextId = nextAssignmentId(usedIds, schoolClass.id, subject.id, lessonNumber);
+      existingCounts.set(countKey, nextId.index);
       const assignment = {
-        id: `SCH-${schoolClass.id}-${subject.id}-${pad(lessonIndex + 1)}`,
+        id: nextId.id,
         classId: schoolClass.id,
         className: schoolClass.name,
         subjectId: subject.id,
@@ -324,6 +404,7 @@ export function generateScheduleAssignments(config) {
       classBusy.get(schoolClass.id).add(best.slot.slotKey);
       if (!teacherBusy.has(best.teacherId)) teacherBusy.set(best.teacherId, new Set());
       teacherBusy.get(best.teacherId).add(best.slot.slotKey);
+      markBusy(roomBusy, schoolClass.roomId, best.slot.slotKey);
       teacherLoad.set(best.teacherId, (teacherLoad.get(best.teacherId) || 0) + 1);
     });
   });
@@ -428,6 +509,7 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
     publishedAt: "",
     assignments,
     conflicts,
+    lockedCount: 0,
     publishedLessonIds: [],
     generatedByAccountId: actorAccount?.id || "",
   };
@@ -646,4 +728,100 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   });
 
   return { config, draft, assignment };
+}
+
+export function setScheduleAssignmentLock(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  const draft = findScheduleDraft(db, options);
+
+  if (!draft) {
+    const error = new Error("请先生成排课草稿");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (draft.status === "published") {
+    const error = new Error("已发布课表不能修改锁定状态");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const assignment = (draft.assignments || []).find((item) => item.id === options.assignmentId);
+  if (!assignment) {
+    const error = new Error("未找到要锁定的课节");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  assignment.locked = Boolean(options.locked);
+  assignment.lockedAt = assignment.locked ? formatDateTimeMinute() : "";
+  assignment.lockedByAccountId = assignment.locked ? actorAccount?.id || "" : "";
+  assignment.unlockedAt = assignment.locked ? "" : formatDateTimeMinute();
+
+  draft.updatedAt = formatDateTimeMinute();
+  draft.lockedCount = (draft.assignments || []).filter((item) => item.locked).length;
+  draft.conflicts = validateScheduleConflicts(draft.assignments || []);
+  db.meta.updatedAt = new Date().toISOString();
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: assignment.locked ? "schedule_assignment_lock" : "schedule_assignment_unlock",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    divisionId: config.divisionId,
+    gradeId: config.gradeId,
+    assignmentId: assignment.id,
+    locked: assignment.locked,
+    lockedCount: draft.lockedCount,
+    createdAt: db.meta.updatedAt,
+  });
+
+  return { config, draft, assignment };
+}
+
+export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  const draft = findScheduleDraft(db, options);
+
+  if (!draft) {
+    const error = new Error("请先生成排课草稿");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (draft.status === "published") {
+    const error = new Error("已发布课表不能重新排未锁定课程");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lockedAssignments = (draft.assignments || []).filter((assignment) => assignment.locked);
+  const assignments = generateScheduleAssignments(config, { lockedAssignments });
+  const conflicts = validateScheduleConflicts(assignments);
+  const now = formatDateTimeMinute();
+
+  draft.assignments = assignments;
+  draft.conflicts = conflicts;
+  draft.generatedLessonCount = assignments.length;
+  draft.unassignedCount = Math.max((draft.requiredLessonCount || requiredScheduleLessonCount(config)) - assignments.length, 0);
+  draft.lockedCount = lockedAssignments.length;
+  draft.updatedAt = now;
+  draft.replannedAt = now;
+  draft.replannedByAccountId = actorAccount?.id || "";
+  db.meta.updatedAt = new Date().toISOString();
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "schedule_regenerate_unlocked",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    divisionId: config.divisionId,
+    gradeId: config.gradeId,
+    lockedCount: lockedAssignments.length,
+    assignmentCount: assignments.length,
+    conflictCount: conflicts.length,
+    createdAt: db.meta.updatedAt,
+  });
+
+  return { config, draft };
 }

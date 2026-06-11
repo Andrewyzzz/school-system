@@ -1133,23 +1133,31 @@ function scheduleStatusText(status = state.schedulingDraft.status) {
   return "未生成";
 }
 
-function buildClassSubjectQueue(classIndex) {
-  const counters = new Map(
-    state.schedulingConfig.subjects.map((subject) => [subject.id, subject.weeklyLessons]),
-  );
+function buildSubjectQueueFromCounters(classIndex, counters) {
+  const targetCount = Array.from(counters.values()).reduce((sum, count) => sum + Math.max(count, 0), 0);
   const queue = [];
   let round = 0;
-  while (queue.length < state.schedulingConfig.subjects.reduce((sum, subject) => sum + subject.weeklyLessons, 0)) {
+  while (queue.length < targetCount) {
+    let pushed = 0;
     state.schedulingConfig.subjects.forEach((subject, subjectIndex) => {
       if ((counters.get(subject.id) || 0) <= 0) return;
       if ((round + classIndex + subjectIndex) % 2 === 0 || counters.get(subject.id) > 2) {
         queue.push(subject);
         counters.set(subject.id, counters.get(subject.id) - 1);
+        pushed += 1;
       }
     });
+    if (pushed === 0) break;
     round += 1;
   }
   return queue;
+}
+
+function buildClassSubjectQueue(classIndex) {
+  const counters = new Map(
+    state.schedulingConfig.subjects.map((subject) => [subject.id, subject.weeklyLessons]),
+  );
+  return buildSubjectQueueFromCounters(classIndex, counters);
 }
 
 function countClassSubjectOnDay(assignments, classId, subjectId, date) {
@@ -1161,23 +1169,88 @@ function countClassSubjectOnDay(assignments, classId, subjectId, date) {
   ).length;
 }
 
-function generateScheduleAssignments() {
+function slotKeyFor(date, period) {
+  return `${date}-${period}`;
+}
+
+function markBusy(map, ownerId, slotKey) {
+  if (!map.has(ownerId)) map.set(ownerId, new Set());
+  map.get(ownerId).add(slotKey);
+}
+
+function countAssignmentsByClassSubject(assignments) {
+  return assignments.reduce((map, assignment) => {
+    const key = `${assignment.classId}:${assignment.subjectId}`;
+    map.set(key, (map.get(key) || 0) + 1);
+    return map;
+  }, new Map());
+}
+
+function nextScheduleAssignmentId(usedIds, classId, subjectId, nextIndex) {
+  let index = nextIndex;
+  let id = `SCH-${classId}-${subjectId}-${index}`;
+  while (usedIds.has(id)) {
+    index += 1;
+    id = `SCH-${classId}-${subjectId}-${index}`;
+  }
+  usedIds.add(id);
+  return { id, index };
+}
+
+function normalizeLockedLocalAssignment(assignment) {
+  const schoolClass = state.schedulingConfig.classes.find((item) => item.id === assignment.classId);
+  const period = state.schedulingConfig.periods.find((item) => item.period === assignment.period);
+  const room = roomById(assignment.roomId) || roomById(schoolClass?.roomId);
+  return {
+    ...assignment,
+    className: assignment.className || schoolClass?.name || assignment.classId,
+    teacherName: assignment.teacherName || schedulingTeacherName(assignment.teacherId),
+    dayIndex: weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5).indexOf(assignment.date),
+    time: assignment.time || period?.time || "",
+    roomId: room?.id || assignment.roomId || schoolClass?.roomId || "",
+    room: room?.name || assignment.room || schoolClass?.room || "",
+    locked: true,
+  };
+}
+
+function generateScheduleAssignments(options = {}) {
   const config = state.schedulingConfig;
   const slots = schedulingSlots();
-  const assignments = [];
+  const assignments = (options.lockedAssignments || [])
+    .filter((assignment) => assignment.locked)
+    .map(normalizeLockedLocalAssignment);
   const teacherBusy = new Map();
   const classBusy = new Map();
+  const roomBusy = new Map();
   const teacherLoad = new Map(config.teachers.map((teacher) => [teacher.id, 0]));
+  const usedIds = new Set(assignments.map((assignment) => assignment.id));
+
+  assignments.forEach((assignment) => {
+    const busySlotKey = slotKeyFor(assignment.date, assignment.period);
+    markBusy(classBusy, assignment.classId, busySlotKey);
+    markBusy(teacherBusy, assignment.teacherId, busySlotKey);
+    markBusy(roomBusy, assignment.roomId || assignment.room, busySlotKey);
+    teacherLoad.set(assignment.teacherId, (teacherLoad.get(assignment.teacherId) || 0) + 1);
+  });
 
   config.classes.forEach((schoolClass, classIndex) => {
-    classBusy.set(schoolClass.id, new Set());
-    const subjectQueue = buildClassSubjectQueue(classIndex);
+    if (!classBusy.has(schoolClass.id)) classBusy.set(schoolClass.id, new Set());
+    const existingCounts = countAssignmentsByClassSubject(assignments);
+    const counters = new Map(
+      config.subjects.map((subject) => [
+        subject.id,
+        Math.max(subject.weeklyLessons - (existingCounts.get(`${schoolClass.id}:${subject.id}`) || 0), 0),
+      ]),
+    );
+    const subjectQueue = buildSubjectQueueFromCounters(classIndex, counters);
 
-    subjectQueue.forEach((subject, lessonIndex) => {
+    subjectQueue.forEach((subject) => {
       let best = null;
 
       slots.forEach((slot) => {
         if (classBusy.get(schoolClass.id).has(slot.slotKey)) return;
+        const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
+        if (busyRooms.has(slot.slotKey)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
         if (sameSubjectDayCount >= 2) return;
 
@@ -1195,9 +1268,13 @@ function generateScheduleAssignments() {
 
       if (!best) return;
 
+      const countKey = `${schoolClass.id}:${subject.id}`;
+      const lessonNumber = (existingCounts.get(countKey) || 0) + 1;
+      const nextId = nextScheduleAssignmentId(usedIds, schoolClass.id, subject.id, lessonNumber);
+      existingCounts.set(countKey, nextId.index);
       const teacherNameText = schedulingTeacherName(best.teacherId);
       const assignment = {
-        id: `SCH-${schoolClass.id}-${subject.id}-${lessonIndex + 1}`,
+        id: nextId.id,
         classId: schoolClass.id,
         className: schoolClass.name,
         subjectId: subject.id,
@@ -1216,6 +1293,7 @@ function generateScheduleAssignments() {
       classBusy.get(schoolClass.id).add(best.slot.slotKey);
       if (!teacherBusy.has(best.teacherId)) teacherBusy.set(best.teacherId, new Set());
       teacherBusy.get(best.teacherId).add(best.slot.slotKey);
+      markBusy(roomBusy, schoolClass.roomId, best.slot.slotKey);
       teacherLoad.set(best.teacherId, (teacherLoad.get(best.teacherId) || 0) + 1);
     });
   });
@@ -1755,6 +1833,135 @@ async function applyScheduleAdjustment() {
     return;
   }
   adjustLocalSchedule();
+}
+
+async function toggleBackendAssignmentLock() {
+  const assignmentId = document.querySelector("#adminAssignmentSelect").value;
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment) {
+    showToast("请先选择要锁定的课节");
+    return;
+  }
+
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/lock", {
+      method: "POST",
+      body: {
+        ...backendSchedulingOptions(),
+        assignmentId,
+        locked: !assignment.locked,
+      },
+    });
+    applyBackendScheduleResult(result);
+    state.selectedScheduleAssignmentId = assignmentId;
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    showToast(result.assignment?.locked ? "课节已锁定，重排时会保留" : "课节已解锁，可参与重新排课");
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "锁定状态修改失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
+function toggleLocalAssignmentLock() {
+  const assignmentId = document.querySelector("#adminAssignmentSelect").value;
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment) {
+    showToast("请先选择要锁定的课节");
+    return;
+  }
+
+  assignment.locked = !assignment.locked;
+  assignment.lockedAt = assignment.locked ? formatDateTimeMinute() : "";
+  assignment.lockedByAccountId = assignment.locked ? currentAccount()?.id || "" : "";
+  assignment.unlockedAt = assignment.locked ? "" : formatDateTimeMinute();
+  state.schedulingDraft.lockedCount = (state.schedulingDraft.assignments || []).filter((item) => item.locked).length;
+  state.schedulingDraft.conflicts = validateScheduleConflicts(state.schedulingDraft.assignments || []);
+  state.selectedScheduleAssignmentId = assignmentId;
+  showToast(assignment.locked ? "课节已锁定，重排时会保留" : "课节已解锁，可参与重新排课");
+  render();
+}
+
+async function toggleScheduleAssignmentLock() {
+  if (backendMode() && currentRole() === "admin") {
+    await toggleBackendAssignmentLock();
+    return;
+  }
+  toggleLocalAssignmentLock();
+}
+
+async function regenerateBackendUnlockedSchedule() {
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/regenerate-unlocked", {
+      method: "POST",
+      body: backendSchedulingOptions(),
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    const lockedCount = result.draft?.lockedCount || 0;
+    const conflicts = result.draft?.conflicts?.length || 0;
+    showToast(
+      conflicts
+        ? `已保留 ${lockedCount} 节锁定课并重排，发现 ${conflicts} 个冲突`
+        : `已保留 ${lockedCount} 节锁定课并重排未锁定课程`,
+    );
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "重排未锁定课程失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
+function regenerateLocalUnlockedSchedule() {
+  const draft = state.schedulingDraft;
+  if (!schedulingDraftMatchesCurrent() || !draft.assignments?.length) {
+    showToast("请先生成排课草稿");
+    return;
+  }
+  const lockedAssignments = draft.assignments.filter((assignment) => assignment.locked);
+  const assignments = generateScheduleAssignments({ lockedAssignments });
+  const conflicts = validateScheduleConflicts(assignments);
+  state.schedulingDraft = {
+    ...draft,
+    status: "draft",
+    assignments,
+    conflicts,
+    generatedLessonCount: assignments.length,
+    unassignedCount: Math.max(requiredScheduleLessonCount() - assignments.length, 0),
+    lockedCount: lockedAssignments.length,
+    updatedAt: formatDateTimeMinute(),
+    replannedAt: formatDateTimeMinute(),
+  };
+  showToast(
+    conflicts.length
+      ? `已保留 ${lockedAssignments.length} 节锁定课并重排，发现 ${conflicts.length} 个冲突`
+      : `已保留 ${lockedAssignments.length} 节锁定课并重排未锁定课程`,
+  );
+  render();
+}
+
+async function regenerateUnlockedSchedule() {
+  if (backendMode() && currentRole() === "admin") {
+    await regenerateBackendUnlockedSchedule();
+    return;
+  }
+  regenerateLocalUnlockedSchedule();
 }
 
 function syncTeacherImportText() {
@@ -2334,12 +2541,27 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   const periodSelect = document.querySelector("#adminAssignmentPeriodSelect");
   const roomSelect = document.querySelector("#adminAssignmentRoomSelect");
   const applyButton = document.querySelector("#applyScheduleAdjustment");
+  const lockButton = document.querySelector("#toggleScheduleAssignmentLock");
+  const regenerateButton = document.querySelector("#regenerateUnlockedSchedule");
   const status = document.querySelector("#scheduleAdjustStatus");
-  if (!assignmentSelect || !teacherSelect || !dateSelect || !periodSelect || !roomSelect || !applyButton || !status) return;
+  if (
+    !assignmentSelect ||
+    !teacherSelect ||
+    !dateSelect ||
+    !periodSelect ||
+    !roomSelect ||
+    !applyButton ||
+    !lockButton ||
+    !regenerateButton ||
+    !status
+  ) {
+    return;
+  }
 
   const hasDraft = assignments.length > 0;
   const isPublished = draft.status === "published";
   const canAdjust = hasDraft && !isPublished && !schedulingBackendState.loading;
+  const lockedCount = (draft.assignments || []).filter((assignment) => assignment.locked).length;
 
   status.textContent = !hasDraft
     ? "等待草稿"
@@ -2347,7 +2569,9 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
       ? "已发布锁定"
       : draft.conflicts?.length
         ? `${draft.conflicts.length} 个冲突`
-        : "可调整";
+        : lockedCount
+          ? `已锁定 ${lockedCount} 节`
+          : "可调整";
   status.className = !hasDraft
     ? "status-pill"
     : isPublished
@@ -2361,7 +2585,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
         .map(
           (assignment) => `
             <option value="${assignment.id}" ${assignment.id === selectedAssignment?.id ? "selected" : ""}>
-              ${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName} · ${assignment.room}
+              ${assignment.locked ? "已锁定 · " : ""}${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName} · ${assignment.room}
             </option>
           `,
         )
@@ -2424,6 +2648,9 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   periodSelect.disabled = !canAdjust;
   roomSelect.disabled = !canAdjust;
   applyButton.disabled = !canAdjust || !selectedAssignment;
+  lockButton.disabled = !canAdjust || !selectedAssignment;
+  lockButton.textContent = selectedAssignment?.locked ? "解锁该课节" : "锁定该课节";
+  regenerateButton.disabled = !canAdjust || !hasDraft;
 }
 
 function renderTeacherImport() {
@@ -2664,6 +2891,7 @@ function adminScheduleItem(assignment) {
       <div class="schedule-main">
         <strong>${assignment.subjectName} · ${assignment.teacherName}</strong>
         <span>${assignment.room}</span>
+        ${assignment.locked ? `<span class="tag locked">已锁定</span>` : ""}
       </div>
     </div>
   `;
@@ -3402,6 +3630,7 @@ async function generateAdminSchedule() {
     publishedAt: "",
     assignments,
     conflicts,
+    lockedCount: 0,
     publishedLessonIds: [],
   };
   showToast(
@@ -3874,6 +4103,14 @@ document.querySelector("#adminAssignmentSelect").addEventListener("change", (eve
 
 document.querySelector("#applyScheduleAdjustment").addEventListener("click", () => {
   applyScheduleAdjustment();
+});
+
+document.querySelector("#toggleScheduleAssignmentLock").addEventListener("click", () => {
+  toggleScheduleAssignmentLock();
+});
+
+document.querySelector("#regenerateUnlockedSchedule").addEventListener("click", () => {
+  regenerateUnlockedSchedule();
 });
 
 document.querySelector("#simulateQrRead").addEventListener("click", () => {
