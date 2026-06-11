@@ -399,6 +399,17 @@ export function teacherLessonSummary(db, teacherId, month = "2026-06") {
   );
 }
 
+function lessonRoomName(db, lesson) {
+  return lesson.room || db.rooms.find((room) => room.id === lesson.roomId)?.name || lesson.roomId;
+}
+
+function publicLesson(db, lesson) {
+  return {
+    ...lesson,
+    room: lessonRoomName(db, lesson),
+  };
+}
+
 export function teacherLessonsForWeek(db, teacherId, weekStart) {
   const startKey = weekStart || "2026-06-15";
   const endKey = addDays(startKey, 6);
@@ -409,6 +420,7 @@ export function teacherLessonsForWeek(db, teacherId, weekStart) {
         lesson.date >= startKey &&
         lesson.date <= endKey,
     )
+    .map((lesson) => publicLesson(db, lesson))
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
 
@@ -429,6 +441,7 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
       time: lesson.time,
       className: lesson.className,
       subjectName: lesson.subjectName,
+      room: lessonRoomName(db, lesson),
       type: lesson.type,
       units: lesson.units,
       rate,

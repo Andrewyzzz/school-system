@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { submitTeacherAttendance } from "./attendance.js";
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
@@ -299,6 +300,25 @@ async function handleApi(req, res, db, url) {
           weekStart,
           lessons: teacherLessonsForWeek(db, teacherId, weekStart),
         });
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "attendance") {
+        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+          sendError(res, 403, "只能由老师本人提交考勤");
+          return;
+        }
+        const body = await readJsonBody(req);
+        try {
+          const result = submitTeacherAttendance(db, body, auth.account);
+          await saveDatabase(db);
+          sendJson(res, 200, result);
+        } catch (error) {
+          if (error.details?.record) {
+            await saveDatabase(db);
+          }
+          throw error;
+        }
         return;
       }
 

@@ -928,6 +928,7 @@ function upsertBackendAccount(account) {
 function normalizeBackendLesson(lesson) {
   return {
     id: `API-${lesson.id}`,
+    backendId: lesson.id,
     teacherId: lesson.teacherId,
     date: lesson.date,
     time: lesson.time,
@@ -940,7 +941,9 @@ function normalizeBackendLesson(lesson) {
     scanTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
     checkInTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
     checkOutTime: lesson.checkOutAt ? lesson.checkOutAt.slice(11, 16) : "",
-    note: lesson.status === "completed" ? "后端接口：签入签出完成" : "后端接口：等待后续签入签出",
+    note:
+      lesson.attendanceNote ||
+      (lesson.status === "completed" ? "后端接口：签入签出完成" : "后端接口：等待后续签入签出"),
     source: "backend-api",
   };
 }
@@ -2903,11 +2906,15 @@ function renderScanner() {
 
   const teacherId = currentRole() === "teacher" ? currentTeacherId() : state.selectedFinanceTeacherId;
   const lessons = teacherLessons(teacherId);
-  if (!lessons.some((lesson) => lesson.id === state.scannerLessonId)) {
-    state.scannerLessonId =
-      lessons.find((lesson) => lesson.status === "pending" || lesson.status === "checkedIn")?.id ||
-      lessons[0]?.id ||
-      "";
+  const actionableLesson = lessons.find(
+    (lesson) =>
+      lesson.status === "pending" ||
+      lesson.status === "checkedIn" ||
+      lesson.status === "scheduled",
+  );
+  const selectedLesson = lessons.find((lesson) => lesson.id === state.scannerLessonId);
+  if (!selectedLesson || !["pending", "checkedIn", "scheduled"].includes(selectedLesson.status)) {
+    state.scannerLessonId = actionableLesson?.id || lessons[0]?.id || "";
   }
 
   select.innerHTML = lessons
@@ -3331,7 +3338,7 @@ function actionCell(lesson) {
   if (lesson.teacherId !== currentTeacherId()) {
     return `<span class="muted">非本人任务</span>`;
   }
-  if (lesson.status === "pending") {
+  if (lesson.status === "pending" || lesson.status === "scheduled") {
     return `<button class="mini-button primary" data-attendance-action="checkIn" data-scan="${lesson.id}" type="button">签入</button>`;
   }
   if (lesson.status === "checkedIn") {
@@ -3339,9 +3346,6 @@ function actionCell(lesson) {
   }
   if (lesson.status === "completed") {
     return `<span class="muted">已完成</span>`;
-  }
-  if (lesson.status === "scheduled") {
-    return `<span class="muted">未到时间</span>`;
   }
   return `<button class="mini-button" data-review="${lesson.id}" type="button">查看原因</button>`;
 }
@@ -3481,7 +3485,7 @@ function validateQrPayload(decodedText, options = {}) {
 
   const statusPassed =
     Boolean(lesson) &&
-    ((action === "checkIn" && lesson.status === "pending") ||
+    ((action === "checkIn" && (lesson.status === "pending" || lesson.status === "scheduled")) ||
       (action === "checkOut" && lesson.status === "checkedIn"));
   pushCheck(
     checks,
@@ -3530,7 +3534,7 @@ function renderSecurityChecks() {
     .join("");
 }
 
-function handleDecodedScan(decodedText, options = {}) {
+async function handleDecodedScan(decodedText, options = {}) {
   state.lastScanText = decodedText;
   const validation = validateQrPayload(decodedText, options);
   state.lastSecurityChecks = validation.checks;
@@ -3543,7 +3547,7 @@ function handleDecodedScan(decodedText, options = {}) {
   }
 
   state.scannerLessonId = validation.lesson.id;
-  recordAttendance(validation.lesson.id, validation.action, validation.nowText);
+  await recordAttendance(validation.lesson.id, validation.action, validation.nowText, decodedText);
 }
 
 function selectedScannerActionContext() {
@@ -3559,18 +3563,49 @@ function selectedScannerActionContext() {
   };
 }
 
-function attemptSecureAttendance(id, action = null) {
+async function attemptSecureAttendance(id, action = null) {
   const lesson = state.lessons.find((item) => item.id === id);
   if (!lesson) return;
   const attendanceAction = action || actionForLesson(lesson);
-  handleDecodedScan(buildQrPayload(lesson), {
+  await handleDecodedScan(buildQrPayload(lesson), {
     action: attendanceAction,
     lessonId: lesson.id,
     nowText: demoTimeForAction(lesson, attendanceAction),
   });
 }
 
-function recordAttendance(id, action, nowText) {
+async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
+  try {
+    const result = await apiRequest(`/api/teachers/${currentTeacherId()}/attendance`, {
+      method: "POST",
+      body: {
+        lessonId: lesson.backendId || lesson.id,
+        action,
+        qrPayload,
+        occurredAt: nowText,
+      },
+    });
+    state.lastSecurityChecks = result.checks || state.lastSecurityChecks;
+    state.lastSecurityPassed = true;
+    const normalized = normalizeBackendLesson(result.lesson);
+    const index = state.lessons.findIndex((item) => item.id === lesson.id);
+    if (index >= 0) {
+      state.lessons[index] = normalized;
+    } else {
+      state.lessons.push(normalized);
+    }
+    const label = action === "checkIn" ? "签入" : "签出";
+    showToast(`${normalized.className} ${normalized.course} 后端${label}成功`);
+    render();
+  } catch (error) {
+    state.lastSecurityChecks = error.details?.checks || state.lastSecurityChecks;
+    state.lastSecurityPassed = false;
+    showToast(error.message || "后端考勤提交失败");
+    render();
+  }
+}
+
+async function recordAttendance(id, action, nowText, qrPayload = "") {
   if (currentRole() !== "teacher") {
     showToast("只有老师账号可以提交考勤");
     return;
@@ -3583,7 +3618,13 @@ function recordAttendance(id, action, nowText) {
     render();
     return;
   }
-  if (action === "checkIn" && lesson.status !== "pending") {
+
+  if (backendMode() && lesson.source === "backend-api") {
+    await recordBackendAttendance(lesson, action, nowText, qrPayload || buildQrPayload(lesson));
+    return;
+  }
+
+  if (action === "checkIn" && lesson.status !== "pending" && lesson.status !== "scheduled") {
     showToast(`${lesson.className} ${lesson.course} 不能重复签入`);
     render();
     return;
@@ -3732,8 +3773,8 @@ function startCameraScanner() {
 
   qrScanner = new Html5QrcodeScanner("reader", scannerConfig, false);
   qrScanner.render(
-    (decodedText) => {
-      handleDecodedScan(decodedText, selectedScannerActionContext());
+    async (decodedText) => {
+      await handleDecodedScan(decodedText, selectedScannerActionContext());
     },
     () => {},
   );
@@ -3899,7 +3940,7 @@ document.addEventListener("click", async (event) => {
 
   const scanButton = event.target.closest("[data-scan]");
   if (scanButton) {
-    attemptSecureAttendance(scanButton.dataset.scan, scanButton.dataset.attendanceAction);
+    await attemptSecureAttendance(scanButton.dataset.scan, scanButton.dataset.attendanceAction);
     return;
   }
 
@@ -3950,14 +3991,14 @@ document.querySelector("#loginForm").addEventListener("submit", (event) => {
 document.querySelector("#logoutButton").addEventListener("click", logout);
 document.querySelector("#topLogoutButton").addEventListener("click", logout);
 
-document.querySelector("#scanNextLesson").addEventListener("click", (event) => {
+document.querySelector("#scanNextLesson").addEventListener("click", async (event) => {
   const lesson = state.lessons.find((item) => item.id === event.currentTarget.dataset.id);
-  attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
+  await attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
 });
 
-document.querySelector("#quickScan").addEventListener("click", (event) => {
+document.querySelector("#quickScan").addEventListener("click", async (event) => {
   const lesson = state.lessons.find((item) => item.id === event.currentTarget.dataset.id);
-  attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
+  await attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
 });
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
@@ -4113,23 +4154,23 @@ document.querySelector("#regenerateUnlockedSchedule").addEventListener("click", 
   regenerateUnlockedSchedule();
 });
 
-document.querySelector("#simulateQrRead").addEventListener("click", () => {
+document.querySelector("#simulateQrRead").addEventListener("click", async () => {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
   const action = actionForLesson(lesson);
-  handleDecodedScan(buildQrPayload(lesson), {
+  await handleDecodedScan(buildQrPayload(lesson), {
     action,
     lessonId: lesson.id,
     nowText: demoTimeForAction(lesson, action),
   });
 });
 
-document.querySelector("#simulateOutOfWindowQr").addEventListener("click", () => {
+document.querySelector("#simulateOutOfWindowQr").addEventListener("click", async () => {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
   const originalNow = state.demoNow;
   state.demoNow = "2026-06-09T12:30:00+08:00";
-  handleDecodedScan(buildQrPayload(lesson), {
+  await handleDecodedScan(buildQrPayload(lesson), {
     action: actionForLesson(lesson),
     lessonId: lesson.id,
     nowText: state.demoNow,
@@ -4137,12 +4178,12 @@ document.querySelector("#simulateOutOfWindowQr").addEventListener("click", () =>
   state.demoNow = originalNow;
 });
 
-document.querySelector("#simulateTamperedQr").addEventListener("click", () => {
+document.querySelector("#simulateTamperedQr").addEventListener("click", async () => {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
   const payload = JSON.parse(buildQrPayload(lesson));
   payload.room = "X999";
-  handleDecodedScan(JSON.stringify(payload), {
+  await handleDecodedScan(JSON.stringify(payload), {
     action: actionForLesson(lesson),
     lessonId: lesson.id,
     nowText: demoTimeForAction(lesson, actionForLesson(lesson)),
