@@ -560,6 +560,7 @@ const initialState = {
 
 const STORAGE_KEY = "schoolPayrollDemoStateV8";
 const SESSION_KEY = "schoolPayrollDemoSessionV1";
+const API_SESSION_KEY = "schoolPayrollApiSessionV1";
 const SECURITY_SECRET = "school-demo-signing-key";
 const loginUsers = [
   { username: "teacher", password: "123456", accountId: "teacher-li" },
@@ -569,9 +570,23 @@ const loginUsers = [
 
 let state = loadSavedState();
 let sessionAccountId = loadSession();
+let backendSession = loadBackendSession();
 let qrScanner = null;
+let financeTeacherPage = {
+  items: [],
+  meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
+  page: 1,
+  pageSize: 20,
+  search: "",
+  loaded: false,
+  loading: false,
+  error: "",
+};
 
-if (sessionAccountId && state.accounts.some((account) => account.id === sessionAccountId)) {
+if (backendSession?.account) {
+  sessionAccountId = upsertBackendAccount(backendSession.account);
+  state.currentAccountId = sessionAccountId;
+} else if (sessionAccountId && state.accounts.some((account) => account.id === sessionAccountId)) {
   state.currentAccountId = sessionAccountId;
 } else {
   sessionAccountId = "";
@@ -734,6 +749,162 @@ function clearSession() {
   } catch (error) {
     // Nothing else to do.
   }
+}
+
+function apiEnabled() {
+  return window.location.protocol === "http:" || window.location.protocol === "https:";
+}
+
+function loadBackendSession() {
+  try {
+    const raw = window.localStorage.getItem(API_SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveBackendSession(session) {
+  backendSession = session;
+  try {
+    window.localStorage.setItem(API_SESSION_KEY, JSON.stringify(session));
+  } catch (error) {
+    // API session persistence is best-effort.
+  }
+}
+
+function clearBackendSession() {
+  backendSession = null;
+  try {
+    window.localStorage.removeItem(API_SESSION_KEY);
+  } catch (error) {
+    // Nothing else to do.
+  }
+}
+
+async function apiRequest(path, options = {}) {
+  if (!apiEnabled()) throw new Error("当前是文件模式，未连接后端 API");
+  const headers = {
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+    ...(backendSession?.token ? { Authorization: `Bearer ${backendSession.token}` } : {}),
+    ...(options.headers || {}),
+  };
+  const response = await fetch(path, {
+    ...options,
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+  if (!response.ok) {
+    const message = payload?.error?.message || `API 请求失败：${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+function roleTitle(role) {
+  if (role === "teacher") return "老师账号";
+  if (role === "finance") return "财务账号";
+  if (role === "admin") return "行政账号";
+  return "系统账号";
+}
+
+function normalizeBackendTeacher(teacher) {
+  if (!teacher) return null;
+  return {
+    id: teacher.id,
+    name: teacher.name,
+    department: teacher.department || teacher.stageName || "未设置学部",
+    subject: teacher.primarySubjectName || "未设置学科",
+    grade: teacher.stageName || teacher.department || "未设置年级",
+    position: teacher.title || "任课教师",
+    boundDeviceId: "backend-web",
+    salaryProfile: {
+      baseSalary: 6500,
+      positionSalary: 1500,
+      homeroomAllowance: 0,
+      masterTeacherBonus: teacher.title === "高级教师" ? 500 : 0,
+      approvedOvertimeHours: 0,
+    },
+  };
+}
+
+function upsertTeacher(teacher) {
+  if (!teacher) return;
+  const normalized = normalizeBackendTeacher(teacher);
+  const index = state.teachers.findIndex((item) => item.id === normalized.id);
+  if (index >= 0) {
+    state.teachers[index] = {
+      ...state.teachers[index],
+      ...normalized,
+    };
+  } else {
+    state.teachers.push(normalized);
+  }
+}
+
+function upsertBackendAccount(account) {
+  const teacher = account.teacher || null;
+  upsertTeacher(teacher);
+  const accountId = `backend-${account.id}`;
+  const nextAccount = {
+    id: accountId,
+    role: account.role,
+    name: account.name,
+    title: roleTitle(account.role),
+    teacherId: account.teacherId || teacher?.id || null,
+    department: account.department || teacher?.department || "",
+    deviceId: "backend-web",
+    source: "backend",
+  };
+  const index = state.accounts.findIndex((item) => item.id === accountId);
+  if (index >= 0) {
+    state.accounts[index] = {
+      ...state.accounts[index],
+      ...nextAccount,
+    };
+  } else {
+    state.accounts.push(nextAccount);
+  }
+  return accountId;
+}
+
+function normalizeBackendLesson(lesson) {
+  return {
+    id: `API-${lesson.id}`,
+    teacherId: lesson.teacherId,
+    date: lesson.date,
+    time: lesson.time,
+    className: lesson.className,
+    course: lesson.subjectName,
+    room: lesson.roomId,
+    type: lesson.type || "regular",
+    units: lesson.units || 1,
+    status: lesson.status,
+    scanTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
+    checkInTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
+    checkOutTime: lesson.checkOutAt ? lesson.checkOutAt.slice(11, 16) : "",
+    note: lesson.status === "completed" ? "后端接口：签入签出完成" : "后端接口：等待后续签入签出",
+    source: "backend-api",
+  };
+}
+
+function mergeBackendLessons(teacherId, lessons) {
+  state.lessons = state.lessons.filter(
+    (lesson) => !(lesson.source === "backend-api" && lesson.teacherId === teacherId),
+  );
+  state.lessons = state.lessons.concat(lessons.map(normalizeBackendLesson));
+}
+
+function backendMode() {
+  return Boolean(backendSession?.token && apiEnabled());
 }
 
 function currentAccount() {
@@ -1186,6 +1357,116 @@ function financeGroupRows() {
     group.net += salary.net;
   });
   return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key, "zh-CN"));
+}
+
+function backendTeacherSubject(teacher) {
+  return teacher.primarySubjectName || teacher.subject || "未设置学科";
+}
+
+function backendTeacherDepartment(teacher) {
+  return teacher.department || teacher.stageName || "未设置学部";
+}
+
+function backendFinanceGroupKey(teacher) {
+  if (state.financeGroupBy === "subject") return backendTeacherSubject(teacher);
+  if (state.financeGroupBy === "grade") return teacher.stageName || teacher.grade || "未设置年级";
+  return backendTeacherDepartment(teacher);
+}
+
+function backendFinanceGroupRows() {
+  const groups = new Map();
+  financeTeacherPage.items.forEach((teacher) => {
+    const key = backendFinanceGroupKey(teacher);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        teacherCount: 0,
+        completedUnits: 0,
+        pendingCount: 0,
+        exceptionCount: 0,
+        gross: 0,
+        net: 0,
+      });
+    }
+    const group = groups.get(key);
+    group.teacherCount += 1;
+    group.completedUnits += teacher.summary?.completedUnits || 0;
+    group.pendingCount += teacher.summary?.pendingCount || 0;
+    group.exceptionCount += teacher.summary?.exceptionCount || 0;
+    group.gross += teacher.payroll?.grossPay || 0;
+    group.net += teacher.payroll?.netPay || 0;
+  });
+  return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key, "zh-CN"));
+}
+
+function financePageTotals() {
+  return financeTeacherPage.items.reduce(
+    (totals, teacher) => {
+      totals.pending += teacher.summary?.pendingCount || 0;
+      totals.exception += teacher.summary?.exceptionCount || 0;
+      totals.gross += teacher.payroll?.grossPay || 0;
+      totals.net += teacher.payroll?.netPay || 0;
+      return totals;
+    },
+    { pending: 0, exception: 0, gross: 0, net: 0 },
+  );
+}
+
+async function loadBackendTeacherContext(teacherId, weekStart = state.selectedScheduleWeekStart || "2026-06-15") {
+  if (!backendMode() || !teacherId) return;
+  try {
+    state.selectedScheduleWeekStart = weekStart;
+    const schedule = await apiRequest(`/api/teachers/${teacherId}/schedule?weekStart=${weekStart}`);
+    if (schedule.teacher) upsertTeacher(schedule.teacher);
+    mergeBackendLessons(teacherId, schedule.lessons || []);
+  } catch (error) {
+    showToast(error.message || "老师课表加载失败");
+  }
+}
+
+async function loadFinanceTeacherPage(overrides = {}) {
+  if (!backendMode()) return;
+  financeTeacherPage = {
+    ...financeTeacherPage,
+    ...overrides,
+    loading: true,
+    error: "",
+  };
+  const params = new URLSearchParams({
+    page: String(financeTeacherPage.page),
+    pageSize: String(financeTeacherPage.pageSize),
+    month: "2026-06",
+  });
+  if (financeTeacherPage.search) params.set("search", financeTeacherPage.search);
+
+  try {
+    const result = await apiRequest(`/api/teachers?${params.toString()}`);
+    financeTeacherPage = {
+      ...financeTeacherPage,
+      items: result.items || [],
+      meta: result.meta || financeTeacherPage.meta,
+      page: result.meta?.page || financeTeacherPage.page,
+      pageSize: result.meta?.pageSize || financeTeacherPage.pageSize,
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+    financeTeacherPage.items.forEach(upsertTeacher);
+    if (!financeTeacherPage.items.some((teacher) => teacher.id === state.selectedFinanceTeacherId)) {
+      state.selectedFinanceTeacherId = financeTeacherPage.items[0]?.id || state.selectedFinanceTeacherId;
+    }
+  } catch (error) {
+    financeTeacherPage = {
+      ...financeTeacherPage,
+      loaded: true,
+      loading: false,
+      error: error.message || "教师列表加载失败",
+    };
+  }
+
+  if (["finance", "financeRecords", "settlement"].includes(state.activeView)) {
+    render();
+  }
 }
 
 function buildWarnings(teacherId = null) {
@@ -1810,6 +2091,11 @@ function renderConfirmation() {
 }
 
 function renderFinanceDashboard() {
+  if (backendMode() && currentRole() === "finance") {
+    renderBackendFinanceDashboard();
+    return;
+  }
+
   if (!state.financeGroupBy) state.financeGroupBy = "department";
   const allPending = state.lessons.filter(
     (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
@@ -1824,6 +2110,17 @@ function renderFinanceDashboard() {
   document.querySelector("#financeSettledCount").textContent = settledCount;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
   document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
+  const financeApiStatus = document.querySelector("#financeApiStatus");
+  const financePageInfo = document.querySelector("#financeTeacherPageInfo");
+  if (financeApiStatus) {
+    financeApiStatus.textContent = "本地演示数据";
+    financeApiStatus.className = "status-pill";
+  }
+  if (financePageInfo) {
+    financePageInfo.textContent = `本地演示 · 共 ${state.teachers.length} 位老师`;
+  }
+  document.querySelector("#financePrevPage").disabled = true;
+  document.querySelector("#financeNextPage").disabled = true;
 
   document.querySelectorAll("[data-finance-group]").forEach((button) => {
     button.classList.toggle("active", button.dataset.financeGroup === state.financeGroupBy);
@@ -1866,6 +2163,85 @@ function renderFinanceDashboard() {
       `;
     })
     .join("");
+}
+
+function renderBackendFinanceDashboard() {
+  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
+    loadFinanceTeacherPage();
+  }
+
+  if (!state.financeGroupBy) state.financeGroupBy = "department";
+  const totals = financePageTotals();
+  const meta = financeTeacherPage.meta || { page: 1, pageSize: 20, total: 0, totalPages: 1 };
+
+  document.querySelector("#financeTeacherCount").textContent = meta.total || 0;
+  document.querySelector("#financePendingCount").textContent = totals.pending;
+  document.querySelector("#financeWarningCount").textContent = totals.exception;
+  document.querySelector("#financeSettledCount").textContent = "0";
+  document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
+  document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
+
+  const searchInput = document.querySelector("#financeTeacherSearch");
+  const pageSizeSelect = document.querySelector("#financeTeacherPageSize");
+  const pageInfo = document.querySelector("#financeTeacherPageInfo");
+  const status = document.querySelector("#financeApiStatus");
+  if (searchInput) searchInput.value = financeTeacherPage.search;
+  if (pageSizeSelect) pageSizeSelect.value = String(financeTeacherPage.pageSize);
+  if (pageInfo) pageInfo.textContent = `第 ${meta.page || 1} / ${meta.totalPages || 1} 页 · 共 ${meta.total || 0} 位老师`;
+  if (status) {
+    status.textContent = financeTeacherPage.loading
+      ? "正在读取后端教师分页"
+      : financeTeacherPage.error || "已连接后端教师接口";
+    status.className = financeTeacherPage.error ? "status-pill warning" : "status-pill done";
+  }
+
+  document.querySelector("#financePrevPage").disabled = financeTeacherPage.loading || (meta.page || 1) <= 1;
+  document.querySelector("#financeNextPage").disabled =
+    financeTeacherPage.loading || (meta.page || 1) >= (meta.totalPages || 1);
+
+  document.querySelectorAll("[data-finance-group]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.financeGroup === state.financeGroupBy);
+  });
+
+  document.querySelector("#financeGroupTable").innerHTML = backendFinanceGroupRows()
+    .map(
+      (group) => `
+        <tr>
+          <td class="row-title" data-label="分组">${group.key}</td>
+          <td data-label="人数">${group.teacherCount} 人</td>
+          <td data-label="已完成课时">${group.completedUnits} 节</td>
+          <td data-label="待处理">${group.pendingCount} 节</td>
+          <td data-label="异常">${group.exceptionCount} 条</td>
+          <td data-label="应发合计">${formatCurrency(group.gross)}</td>
+          <td data-label="实发合计">${formatCurrency(group.net)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+
+  document.querySelector("#financeOverviewTable").innerHTML = financeTeacherPage.loading
+    ? `<tr><td colspan="8"><div class="empty-state">正在加载后端教师列表...</div></td></tr>`
+    : financeTeacherPage.error
+      ? `<tr><td colspan="8"><div class="empty-state">${financeTeacherPage.error}</div></td></tr>`
+      : financeTeacherPage.items
+          .map(
+            (teacher) => `
+              <tr>
+                <td class="row-title" data-label="老师">${teacher.name}</td>
+                <td data-label="学部/学科">${backendTeacherDepartment(teacher)} · ${backendTeacherSubject(teacher)}</td>
+                <td data-label="已完成课时">${teacher.summary?.completedUnits || 0} 节</td>
+                <td data-label="待处理">${teacher.summary?.pendingCount || 0} 节</td>
+                <td data-label="异常">${teacher.summary?.exceptionCount || 0} 条</td>
+                <td data-label="预计实发">${formatCurrency(teacher.payroll?.netPay || 0)}</td>
+                <td data-label="结算状态"><span class="tag">后端试算</span></td>
+                <td data-label="操作">
+                  <button class="mini-button" data-finance-records="${teacher.id}" type="button">看记录</button>
+                  <button class="mini-button primary" data-finance-settle="${teacher.id}" type="button">结算</button>
+                </td>
+              </tr>
+            `,
+          )
+          .join("");
 }
 
 function renderFinanceRecords() {
@@ -2487,22 +2863,78 @@ function loginAccount(accountId) {
   render();
 }
 
-function authenticate(username, password) {
+function authenticateDemo(username, password, fallbackMessage = "用户名或密码不正确") {
   const matched = loginUsers.find(
     (user) => user.username === username.trim() && user.password === password,
   );
   if (!matched) {
-    document.querySelector("#loginError").textContent = "用户名或密码不正确";
-    return;
+    document.querySelector("#loginError").textContent = fallbackMessage;
+    return false;
   }
   document.querySelector("#loginError").textContent = "";
+  clearBackendSession();
   loginAccount(matched.accountId);
+  return true;
+}
+
+async function authenticate(username, password) {
+  const loginButton = document.querySelector("#loginForm button[type='submit']");
+  const trimmedUsername = username.trim();
+  loginButton.disabled = true;
+  document.querySelector("#loginError").textContent = "";
+
+  if (apiEnabled()) {
+    try {
+      const payload = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: {
+          username: trimmedUsername,
+          password,
+        },
+      });
+      saveBackendSession({
+        token: payload.token,
+        account: payload.account,
+      });
+      const accountId = upsertBackendAccount(payload.account);
+      loginAccount(accountId);
+      if (payload.account.role === "teacher") {
+        await loadBackendTeacherContext(payload.account.teacherId, "2026-06-15");
+      }
+      if (payload.account.role === "finance") {
+        financeTeacherPage = {
+          ...financeTeacherPage,
+          page: 1,
+          loaded: false,
+          error: "",
+        };
+        await loadFinanceTeacherPage({ page: 1 });
+      }
+      render();
+      loginButton.disabled = false;
+      return;
+    } catch (error) {
+      const demoAccepted = authenticateDemo(trimmedUsername, password, error.message || "后端登录失败");
+      loginButton.disabled = false;
+      if (!demoAccepted && error.message) {
+        document.querySelector("#loginError").textContent = error.message;
+      }
+      return;
+    }
+  }
+
+  authenticateDemo(trimmedUsername, password);
+  loginButton.disabled = false;
 }
 
 function logout() {
   if (qrScanner) stopCameraScanner();
   sessionAccountId = "";
   clearSession();
+  if (backendMode()) {
+    apiRequest("/api/auth/logout", { method: "POST" }).catch(() => {});
+  }
+  clearBackendSession();
   document.querySelector("#loginPassword").value = "";
   render();
 }
@@ -2517,7 +2949,7 @@ function showToast(text) {
   }, 2200);
 }
 
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const demoLoginButton = event.target.closest("[data-demo-login]");
   if (demoLoginButton) {
     document.querySelector("#loginUsername").value = demoLoginButton.dataset.demoLogin;
@@ -2560,6 +2992,9 @@ document.addEventListener("click", (event) => {
   const financeRecordsButton = event.target.closest("[data-finance-records]");
   if (financeRecordsButton) {
     state.selectedFinanceTeacherId = financeRecordsButton.dataset.financeRecords;
+    if (backendMode()) {
+      await loadBackendTeacherContext(state.selectedFinanceTeacherId);
+    }
     switchView("financeRecords");
     return;
   }
@@ -2567,6 +3002,9 @@ document.addEventListener("click", (event) => {
   const financeSettleButton = event.target.closest("[data-finance-settle]");
   if (financeSettleButton) {
     state.selectedFinanceTeacherId = financeSettleButton.dataset.financeSettle;
+    if (backendMode()) {
+      await loadBackendTeacherContext(state.selectedFinanceTeacherId);
+    }
     switchView("settlement");
   }
 });
@@ -2576,7 +3014,9 @@ document.querySelector("#loginForm").addEventListener("submit", (event) => {
   authenticate(
     document.querySelector("#loginUsername").value,
     document.querySelector("#loginPassword").value,
-  );
+  ).catch((error) => {
+    document.querySelector("#loginError").textContent = error.message || "登录失败";
+  });
 });
 
 document.querySelector("#logoutButton").addEventListener("click", logout);
@@ -2643,6 +3083,36 @@ document.querySelectorAll("[data-finance-group]").forEach((button) => {
     state.financeGroupBy = button.dataset.financeGroup;
     renderFinanceDashboard();
   });
+});
+
+document.querySelector("#financeTeacherSearchButton").addEventListener("click", () => {
+  financeTeacherPage.search = document.querySelector("#financeTeacherSearch").value.trim();
+  financeTeacherPage.pageSize = Number.parseInt(document.querySelector("#financeTeacherPageSize").value, 10);
+  loadFinanceTeacherPage({ page: 1 });
+});
+
+document.querySelector("#financeTeacherSearch").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  financeTeacherPage.search = event.currentTarget.value.trim();
+  financeTeacherPage.pageSize = Number.parseInt(document.querySelector("#financeTeacherPageSize").value, 10);
+  loadFinanceTeacherPage({ page: 1 });
+});
+
+document.querySelector("#financeTeacherPageSize").addEventListener("change", (event) => {
+  financeTeacherPage.pageSize = Number.parseInt(event.target.value, 10);
+  loadFinanceTeacherPage({ page: 1 });
+});
+
+document.querySelector("#financePrevPage").addEventListener("click", () => {
+  const nextPage = Math.max((financeTeacherPage.meta?.page || financeTeacherPage.page) - 1, 1);
+  loadFinanceTeacherPage({ page: nextPage });
+});
+
+document.querySelector("#financeNextPage").addEventListener("click", () => {
+  const meta = financeTeacherPage.meta || { page: 1, totalPages: 1 };
+  const nextPage = Math.min((meta.page || 1) + 1, meta.totalPages || 1);
+  loadFinanceTeacherPage({ page: nextPage });
 });
 
 document.querySelector("#qrLessonSelect").addEventListener("change", (event) => {
@@ -2744,3 +3214,12 @@ document.querySelector("#settleTeacherPayroll").addEventListener("click", () => 
 });
 
 render();
+
+if (backendMode()) {
+  if (currentRole() === "teacher") {
+    loadBackendTeacherContext(currentTeacherId(), "2026-06-15").then(render);
+  }
+  if (currentRole() === "finance") {
+    loadFinanceTeacherPage({ page: financeTeacherPage.page });
+  }
+}

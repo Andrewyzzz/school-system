@@ -323,6 +323,7 @@ export function queryTeachers(db, query = {}) {
   const stageId = String(query.stageId || "").trim();
   const subjectId = String(query.subjectId || "").trim();
   const status = String(query.status || "active").trim();
+  const month = String(query.month || "2026-06").trim();
 
   const filtered = db.teachers.filter((teacher) => {
     if (status && teacher.status !== status) return false;
@@ -343,7 +344,22 @@ export function queryTeachers(db, query = {}) {
   });
 
   const start = (page - 1) * pageSize;
-  const items = filtered.slice(start, start + pageSize);
+  const items = filtered.slice(start, start + pageSize).map((teacher) => {
+    const summary = teacherLessonSummary(db, teacher.id, month);
+    const payroll = teacherPayrollPreview(db, teacher.id, month);
+    return {
+      ...teacher,
+      summary,
+      payroll: payroll
+        ? {
+            grossPay: payroll.grossPay,
+            netPay: payroll.netPay,
+            lessonAmount: payroll.lessonAmount,
+            lineCount: payroll.lines.length,
+          }
+        : null,
+    };
+  });
 
   return {
     items,
@@ -354,6 +370,27 @@ export function queryTeachers(db, query = {}) {
       totalPages: Math.max(Math.ceil(filtered.length / pageSize), 1),
     },
   };
+}
+
+export function teacherLessonSummary(db, teacherId, month = "2026-06") {
+  const lessons = db.lessonInstances.filter(
+    (lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month),
+  );
+  return lessons.reduce(
+    (summary, lesson) => {
+      summary.total += 1;
+      if (lesson.status === "completed") summary.completedUnits += lesson.units;
+      if (lesson.status === "scheduled" || lesson.status === "checkedIn") summary.pendingCount += 1;
+      if (lesson.status === "exception") summary.exceptionCount += 1;
+      return summary;
+    },
+    {
+      total: 0,
+      completedUnits: 0,
+      pendingCount: 0,
+      exceptionCount: 0,
+    },
+  );
 }
 
 export function teacherLessonsForWeek(db, teacherId, weekStart) {

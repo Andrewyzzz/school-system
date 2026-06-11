@@ -651,6 +651,22 @@
                 <h2 id="financeTitle">老师薪资结算概览</h2>
                 <p>财务账号可以查看不同老师的考勤记录和工资试算，并完成月度结算。</p>
               </div>
+              <span class="status-pill" id="financeApiStatus">本地演示数据</span>
+            </div>
+            <div class="finance-list-toolbar" aria-label="教师列表筛选">
+              <label class="field-label" for="financeTeacherSearch">
+                搜索老师
+                <input id="financeTeacherSearch" type="search" placeholder="姓名、工号、学科、手机号" />
+              </label>
+              <label class="field-label compact-field" for="financeTeacherPageSize">
+                每页
+                <select class="lesson-select" id="financeTeacherPageSize">
+                  <option value="10">10 人</option>
+                  <option value="20" selected>20 人</option>
+                  <option value="50">50 人</option>
+                </select>
+              </label>
+              <button class="ghost-button" id="financeTeacherSearchButton" type="button">查询</button>
             </div>
             <div class="table-wrap">
               <table>
@@ -668,6 +684,11 @@
                 </thead>
                 <tbody id="financeOverviewTable"></tbody>
               </table>
+            </div>
+            <div class="table-pagination" aria-label="教师列表分页">
+              <button class="mini-button" id="financePrevPage" type="button">上一页</button>
+              <span id="financeTeacherPageInfo">第 1 / 1 页 · 共 0 位老师</span>
+              <button class="mini-button" id="financeNextPage" type="button">下一页</button>
             </div>
           </section>
         </section>
