@@ -44,7 +44,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -63,6 +64,7 @@ input {
 }
 
 input:focus,
+textarea:focus,
 select:focus,
 button:focus-visible {
   outline: 2px solid rgba(0, 32, 104, 0.18);
@@ -615,6 +617,67 @@ h2 {
 
 .admin-schedule-selectors .lesson-select {
   margin-bottom: 0;
+}
+
+.teacher-import-panel,
+.import-feedback-panel {
+  margin-bottom: 16px;
+}
+
+.import-textarea {
+  width: 100%;
+  min-height: 220px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 12px;
+  resize: vertical;
+  line-height: 1.55;
+  font-family:
+    "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.import-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.import-message-list {
+  display: grid;
+  gap: 10px;
+}
+
+.import-message {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.import-message.error {
+  border-color: rgba(188, 0, 12, 0.24);
+  background: var(--rose-soft);
+}
+
+.import-message.warning {
+  border-color: rgba(138, 90, 0, 0.24);
+  background: var(--amber-soft);
+}
+
+.import-message strong,
+.import-message span {
+  display: block;
+}
+
+.import-message span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .rule-list,

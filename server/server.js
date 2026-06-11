@@ -3,13 +3,14 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword } from "./auth.js";
-import { previewTeacherImport } from "./importTeachers.js";
+import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
   ensureDatabase,
   findAccountByUsername,
   findTeacher,
   publicAccount,
   queryTeachers,
+  saveDatabase,
   teacherLessonsForWeek,
   teacherPayrollPreview,
 } from "./storage.js";
@@ -181,6 +182,17 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/teachers/import/commit") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const csvText = String(body.csvText || "");
+      const result = commitTeacherImport(db, csvText, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/teachers/me") {
       const auth = requireAuth(req, res, db, ["teacher"]);
       if (!auth) return;
@@ -230,7 +242,13 @@ async function handleApi(req, res, db, url) {
     sendError(res, 404, "接口不存在");
   } catch (error) {
     const isBadJson = error instanceof SyntaxError;
-    sendError(res, isBadJson ? 400 : 500, isBadJson ? "请求 JSON 格式错误" : "服务端错误", error.message);
+    const statusCode = isBadJson ? 400 : error.statusCode || 500;
+    sendError(
+      res,
+      statusCode,
+      isBadJson ? "请求 JSON 格式错误" : error.statusCode ? error.message : "服务端错误",
+      error.details || error.message,
+    );
   }
 }
 

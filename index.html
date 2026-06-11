@@ -77,6 +77,10 @@
             <span aria-hidden="true">▦</span>
             行政排课
           </button>
+          <button class="nav-item" data-view="teacherImport" data-role="admin" type="button">
+            <span aria-hidden="true">⇧</span>
+            教师导入
+          </button>
           <button class="nav-item" data-view="notifications" data-role="teacher,finance" type="button">
             <span aria-hidden="true">✉</span>
             通知中心
@@ -430,6 +434,96 @@
               </label>
             </div>
             <div class="schedule-week-grid" id="adminScheduleGrid"></div>
+          </section>
+        </section>
+
+        <section class="view" id="teacherImportView" aria-labelledby="teacherImportTitle">
+          <div class="summary-grid">
+            <article class="metric">
+              <span>CSV 行数</span>
+              <strong id="teacherImportTotalRows">0</strong>
+              <small>不含表头</small>
+            </article>
+            <article class="metric">
+              <span>可导入</span>
+              <strong id="teacherImportValidRows">0</strong>
+              <small>校验通过</small>
+            </article>
+            <article class="metric alert">
+              <span>错误行</span>
+              <strong id="teacherImportErrorRows">0</strong>
+              <small>需修正后导入</small>
+            </article>
+            <article class="metric">
+              <span>已写入</span>
+              <strong id="teacherImportImportedCount">0</strong>
+              <small>本次确认导入</small>
+            </article>
+          </div>
+
+          <section class="panel teacher-import-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="teacherImportTitle">教师账号批量导入</h2>
+                <p>行政先粘贴教师 CSV，系统检查工号、用户名、学部和科目，确认无误后创建教师档案和账号。</p>
+              </div>
+              <span class="status-pill" id="teacherImportStatus">等待连接</span>
+            </div>
+            <label class="field-label" for="teacherImportCsv">教师导入 CSV</label>
+            <textarea
+              class="import-textarea"
+              id="teacherImportCsv"
+              spellcheck="false"
+              placeholder="employeeNo,name,stageId,department,primarySubjectId,title,phone,hiredAt,username,defaultPassword,status"
+            ></textarea>
+            <div class="import-actions">
+              <button class="ghost-button" id="loadTeacherImportTemplate" type="button">
+                填入模板
+              </button>
+              <button class="ghost-button" id="previewTeacherImport" type="button">
+                预览校验
+              </button>
+              <button class="primary-button" id="commitTeacherImport" type="button">
+                <span aria-hidden="true">✓</span>
+                确认导入
+              </button>
+            </div>
+          </section>
+
+          <section class="panel import-feedback-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>校验结果</h2>
+                <p>错误必须全部处理后才能确认导入；提醒不会阻断导入。</p>
+              </div>
+            </div>
+            <div class="import-message-list" id="teacherImportMessages"></div>
+          </section>
+
+          <section class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>导入预览</h2>
+                <p>最多展示前 20 行，确认导入时会处理 CSV 中全部通过校验的行。</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>行号</th>
+                    <th>工号</th>
+                    <th>姓名</th>
+                    <th>学部</th>
+                    <th>部门</th>
+                    <th>科目</th>
+                    <th>用户名</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="teacherImportPreviewTable"></tbody>
+              </table>
+            </div>
           </section>
         </section>
 

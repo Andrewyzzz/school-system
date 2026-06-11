@@ -582,6 +582,15 @@ let financeTeacherPage = {
   loading: false,
   error: "",
 };
+let teacherImportState = {
+  csvText: "",
+  preview: null,
+  previewCsvText: "",
+  imported: null,
+  committedCsvText: "",
+  loading: false,
+  error: "",
+};
 
 if (backendSession?.account) {
   sessionAccountId = upsertBackendAccount(backendSession.account);
@@ -612,6 +621,11 @@ const views = {
     role: "admin",
     title: "行政排课",
     el: document.querySelector("#adminSchedulingView"),
+  },
+  teacherImport: {
+    role: "admin",
+    title: "教师导入",
+    el: document.querySelector("#teacherImportView"),
   },
   notifications: {
     role: "teacher,finance",
@@ -685,6 +699,23 @@ const confirmSteps = [
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function buildTeacherImportTemplate() {
+  const seed = String(Date.now()).slice(-5);
+  return `employeeNo,name,stageId,department,primarySubjectId,title,phone,hiredAt,username,defaultPassword,status
+FY${seed}1,导入老师A,primary,小学部,chinese,任课教师,139${seed}001,2026-09-01,teacher${seed}1,123456,active
+FY${seed}2,导入老师B,middle,初中部,math,骨干教师,139${seed}002,2026-09-01,teacher${seed}2,123456,active
+FY${seed}3,导入老师C,high,高中部,english,高级教师,139${seed}003,2026-09-01,teacher${seed}3,123456,active`;
 }
 
 function loadSavedState() {
@@ -804,6 +835,7 @@ async function apiRequest(path, options = {}) {
     const message = payload?.error?.message || `API 请求失败：${response.status}`;
     const error = new Error(message);
     error.status = response.status;
+    error.details = payload?.error?.details || null;
     throw error;
   }
   return payload;
@@ -1469,6 +1501,113 @@ async function loadFinanceTeacherPage(overrides = {}) {
   }
 }
 
+function syncTeacherImportText() {
+  const textarea = document.querySelector("#teacherImportCsv");
+  if (!textarea) return;
+  teacherImportState.csvText = textarea.value;
+}
+
+function resetTeacherImportPreviewForEdit() {
+  teacherImportState.preview = null;
+  teacherImportState.previewCsvText = "";
+  teacherImportState.imported = null;
+  teacherImportState.committedCsvText = "";
+  teacherImportState.error = "";
+}
+
+async function previewTeacherImportCsv() {
+  syncTeacherImportText();
+  const csvText = teacherImportState.csvText;
+  if (!backendMode() || currentRole() !== "admin") {
+    showToast("请通过后端服务登录行政账号后再导入");
+    return;
+  }
+  if (!csvText.trim()) {
+    showToast("请先粘贴教师 CSV");
+    return;
+  }
+
+  teacherImportState = {
+    ...teacherImportState,
+    loading: true,
+    error: "",
+    imported: null,
+    committedCsvText: "",
+  };
+  renderTeacherImport();
+
+  try {
+    const preview = await apiRequest("/api/teachers/import/preview", {
+      method: "POST",
+      body: { csvText },
+    });
+    teacherImportState = {
+      ...teacherImportState,
+      preview,
+      previewCsvText: csvText,
+      loading: false,
+      error: "",
+    };
+    showToast(preview.canImport ? `校验通过：${preview.validRows} 行可导入` : `发现 ${preview.errors.length} 条错误`);
+  } catch (error) {
+    teacherImportState = {
+      ...teacherImportState,
+      preview: error.details?.rows ? error.details : null,
+      previewCsvText: error.details?.rows ? csvText : "",
+      loading: false,
+      error: error.message || "导入预览失败",
+    };
+    showToast(teacherImportState.error);
+  }
+
+  renderTeacherImport();
+}
+
+async function commitTeacherImportCsv() {
+  syncTeacherImportText();
+  const csvText = teacherImportState.csvText;
+  if (!teacherImportState.preview?.canImport || teacherImportState.previewCsvText !== csvText) {
+    showToast("请先完成当前 CSV 的预览校验");
+    return;
+  }
+
+  teacherImportState = {
+    ...teacherImportState,
+    loading: true,
+    error: "",
+  };
+  renderTeacherImport();
+
+  try {
+    const result = await apiRequest("/api/teachers/import/commit", {
+      method: "POST",
+      body: { csvText },
+    });
+    teacherImportState = {
+      ...teacherImportState,
+      preview: result.preview || teacherImportState.preview,
+      previewCsvText: csvText,
+      imported: result,
+      committedCsvText: csvText,
+      loading: false,
+      error: "",
+    };
+    financeTeacherPage.loaded = false;
+    showToast(`已导入 ${result.importedCount} 位老师账号`);
+  } catch (error) {
+    teacherImportState = {
+      ...teacherImportState,
+      preview: error.details?.rows ? error.details : teacherImportState.preview,
+      previewCsvText: error.details?.rows ? csvText : teacherImportState.previewCsvText,
+      loading: false,
+      error: error.message || "确认导入失败",
+    };
+    showToast(teacherImportState.error);
+  }
+
+  renderTeacherImport();
+}
+
 function buildWarnings(teacherId = null) {
   const lessons = teacherId ? teacherLessons(teacherId) : state.lessons;
   const warnings = [];
@@ -1539,6 +1678,7 @@ function render() {
   renderTasks();
   renderSchedule();
   renderAdminScheduling();
+  renderTeacherImport();
   renderScanner();
   renderRecords();
   renderConfirmation();
@@ -1908,6 +2048,174 @@ function renderAdminScheduling() {
 
   document.querySelector("#confirmSchedule").disabled =
     assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
+}
+
+function renderTeacherImport() {
+  const container = document.querySelector("#teacherImportView");
+  if (!container) return;
+
+  const textarea = document.querySelector("#teacherImportCsv");
+  const status = document.querySelector("#teacherImportStatus");
+  const preview = teacherImportState.preview;
+  const imported = teacherImportState.imported;
+  const connected = backendMode() && currentRole() === "admin";
+  const currentCsv = teacherImportState.csvText.trim();
+  const previewMatchesCsv = Boolean(preview) && teacherImportState.previewCsvText.trim() === currentCsv;
+  const alreadyCommitted = Boolean(currentCsv) && teacherImportState.committedCsvText.trim() === currentCsv;
+
+  if (textarea && document.activeElement !== textarea) {
+    textarea.value = teacherImportState.csvText;
+  }
+
+  document.querySelector("#teacherImportTotalRows").textContent = preview?.totalRows || 0;
+  document.querySelector("#teacherImportValidRows").textContent = preview?.validRows || 0;
+  document.querySelector("#teacherImportErrorRows").textContent = preview?.errorRows || 0;
+  document.querySelector("#teacherImportImportedCount").textContent = imported?.importedCount || 0;
+
+  if (status) {
+    status.textContent = teacherImportState.loading
+      ? "处理中"
+      : teacherImportState.error
+        ? teacherImportState.error
+        : connected
+          ? "已连接后端导入接口"
+          : "请通过后端服务登录行政账号";
+    status.className = teacherImportState.error
+      ? "status-pill warning"
+      : connected
+        ? "status-pill done"
+        : "status-pill";
+  }
+
+  const previewButton = document.querySelector("#previewTeacherImport");
+  const commitButton = document.querySelector("#commitTeacherImport");
+  if (previewButton) {
+    previewButton.disabled = teacherImportState.loading || !connected || !currentCsv;
+  }
+  if (commitButton) {
+    commitButton.disabled =
+      teacherImportState.loading ||
+      !connected ||
+      !currentCsv ||
+      !previewMatchesCsv ||
+      !preview?.canImport ||
+      alreadyCommitted;
+  }
+
+  renderTeacherImportMessages(preview, previewMatchesCsv, alreadyCommitted);
+  renderTeacherImportRows(preview);
+}
+
+function renderTeacherImportMessages(preview, previewMatchesCsv, alreadyCommitted) {
+  const list = document.querySelector("#teacherImportMessages");
+  if (!list) return;
+
+  if (teacherImportState.error && !preview) {
+    list.innerHTML = `
+      <article class="import-message error">
+        <strong>接口调用失败</strong>
+        <span>${escapeHtml(teacherImportState.error)}</span>
+      </article>
+    `;
+    return;
+  }
+
+  if (!preview) {
+    list.innerHTML = `<div class="empty-state">先粘贴 CSV，再点击“预览校验”。</div>`;
+    return;
+  }
+
+  const messages = [];
+  if (!previewMatchesCsv) {
+    messages.push({
+      type: "warning",
+      title: "CSV 已修改",
+      text: "当前内容与上次预览不一致，请重新预览校验后再导入。",
+    });
+  }
+  if (alreadyCommitted) {
+    messages.push({
+      type: "warning",
+      title: "本批次已提交",
+      text: "这份 CSV 已经确认导入，继续导入会产生重复账号，请修改内容后重新预览。",
+    });
+  }
+  if (preview.canImport && previewMatchesCsv && !alreadyCommitted) {
+    messages.push({
+      type: "success",
+      title: "校验通过",
+      text: `共 ${preview.validRows} 行可导入，点击“确认导入”后会创建教师档案和老师账号。`,
+    });
+  }
+
+  (preview.errors || []).slice(0, 12).forEach((item) => {
+    messages.push({
+      type: "error",
+      title: `第 ${item.rowNumber} 行 · ${item.field}`,
+      text: item.message,
+    });
+  });
+
+  (preview.warnings || []).slice(0, 8).forEach((item) => {
+    messages.push({
+      type: "warning",
+      title: `第 ${item.rowNumber} 行 · ${item.field}`,
+      text: item.message,
+    });
+  });
+
+  if ((preview.errors || []).length > 12) {
+    messages.push({
+      type: "warning",
+      title: "错误较多",
+      text: `还有 ${(preview.errors || []).length - 12} 条错误未展示，请优先修正前面的格式和重复项。`,
+    });
+  }
+
+  list.innerHTML = messages.length
+    ? messages
+        .map(
+          (message) => `
+            <article class="import-message ${message.type === "error" ? "error" : message.type === "warning" ? "warning" : ""}">
+              <strong>${escapeHtml(message.title)}</strong>
+              <span>${escapeHtml(message.text)}</span>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">暂无校验信息</div>`;
+}
+
+function renderTeacherImportRows(preview) {
+  const table = document.querySelector("#teacherImportPreviewTable");
+  if (!table) return;
+
+  if (!preview?.rows?.length) {
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">暂无导入预览</div></td></tr>`;
+    return;
+  }
+
+  const errorRows = new Set((preview.errors || []).map((item) => item.rowNumber));
+  table.innerHTML = preview.rows
+    .map(
+      (row) => `
+        <tr>
+          <td data-label="行号">${row.rowNumber}</td>
+          <td data-label="工号">${escapeHtml(row.employeeNo)}</td>
+          <td class="row-title" data-label="姓名">${escapeHtml(row.name)}</td>
+          <td data-label="学部">${escapeHtml(row.stageId)}</td>
+          <td data-label="部门">${escapeHtml(row.department)}</td>
+          <td data-label="科目">${escapeHtml(row.primarySubjectId)}</td>
+          <td data-label="用户名">${escapeHtml(row.username)}</td>
+          <td data-label="状态">${
+            errorRows.has(row.rowNumber)
+              ? `<span class="tag exception">有错误</span>`
+              : `<span class="tag completed">可导入</span>`
+          }</td>
+        </tr>
+      `,
+    )
+    .join("");
 }
 
 function adminSubjectConfigItem(subject) {
@@ -3034,6 +3342,25 @@ document.querySelector("#quickScan").addEventListener("click", (event) => {
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
+document.querySelector("#loadTeacherImportTemplate").addEventListener("click", () => {
+  teacherImportState = {
+    ...teacherImportState,
+    csvText: buildTeacherImportTemplate(),
+    preview: null,
+    previewCsvText: "",
+    imported: null,
+    committedCsvText: "",
+    error: "",
+  };
+  renderTeacherImport();
+});
+document.querySelector("#teacherImportCsv").addEventListener("input", () => {
+  syncTeacherImportText();
+  resetTeacherImportPreviewForEdit();
+  renderTeacherImport();
+});
+document.querySelector("#previewTeacherImport").addEventListener("click", previewTeacherImportCsv);
+document.querySelector("#commitTeacherImport").addEventListener("click", commitTeacherImportCsv);
 
 document.querySelector("#resetDemo").addEventListener("click", () => {
   if (qrScanner) stopCameraScanner();

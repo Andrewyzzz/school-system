@@ -1,3 +1,5 @@
+import { hashPassword } from "./auth.js";
+
 const REQUIRED_COLUMNS = ["employeeNo", "name", "stageId", "department", "primarySubjectId", "username"];
 const OPTIONAL_COLUMNS = ["title", "phone", "hiredAt", "defaultPassword", "status"];
 const ALL_COLUMNS = [...REQUIRED_COLUMNS, ...OPTIONAL_COLUMNS];
@@ -74,7 +76,49 @@ function validateDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
-export function previewTeacherImport(db, csvText = "") {
+function pad(number, length = 4) {
+  return String(number).padStart(length, "0");
+}
+
+function nextTeacherNumber(db) {
+  return db.teachers.reduce((max, teacher) => {
+    const matched = String(teacher.id || "").match(/^T(\d+)$/);
+    return matched ? Math.max(max, Number.parseInt(matched[1], 10)) : max;
+  }, 0) + 1;
+}
+
+function stageById(db, stageId) {
+  return db.stages.find((stage) => stage.id === stageId);
+}
+
+function subjectById(db, subjectId) {
+  return db.subjects.find((subject) => subject.id === subjectId);
+}
+
+function uniqueAccountId(db, teacherId) {
+  const baseId = `ACC-TEACHER-${teacherId.replace(/^T/, "")}`;
+  if (!db.accounts.some((account) => account.id === baseId)) return baseId;
+  let suffix = 1;
+  while (db.accounts.some((account) => account.id === `${baseId}-${suffix}`)) {
+    suffix += 1;
+  }
+  return `${baseId}-${suffix}`;
+}
+
+function publicImportedAccount(account) {
+  return {
+    id: account.id,
+    username: account.username,
+    role: account.role,
+    teacherId: account.teacherId,
+    name: account.name,
+    department: account.department,
+    status: account.status,
+    mustChangePassword: account.mustChangePassword,
+  };
+}
+
+export function previewTeacherImport(db, csvText = "", options = {}) {
   const { headers, rows } = parseCsv(csvText);
   const headerSet = new Set(headers);
   const missingColumns = REQUIRED_COLUMNS.filter((column) => !headerSet.has(column));
@@ -222,8 +266,86 @@ export function previewTeacherImport(db, csvText = "") {
     validRows: normalizedRows.filter((row) => !errorRows.has(row.rowNumber)).length,
     errorRows: errorRows.size,
     canImport: errors.length === 0,
-    rows: normalizedRows.slice(0, 20),
+    rows: options.includeAllRows ? normalizedRows : normalizedRows.slice(0, 20),
     errors,
     warnings,
+  };
+}
+
+export function commitTeacherImport(db, csvText = "", actorAccount = null) {
+  const preview = previewTeacherImport(db, csvText, { includeAllRows: true });
+  if (!preview.canImport) {
+    const error = new Error("导入数据未通过校验");
+    error.statusCode = 400;
+    error.details = preview;
+    throw error;
+  }
+
+  let teacherNumber = nextTeacherNumber(db);
+  const createdAt = new Date().toISOString();
+  const createdTeachers = [];
+  const createdAccounts = [];
+
+  preview.rows.forEach((row) => {
+    const teacherId = `T${pad(teacherNumber)}`;
+    teacherNumber += 1;
+    const stage = stageById(db, row.stageId);
+    const subject = subjectById(db, row.primarySubjectId);
+    const teacher = {
+      id: teacherId,
+      employeeNo: row.employeeNo,
+      name: row.name,
+      stageId: row.stageId,
+      stageName: stage?.name || row.department,
+      department: row.department || stage?.name || "",
+      primarySubjectId: row.primarySubjectId,
+      primarySubjectName: subject?.name || "",
+      title: row.title || "任课教师",
+      phone: row.phone,
+      status: row.status,
+      hiredAt: row.hiredAt || "2026-09-01",
+      source: "import",
+      createdAt,
+    };
+    const account = {
+      id: uniqueAccountId(db, teacherId),
+      username: row.username,
+      passwordHash: hashPassword(row.defaultPassword),
+      role: "teacher",
+      teacherId,
+      name: row.name,
+      department: teacher.department,
+      status: row.status,
+      mustChangePassword: true,
+      createdAt,
+    };
+
+    db.teachers.push(teacher);
+    db.accounts.push(account);
+    createdTeachers.push(teacher);
+    createdAccounts.push(publicImportedAccount(account));
+  });
+
+  db.meta.teacherCount = db.teachers.length;
+  db.meta.updatedAt = createdAt;
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "teacher_import_commit",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    importedCount: createdTeachers.length,
+    createdAt,
+  });
+
+  return {
+    importedCount: createdTeachers.length,
+    totalTeachers: db.teachers.length,
+    totalAccounts: db.accounts.length,
+    teachers: createdTeachers.slice(0, 20),
+    accounts: createdAccounts.slice(0, 20),
+    preview: {
+      ...preview,
+      rows: preview.rows.slice(0, 20),
+    },
   };
 }
