@@ -6,6 +6,6 @@
   "scripts": {
     "dev": "node server/server.js",
     "seed": "node server/seed.js",
-    "check": "node --check app.js && node --check server/auth.js && node --check server/storage.js && node --check server/seed.js && node --check server/server.js"
+    "check": "node --check app.js && node --check server/auth.js && node --check server/importTeachers.js && node --check server/storage.js && node --check server/seed.js && node --check server/server.js"
   }
 }

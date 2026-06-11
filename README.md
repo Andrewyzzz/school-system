@@ -55,6 +55,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/auth/login`：登录，返回 Token
 - `GET /api/me`：查看当前账号
 - `GET /api/teachers`：行政/财务分页查看教师列表
+- `POST /api/teachers/import/preview`：行政预览并校验教师导入 CSV
 - `GET /api/teachers/me`：老师查看本人教师信息
 - `GET /api/teachers/:teacherId/schedule`：查看老师自然周课表
 - `GET /api/teachers/:teacherId/payroll`：查看老师月度薪资试算
@@ -64,6 +65,13 @@ http://127.0.0.1:4173/api/health
 - 登录页优先连接后端登录接口，后端不可用时保留本地 Demo 登录。
 - 财务首页教师列表连接后端分页接口，可在约 1000 位教师账号中分页、搜索。
 - 老师账号登录后会读取后端自然周课表。
+
+第一阶段文档和模板：
+
+- 字段字典：`docs/phase1-field-dictionary.md`
+- 教师导入说明：`docs/teacher-import-guide.md`
+- 教师导入 CSV 模板：`templates/teacher-import-template.csv`
+- 数据库迁移方案：`docs/database-migration-plan.md`
 
 后端种子账号：
 

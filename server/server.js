@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword } from "./auth.js";
+import { previewTeacherImport } from "./importTeachers.js";
 import {
   ensureDatabase,
   findAccountByUsername,
@@ -168,6 +169,15 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/teachers/import/preview") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const csvText = String(body.csvText || "");
+      sendJson(res, 200, previewTeacherImport(db, csvText));
       return;
     }
 

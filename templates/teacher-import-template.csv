@@ -1,0 +1,4 @@
+employeeNo,name,stageId,department,primarySubjectId,title,phone,hiredAt,username,defaultPassword,status
+FY0001,李明,primary,小学部,chinese,任课教师,13800000001,2024-09-01,teacher0001,123456,active
+FY0002,王航,middle,初中部,math,骨干教师,13800000002,2023-09-01,teacher0002,123456,active
+FY0003,张宁,high,高中部,english,高级教师,13800000003,2022-09-01,teacher0003,123456,active
