@@ -174,6 +174,7 @@ export function buildSchedulingConfig(db, options = {}) {
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
   const subjects = schedulingSubjects(db, division);
+  const classes = schedulingClasses(db, division, grade);
 
   return {
     divisionId: division.id,
@@ -184,7 +185,12 @@ export function buildSchedulingConfig(db, options = {}) {
     grade: grade.grade,
     weekStart: division.weekStart,
     classCount: division.stageId === "high" ? 8 : division.stageId === "middle" ? 8 : 10,
-    classes: schedulingClasses(db, division, grade),
+    classes,
+    rooms: classes.map((schoolClass) => ({
+      id: schoolClass.roomId,
+      name: schoolClass.room,
+      sourceClassId: schoolClass.id,
+    })),
     periods: PERIODS.map((period) => ({ ...period })),
     subjects,
     teachers: schedulingTeacherRows(db, subjects),
@@ -257,6 +263,10 @@ function teacherCanTeachSubject(config, teacherId, subjectId) {
   return Boolean(subject?.teacherIds.includes(teacherId));
 }
 
+function roomById(config, roomId) {
+  return config.rooms?.find((room) => room.id === roomId) || null;
+}
+
 function dayIndexForDate(config, date) {
   return weekDateKeys(config).indexOf(date);
 }
@@ -327,6 +337,7 @@ export function validateScheduleConflicts(assignments) {
   const conflicts = [];
   const teacherSlots = new Map();
   const classSlots = new Map();
+  const roomSlots = new Map();
 
   assignments.forEach((assignment) => {
     const teacherKey = `${assignment.teacherId}-${assignment.date}-${assignment.period}`;
@@ -336,6 +347,10 @@ export function validateScheduleConflicts(assignments) {
     const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
     if (!classSlots.has(classKey)) classSlots.set(classKey, []);
     classSlots.get(classKey).push(assignment);
+
+    const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
+    if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
+    roomSlots.get(roomKey).push(assignment);
   });
 
   teacherSlots.forEach((items) => {
@@ -356,6 +371,17 @@ export function validateScheduleConflicts(assignments) {
       title: `${items[0].className} 同一时间有 ${items.length} 节课`,
       text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
         .map((item) => item.subjectName)
+        .join("、")}`,
+    });
+  });
+
+  roomSlots.forEach((items) => {
+    if (items.length <= 1) return;
+    conflicts.push({
+      type: "room",
+      title: `${items[0].room} 同一时间被安排 ${items.length} 节课`,
+      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
+        .map((item) => `${item.className}${item.subjectName}`)
         .join("、")}`,
     });
   });
@@ -435,6 +461,7 @@ function lessonFromAssignment(draft, assignment) {
     subjectId: assignment.subjectId,
     subjectName: assignment.subjectName,
     roomId: assignment.roomId,
+    room: assignment.room,
     date: assignment.date,
     time: assignment.time,
     type: "regular",
@@ -466,7 +493,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   const conflicts = validateScheduleConflicts(draft.assignments || []);
   if (conflicts.length) {
     draft.conflicts = conflicts;
-    const error = new Error("存在教师或班级时间冲突，不能发布");
+    const error = new Error("存在教师、班级或教室时间冲突，不能发布");
     error.statusCode = 400;
     error.details = { conflicts };
     throw error;
@@ -561,12 +588,22 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
     throw error;
   }
 
+  const nextRoomId = String(options.roomId || assignment.roomId || "");
+  const nextRoom = roomById(config, nextRoomId);
+  if (!nextRoom) {
+    const error = new Error("调整教室不在当前年级可用教室范围内");
+    error.statusCode = 400;
+    throw error;
+  }
+
   const before = {
     teacherId: assignment.teacherId,
     teacherName: assignment.teacherName,
     date: assignment.date,
     period: assignment.period,
     time: assignment.time,
+    roomId: assignment.roomId,
+    room: assignment.room,
   };
 
   assignment.teacherId = nextTeacherId;
@@ -575,6 +612,8 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   assignment.dayIndex = nextDayIndex;
   assignment.period = period.period;
   assignment.time = period.time;
+  assignment.roomId = nextRoom.id;
+  assignment.room = nextRoom.name;
   assignment.adjustedAt = formatDateTimeMinute();
   assignment.adjustedByAccountId = actorAccount?.id || "";
 
@@ -600,6 +639,8 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
       date: assignment.date,
       period: assignment.period,
       time: assignment.time,
+      roomId: assignment.roomId,
+      room: assignment.room,
     },
     createdAt: db.meta.updatedAt,
   });

@@ -135,6 +135,16 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     division.grades.find((item) => item.id === gradeId) ||
     division.grades[0];
   const subjects = division.subjectIds.map((subjectId) => ({ ...schedulingCatalog.subjects[subjectId] }));
+  const classes = Array.from({ length: division.classCount }, (_, index) => {
+    const roomNumber = String(index + 1).padStart(2, "0");
+    const roomName = `${division.roomPrefix}${grade.code.slice(1)}-${roomNumber}`;
+    return {
+      id: `${grade.code}C${roomNumber}`,
+      name: `${grade.name} ${index + 1} 班`,
+      room: roomName,
+      roomId: `${grade.code}R${roomNumber}`,
+    };
+  });
 
   return {
     divisionId: division.id,
@@ -143,10 +153,11 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     gradeName: grade.name,
     weekStart: division.weekStart,
     classCount: division.classCount,
-    classes: Array.from({ length: division.classCount }, (_, index) => ({
-      id: `${grade.code}C${String(index + 1).padStart(2, "0")}`,
-      name: `${grade.name} ${index + 1} 班`,
-      room: `${division.roomPrefix}${grade.code.slice(1)}-${String(index + 1).padStart(2, "0")}`,
+    classes,
+    rooms: classes.map((schoolClass) => ({
+      id: schoolClass.roomId,
+      name: schoolClass.room,
+      sourceClassId: schoolClass.id,
     })),
     periods: schedulingCatalog.periods.map((period) => ({ ...period })),
     subjects,
@@ -922,7 +933,7 @@ function normalizeBackendLesson(lesson) {
     time: lesson.time,
     className: lesson.className,
     course: lesson.subjectName,
-    room: lesson.roomId,
+    room: lesson.room || lesson.roomId,
     type: lesson.type || "regular",
     units: lesson.units || 1,
     status: lesson.status,
@@ -1198,6 +1209,7 @@ function generateScheduleAssignments() {
         period: best.slot.period,
         time: best.slot.time,
         room: schoolClass.room,
+        roomId: schoolClass.roomId,
       };
 
       assignments.push(assignment);
@@ -1217,6 +1229,7 @@ function validateScheduleConflicts(assignments) {
   const conflicts = [];
   const teacherSlots = new Map();
   const classSlots = new Map();
+  const roomSlots = new Map();
 
   assignments.forEach((assignment) => {
     const teacherKey = `${assignment.teacherId}-${assignment.date}-${assignment.period}`;
@@ -1226,6 +1239,10 @@ function validateScheduleConflicts(assignments) {
     const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
     if (!classSlots.has(classKey)) classSlots.set(classKey, []);
     classSlots.get(classKey).push(assignment);
+
+    const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
+    if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
+    roomSlots.get(roomKey).push(assignment);
   });
 
   teacherSlots.forEach((items) => {
@@ -1246,6 +1263,17 @@ function validateScheduleConflicts(assignments) {
       title: `${items[0].className} 同一时间有 ${items.length} 节课`,
       text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
         .map((item) => item.subjectName)
+        .join("、")}`,
+    });
+  });
+
+  roomSlots.forEach((items) => {
+    if (items.length <= 1) return;
+    conflicts.push({
+      type: "room",
+      title: `${items[0].room} 同一时间被安排 ${items.length} 节课`,
+      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
+        .map((item) => `${item.className}${item.subjectName}`)
         .join("、")}`,
     });
   });
@@ -1637,11 +1665,16 @@ function teacherOptionsForAssignment(assignment) {
   }));
 }
 
+function roomById(roomId) {
+  return (state.schedulingConfig.rooms || []).find((room) => room.id === roomId) || null;
+}
+
 async function adjustBackendSchedule() {
   const assignmentId = document.querySelector("#adminAssignmentSelect").value;
   const teacherId = document.querySelector("#adminAssignmentTeacherSelect").value;
   const date = document.querySelector("#adminAssignmentDateSelect").value;
   const period = Number.parseInt(document.querySelector("#adminAssignmentPeriodSelect").value, 10);
+  const roomId = document.querySelector("#adminAssignmentRoomSelect").value;
 
   schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
   renderAdminScheduling();
@@ -1655,6 +1688,7 @@ async function adjustBackendSchedule() {
         teacherId,
         date,
         period,
+        roomId,
       },
     });
     applyBackendScheduleResult(result);
@@ -1685,9 +1719,16 @@ function adjustLocalSchedule() {
   const teacherId = document.querySelector("#adminAssignmentTeacherSelect").value;
   const date = document.querySelector("#adminAssignmentDateSelect").value;
   const periodValue = Number.parseInt(document.querySelector("#adminAssignmentPeriodSelect").value, 10);
+  const roomId = document.querySelector("#adminAssignmentRoomSelect").value;
   const period = state.schedulingConfig.periods.find((item) => item.period === periodValue);
+  const room = roomById(roomId);
   const teacherNameText = schedulingTeacherName(teacherId);
   const dayIndex = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5).indexOf(date);
+
+  if (!period || !room) {
+    showToast("请选择有效的节次和教室");
+    return;
+  }
 
   assignment.teacherId = teacherId;
   assignment.teacherName = teacherNameText;
@@ -1695,6 +1736,8 @@ function adjustLocalSchedule() {
   assignment.dayIndex = dayIndex;
   assignment.period = period.period;
   assignment.time = period.time;
+  assignment.roomId = room.id;
+  assignment.room = room.name;
   assignment.adjustedAt = formatDateTimeMinute();
   state.schedulingDraft.conflicts = validateScheduleConflicts(state.schedulingDraft.assignments || []);
   state.selectedScheduleAssignmentId = assignmentId;
@@ -2266,7 +2309,7 @@ function renderAdminScheduling() {
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
       : conflicts.length
         ? conflicts.map(conflictItem).join("")
-        : `<div class="check-success"><strong>教师时间冲突 0</strong><span>已通过：同一老师同一时间没有被安排到多个班级。</span></div>`;
+        : `<div class="check-success"><strong>冲突 0</strong><span>已通过：老师、班级和教室同一时间均无重复占用。</span></div>`;
   document.querySelector("#adminClassSelect").innerHTML = config.classes
     .map(
       (schoolClass) => `
@@ -2289,9 +2332,10 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   const teacherSelect = document.querySelector("#adminAssignmentTeacherSelect");
   const dateSelect = document.querySelector("#adminAssignmentDateSelect");
   const periodSelect = document.querySelector("#adminAssignmentPeriodSelect");
+  const roomSelect = document.querySelector("#adminAssignmentRoomSelect");
   const applyButton = document.querySelector("#applyScheduleAdjustment");
   const status = document.querySelector("#scheduleAdjustStatus");
-  if (!assignmentSelect || !teacherSelect || !dateSelect || !periodSelect || !applyButton || !status) return;
+  if (!assignmentSelect || !teacherSelect || !dateSelect || !periodSelect || !roomSelect || !applyButton || !status) return;
 
   const hasDraft = assignments.length > 0;
   const isPublished = draft.status === "published";
@@ -2317,7 +2361,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
         .map(
           (assignment) => `
             <option value="${assignment.id}" ${assignment.id === selectedAssignment?.id ? "selected" : ""}>
-              ${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName}
+              ${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName} · ${assignment.room}
             </option>
           `,
         )
@@ -2362,10 +2406,23 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
         .join("")
     : `<option value="">暂无节次</option>`;
 
+  roomSelect.innerHTML = selectedAssignment
+    ? (state.schedulingConfig.rooms || [])
+        .map(
+          (room) => `
+            <option value="${room.id}" ${room.id === selectedAssignment.roomId || room.name === selectedAssignment.room ? "selected" : ""}>
+              ${room.name}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无教室</option>`;
+
   assignmentSelect.disabled = !hasDraft || schedulingBackendState.loading;
   teacherSelect.disabled = !canAdjust;
   dateSelect.disabled = !canAdjust;
   periodSelect.disabled = !canAdjust;
+  roomSelect.disabled = !canAdjust;
   applyButton.disabled = !canAdjust || !selectedAssignment;
 }
 
@@ -3350,7 +3407,7 @@ async function generateAdminSchedule() {
   showToast(
     conflicts.length
       ? `已生成${config.gradeName}草稿，发现 ${conflicts.length} 个冲突`
-      : `已生成${config.gradeName}无教师冲突排课草稿`,
+      : `已生成${config.gradeName}无冲突排课草稿`,
   );
   render();
 }
@@ -3376,7 +3433,7 @@ async function confirmAndPublishSchedule() {
   const conflicts = validateScheduleConflicts(assignments);
   if (conflicts.length) {
     state.schedulingDraft.conflicts = conflicts;
-    showToast("存在教师时间冲突，不能发布");
+    showToast("存在老师、班级或教室冲突，不能发布");
     render();
     return;
   }
@@ -3389,6 +3446,7 @@ async function confirmAndPublishSchedule() {
     className: assignment.className,
     course: assignment.subjectName,
     room: assignment.room,
+    roomId: assignment.roomId,
     type: "regular",
     units: 1,
     status: "scheduled",

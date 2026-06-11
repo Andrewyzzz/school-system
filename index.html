@@ -387,7 +387,7 @@
               <div class="rule-list">
                 <div>
                   <strong>硬性约束</strong>
-                  <p>老师、班级在同一时间只能有一节课；教师冲突为 0 才能确认发布。</p>
+                  <p>老师、班级、教室在同一时间只能有一节课；冲突为 0 才能确认发布。</p>
                 </div>
                 <div>
                   <strong>排课范围</strong>
@@ -426,7 +426,7 @@
             <div class="panel-heading">
               <div>
                 <h2>手动调整</h2>
-                <p>选择当前班级的一节课，调整任课老师或上课时间，系统会重新校验老师和班级冲突。</p>
+                <p>选择当前班级的一节课，调整任课老师、上课时间或教室，系统会重新校验老师、班级和教室冲突。</p>
               </div>
               <span class="status-pill" id="scheduleAdjustStatus">等待草稿</span>
             </div>
@@ -446,6 +446,10 @@
               <label class="field-label" for="adminAssignmentPeriodSelect">
                 <span>上课节次</span>
                 <select class="lesson-select" id="adminAssignmentPeriodSelect"></select>
+              </label>
+              <label class="field-label" for="adminAssignmentRoomSelect">
+                <span>上课教室</span>
+                <select class="lesson-select" id="adminAssignmentRoomSelect"></select>
               </label>
             </div>
             <div class="admin-schedule-actions">
