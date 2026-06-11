@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
+  buildSchedulingConfig,
+  findScheduleDraft,
+  generateScheduleDraft,
+  publishScheduleDraft,
+} from "./scheduling.js";
+import {
   ensureDatabase,
   findAccountByUsername,
   findTeacher,
@@ -163,6 +169,37 @@ async function handleApi(req, res, db, url) {
         classes: db.classes,
         rooms: db.rooms,
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/scheduling/config") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const options = Object.fromEntries(url.searchParams);
+      sendJson(res, 200, {
+        config: buildSchedulingConfig(db, options),
+        draft: findScheduleDraft(db, options),
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/generate") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = generateScheduleDraft(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/publish") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = publishScheduleDraft(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
       return;
     }
 

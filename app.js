@@ -591,6 +591,11 @@ let teacherImportState = {
   loading: false,
   error: "",
 };
+let schedulingBackendState = {
+  loaded: false,
+  loading: false,
+  error: "",
+};
 
 if (backendSession?.account) {
   sessionAccountId = upsertBackendAccount(backendSession.account);
@@ -1501,6 +1506,115 @@ async function loadFinanceTeacherPage(overrides = {}) {
   }
 }
 
+function backendSchedulingOptions() {
+  return {
+    divisionId: state.selectedSchedulingDivisionId,
+    gradeId: state.selectedSchedulingGradeId,
+  };
+}
+
+function applyBackendScheduleResult(result) {
+  if (result.config) {
+    state.schedulingConfig = result.config;
+    state.selectedSchedulingDivisionId = result.config.divisionId;
+    state.selectedSchedulingGradeId = result.config.gradeId;
+    state.selectedScheduleWeekStart = result.config.weekStart;
+    if (!result.config.classes.some((schoolClass) => schoolClass.id === state.selectedSchedulingClassId)) {
+      state.selectedSchedulingClassId = result.config.classes[0]?.id || "";
+    }
+  }
+
+  if (result.draft) {
+    state.schedulingDraft = result.draft;
+  } else if (result.config) {
+    state.schedulingDraft = {
+      ...clone(initialState.schedulingDraft),
+      divisionId: result.config.divisionId,
+      gradeId: result.config.gradeId,
+    };
+  }
+}
+
+async function loadBackendSchedulingContext(options = backendSchedulingOptions()) {
+  if (!backendMode() || currentRole() !== "admin") return;
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+
+  try {
+    const params = new URLSearchParams(options);
+    const result = await apiRequest(`/api/scheduling/config?${params.toString()}`);
+    applyBackendScheduleResult(result);
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "后端排课配置加载失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  if (state.activeView === "adminScheduling") {
+    render();
+  }
+}
+
+async function generateBackendSchedule() {
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/generate", {
+      method: "POST",
+      body: backendSchedulingOptions(),
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    const conflicts = result.draft?.conflicts?.length || 0;
+    showToast(
+      conflicts
+        ? `后端已生成草稿，发现 ${conflicts} 个冲突`
+        : `后端已生成 ${result.draft?.generatedLessonCount || 0} 节无冲突课表`,
+    );
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "后端生成排课失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
+async function publishBackendSchedule() {
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/publish", {
+      method: "POST",
+      body: backendSchedulingOptions(),
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    showToast(`后端已发布 ${result.lessons?.length || 0} 节课到老师端`);
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "后端发布课表失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
 function syncTeacherImportText() {
   const textarea = document.querySelector("#teacherImportCsv");
   if (!textarea) return;
@@ -2008,6 +2122,18 @@ function renderAdminScheduling() {
       : draft.status === "draft"
         ? "status-pill warning"
         : "status-pill";
+  if (backendMode() && currentRole() === "admin") {
+    const status = document.querySelector("#adminScheduleStatus");
+    if (schedulingBackendState.loading) {
+      status.textContent = "后端处理中";
+      status.className = "status-pill warning";
+    } else if (schedulingBackendState.error) {
+      status.textContent = "后端异常";
+      status.className = "status-pill warning";
+    } else if (schedulingBackendState.loaded) {
+      status.textContent = `${scheduleStatusText(draft.status)} · 后端`;
+    }
+  }
   document.querySelector("#conflictStatus").textContent =
     assignments.length === 0 ? "等待生成" : conflicts.length === 0 ? "无冲突" : `${conflicts.length} 个冲突`;
   document.querySelector("#conflictStatus").className =
@@ -2046,8 +2172,9 @@ function renderAdminScheduling() {
     .join("");
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
+  document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading;
   document.querySelector("#confirmSchedule").disabled =
-    assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
+    schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
 }
 
 function renderTeacherImport() {
@@ -3005,7 +3132,12 @@ function recordAttendance(id, action, nowText) {
   render();
 }
 
-function generateAdminSchedule() {
+async function generateAdminSchedule() {
+  if (backendMode() && currentRole() === "admin") {
+    await generateBackendSchedule();
+    return;
+  }
+
   const config = state.schedulingConfig;
   const assignments = generateScheduleAssignments();
   const conflicts = validateScheduleConflicts(assignments);
@@ -3031,7 +3163,12 @@ function generateAdminSchedule() {
   render();
 }
 
-function confirmAndPublishSchedule() {
+async function confirmAndPublishSchedule() {
+  if (backendMode() && currentRole() === "admin") {
+    await publishBackendSchedule();
+    return;
+  }
+
   const config = state.schedulingConfig;
   const draft = state.schedulingDraft;
   if (!schedulingDraftMatchesCurrent()) {
@@ -3217,6 +3354,10 @@ async function authenticate(username, password) {
           error: "",
         };
         await loadFinanceTeacherPage({ page: 1 });
+      }
+      if (payload.account.role === "admin") {
+        schedulingBackendState = { loaded: false, loading: false, error: "" };
+        await loadBackendSchedulingContext();
       }
       render();
       loginButton.disabled = false;
@@ -3452,14 +3593,22 @@ document.querySelector("#scheduleWeekSelect").addEventListener("change", (event)
   renderSchedule();
 });
 
-document.querySelector("#adminDivisionSelect").addEventListener("change", (event) => {
+document.querySelector("#adminDivisionSelect").addEventListener("change", async (event) => {
   applySchedulingSelection(event.target.value);
-  render();
+  if (backendMode() && currentRole() === "admin") {
+    await loadBackendSchedulingContext();
+  } else {
+    render();
+  }
 });
 
-document.querySelector("#adminGradeSelect").addEventListener("change", (event) => {
+document.querySelector("#adminGradeSelect").addEventListener("change", async (event) => {
   applySchedulingSelection(state.selectedSchedulingDivisionId, event.target.value);
-  render();
+  if (backendMode() && currentRole() === "admin") {
+    await loadBackendSchedulingContext();
+  } else {
+    render();
+  }
 });
 
 document.querySelector("#adminClassSelect").addEventListener("change", (event) => {
@@ -3548,5 +3697,8 @@ if (backendMode()) {
   }
   if (currentRole() === "finance") {
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
+  }
+  if (currentRole() === "admin") {
+    loadBackendSchedulingContext();
   }
 }

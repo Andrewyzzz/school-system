@@ -263,6 +263,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
       taxThreshold: 5000,
       taxRate: 0.03,
     },
+    scheduleDrafts: [],
     payrollBatches: [],
     auditLogs: [],
   };
