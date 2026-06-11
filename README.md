@@ -10,6 +10,8 @@
 
 ## 本地运行
 
+### 静态 Demo
+
 ```bash
 python3 -m http.server 4173
 ```
@@ -19,6 +21,50 @@ python3 -m http.server 4173
 ```text
 http://localhost:4173/
 ```
+
+### 第一阶段开发服务
+
+第一阶段已开始加入后端 API 骨架，推荐使用下面的方式运行：
+
+```bash
+npm run seed
+npm run dev
+```
+
+如果本机暂时没有 `npm`，也可以直接运行：
+
+```bash
+node server/seed.js
+node server/server.js
+```
+
+然后打开：
+
+```text
+http://127.0.0.1:4173/
+```
+
+后端健康检查：
+
+```text
+http://127.0.0.1:4173/api/health
+```
+
+第一阶段 API 已支持：
+
+- `POST /api/auth/login`：登录，返回 Token
+- `GET /api/me`：查看当前账号
+- `GET /api/teachers`：行政/财务分页查看教师列表
+- `GET /api/teachers/me`：老师查看本人教师信息
+- `GET /api/teachers/:teacherId/schedule`：查看老师自然周课表
+- `GET /api/teachers/:teacherId/payroll`：查看老师月度薪资试算
+
+后端种子账号：
+
+- 行政账号：`admin / 123456`
+- 财务账号：`finance / 123456`
+- 教师账号：`teacher0001` 至 `teacher1000`，默认密码均为 `123456`
+- 兼容 Demo 的老师账号：`teacher / 123456`，指向 `teacher0001`
 
 ## 当前功能
 

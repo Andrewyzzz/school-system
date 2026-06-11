@@ -1,0 +1,11 @@
+{
+  "name": "school-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server/server.js",
+    "seed": "node server/seed.js",
+    "check": "node --check app.js && node --check server/auth.js && node --check server/storage.js && node --check server/seed.js && node --check server/server.js"
+  }
+}
