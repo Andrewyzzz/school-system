@@ -619,6 +619,30 @@ h2 {
   margin-bottom: 0;
 }
 
+.schedule-adjust-panel {
+  margin-bottom: 16px;
+}
+
+.schedule-adjust-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.2fr) repeat(3, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.schedule-adjust-grid .field-label {
+  margin-bottom: 0;
+}
+
+.schedule-adjust-grid .field-label span {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.schedule-adjust-grid .lesson-select {
+  margin-bottom: 0;
+}
+
 .teacher-import-panel,
 .import-feedback-panel {
   margin-bottom: 16px;
@@ -1903,6 +1927,10 @@ td {
   }
 
   .admin-schedule-selectors {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-adjust-grid {
     grid-template-columns: 1fr;
   }
 

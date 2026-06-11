@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
+  adjustScheduleAssignment,
   buildSchedulingConfig,
   findScheduleDraft,
   generateScheduleDraft,
@@ -198,6 +199,16 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = publishScheduleDraft(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/adjust") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = adjustScheduleAssignment(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
       return;

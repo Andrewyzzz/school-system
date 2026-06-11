@@ -169,6 +169,7 @@ const initialState = {
   selectedSchedulingDivisionId: "elementary",
   selectedSchedulingGradeId: "elementary-g1",
   selectedSchedulingClassId: "P1C01",
+  selectedScheduleAssignmentId: "",
   selectedScheduleWeekStart: "2026-06-08",
   scannerLessonId: "L002",
   lastScanText: "",
@@ -1615,6 +1616,104 @@ async function publishBackendSchedule() {
   render();
 }
 
+function selectedAdminAssignments() {
+  return (state.schedulingDraft.assignments || [])
+    .filter((assignment) => assignment.classId === state.selectedSchedulingClassId)
+    .sort((a, b) => `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`));
+}
+
+function scheduleWeekdayLabel(date) {
+  const week = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  const index = week.indexOf(date);
+  return ["周一", "周二", "周三", "周四", "周五"][index] || date;
+}
+
+function teacherOptionsForAssignment(assignment) {
+  if (!assignment) return [];
+  const subject = state.schedulingConfig.subjects.find((item) => item.id === assignment.subjectId);
+  return (subject?.teacherIds || []).map((teacherId) => ({
+    id: teacherId,
+    name: schedulingTeacherName(teacherId),
+  }));
+}
+
+async function adjustBackendSchedule() {
+  const assignmentId = document.querySelector("#adminAssignmentSelect").value;
+  const teacherId = document.querySelector("#adminAssignmentTeacherSelect").value;
+  const date = document.querySelector("#adminAssignmentDateSelect").value;
+  const period = Number.parseInt(document.querySelector("#adminAssignmentPeriodSelect").value, 10);
+
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/adjust", {
+      method: "POST",
+      body: {
+        ...backendSchedulingOptions(),
+        assignmentId,
+        teacherId,
+        date,
+        period,
+      },
+    });
+    applyBackendScheduleResult(result);
+    state.selectedScheduleAssignmentId = assignmentId;
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    const conflicts = result.draft?.conflicts?.length || 0;
+    showToast(conflicts ? `调整已保存，发现 ${conflicts} 个冲突` : "调整已保存，当前无冲突");
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "课节调整失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
+function adjustLocalSchedule() {
+  const assignmentId = document.querySelector("#adminAssignmentSelect").value;
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment) {
+    showToast("请先选择要调整的课节");
+    return;
+  }
+
+  const teacherId = document.querySelector("#adminAssignmentTeacherSelect").value;
+  const date = document.querySelector("#adminAssignmentDateSelect").value;
+  const periodValue = Number.parseInt(document.querySelector("#adminAssignmentPeriodSelect").value, 10);
+  const period = state.schedulingConfig.periods.find((item) => item.period === periodValue);
+  const teacherNameText = schedulingTeacherName(teacherId);
+  const dayIndex = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5).indexOf(date);
+
+  assignment.teacherId = teacherId;
+  assignment.teacherName = teacherNameText;
+  assignment.date = date;
+  assignment.dayIndex = dayIndex;
+  assignment.period = period.period;
+  assignment.time = period.time;
+  assignment.adjustedAt = formatDateTimeMinute();
+  state.schedulingDraft.conflicts = validateScheduleConflicts(state.schedulingDraft.assignments || []);
+  state.selectedScheduleAssignmentId = assignmentId;
+  showToast(
+    state.schedulingDraft.conflicts.length
+      ? `调整已保存，发现 ${state.schedulingDraft.conflicts.length} 个冲突`
+      : "调整已保存，当前无冲突",
+  );
+  render();
+}
+
+async function applyScheduleAdjustment() {
+  if (backendMode() && currentRole() === "admin") {
+    await adjustBackendSchedule();
+    return;
+  }
+  adjustLocalSchedule();
+}
+
 function syncTeacherImportText() {
   const textarea = document.querySelector("#teacherImportCsv");
   if (!textarea) return;
@@ -2102,6 +2201,13 @@ function renderAdminScheduling() {
   const selectedClassAssignments = assignments
     .filter((assignment) => assignment.classId === selectedClassId)
     .sort((a, b) => `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`));
+  if (!selectedClassAssignments.some((assignment) => assignment.id === state.selectedScheduleAssignmentId)) {
+    state.selectedScheduleAssignmentId = selectedClassAssignments[0]?.id || "";
+  }
+  const selectedAssignment =
+    selectedClassAssignments.find((assignment) => assignment.id === state.selectedScheduleAssignmentId) ||
+    selectedClassAssignments[0] ||
+    null;
 
   document.querySelector("#adminDivisionName").textContent = config.divisionName;
   document.querySelector("#adminGradeName").textContent = config.gradeName;
@@ -2170,11 +2276,97 @@ function renderAdminScheduling() {
       `,
     )
     .join("");
+  renderScheduleAdjustmentPanel(selectedClassAssignments, selectedAssignment, draft);
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
   document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading;
   document.querySelector("#confirmSchedule").disabled =
     schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
+}
+
+function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
+  const assignmentSelect = document.querySelector("#adminAssignmentSelect");
+  const teacherSelect = document.querySelector("#adminAssignmentTeacherSelect");
+  const dateSelect = document.querySelector("#adminAssignmentDateSelect");
+  const periodSelect = document.querySelector("#adminAssignmentPeriodSelect");
+  const applyButton = document.querySelector("#applyScheduleAdjustment");
+  const status = document.querySelector("#scheduleAdjustStatus");
+  if (!assignmentSelect || !teacherSelect || !dateSelect || !periodSelect || !applyButton || !status) return;
+
+  const hasDraft = assignments.length > 0;
+  const isPublished = draft.status === "published";
+  const canAdjust = hasDraft && !isPublished && !schedulingBackendState.loading;
+
+  status.textContent = !hasDraft
+    ? "等待草稿"
+    : isPublished
+      ? "已发布锁定"
+      : draft.conflicts?.length
+        ? `${draft.conflicts.length} 个冲突`
+        : "可调整";
+  status.className = !hasDraft
+    ? "status-pill"
+    : isPublished
+      ? "status-pill locked"
+      : draft.conflicts?.length
+        ? "status-pill warning"
+        : "status-pill done";
+
+  assignmentSelect.innerHTML = hasDraft
+    ? assignments
+        .map(
+          (assignment) => `
+            <option value="${assignment.id}" ${assignment.id === selectedAssignment?.id ? "selected" : ""}>
+              ${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">请先生成排课草稿</option>`;
+
+  const teacherOptions = teacherOptionsForAssignment(selectedAssignment);
+  teacherSelect.innerHTML = selectedAssignment
+    ? teacherOptions
+        .map(
+          (teacher) => `
+            <option value="${teacher.id}" ${teacher.id === selectedAssignment.teacherId ? "selected" : ""}>
+              ${teacher.name}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无老师</option>`;
+
+  const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  dateSelect.innerHTML = selectedAssignment
+    ? weekDates
+        .map(
+          (date) => `
+            <option value="${date}" ${date === selectedAssignment.date ? "selected" : ""}>
+              ${scheduleWeekdayLabel(date)} · ${formatDate(date)}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无日期</option>`;
+
+  periodSelect.innerHTML = selectedAssignment
+    ? state.schedulingConfig.periods
+        .map(
+          (period) => `
+            <option value="${period.period}" ${period.period === selectedAssignment.period ? "selected" : ""}>
+              第 ${period.period} 节 · ${period.time}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无节次</option>`;
+
+  assignmentSelect.disabled = !hasDraft || schedulingBackendState.loading;
+  teacherSelect.disabled = !canAdjust;
+  dateSelect.disabled = !canAdjust;
+  periodSelect.disabled = !canAdjust;
+  applyButton.disabled = !canAdjust || !selectedAssignment;
 }
 
 function renderTeacherImport() {
@@ -3613,7 +3805,17 @@ document.querySelector("#adminGradeSelect").addEventListener("change", async (ev
 
 document.querySelector("#adminClassSelect").addEventListener("change", (event) => {
   state.selectedSchedulingClassId = event.target.value;
+  state.selectedScheduleAssignmentId = "";
   renderAdminScheduling();
+});
+
+document.querySelector("#adminAssignmentSelect").addEventListener("change", (event) => {
+  state.selectedScheduleAssignmentId = event.target.value;
+  renderAdminScheduling();
+});
+
+document.querySelector("#applyScheduleAdjustment").addEventListener("click", () => {
+  applyScheduleAdjustment();
 });
 
 document.querySelector("#simulateQrRead").addEventListener("click", () => {

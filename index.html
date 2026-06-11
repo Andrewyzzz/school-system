@@ -422,6 +422,40 @@
             <div class="conflict-list" id="conflictList"></div>
           </section>
 
+          <section class="panel schedule-adjust-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>手动调整</h2>
+                <p>选择当前班级的一节课，调整任课老师或上课时间，系统会重新校验老师和班级冲突。</p>
+              </div>
+              <span class="status-pill" id="scheduleAdjustStatus">等待草稿</span>
+            </div>
+            <div class="schedule-adjust-grid">
+              <label class="field-label" for="adminAssignmentSelect">
+                <span>选择课节</span>
+                <select class="lesson-select" id="adminAssignmentSelect"></select>
+              </label>
+              <label class="field-label" for="adminAssignmentTeacherSelect">
+                <span>任课老师</span>
+                <select class="lesson-select" id="adminAssignmentTeacherSelect"></select>
+              </label>
+              <label class="field-label" for="adminAssignmentDateSelect">
+                <span>上课日期</span>
+                <select class="lesson-select" id="adminAssignmentDateSelect"></select>
+              </label>
+              <label class="field-label" for="adminAssignmentPeriodSelect">
+                <span>上课节次</span>
+                <select class="lesson-select" id="adminAssignmentPeriodSelect"></select>
+              </label>
+            </div>
+            <div class="admin-schedule-actions">
+              <button class="primary-button" id="applyScheduleAdjustment" type="button">
+                <span aria-hidden="true">✓</span>
+                应用调整并校验
+              </button>
+            </div>
+          </section>
+
           <section class="panel schedule-panel">
             <div class="panel-heading">
               <div>

@@ -78,9 +78,14 @@ function pad(number, length = 2) {
 }
 
 function addDays(dateKey, days) {
-  const date = new Date(`${dateKey}T00:00:00`);
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function formatDate(dateKey) {
@@ -205,6 +210,10 @@ function schedulingSlots(config) {
   );
 }
 
+function weekDateKeys(config) {
+  return Array.from({ length: 5 }, (_, dayIndex) => addDays(config.weekStart, dayIndex));
+}
+
 export function requiredScheduleLessonCount(config) {
   const weeklyPerClass = config.subjects.reduce((sum, subject) => sum + subject.weeklyLessons, 0);
   return config.classes.length * weeklyPerClass;
@@ -241,6 +250,15 @@ function countClassSubjectOnDay(assignments, classId, subjectId, date) {
 
 function teacherName(config, teacherId) {
   return config.teachers.find((teacher) => teacher.id === teacherId)?.name || teacherId;
+}
+
+function teacherCanTeachSubject(config, teacherId, subjectId) {
+  const subject = config.subjects.find((item) => item.id === subjectId);
+  return Boolean(subject?.teacherIds.includes(teacherId));
+}
+
+function dayIndexForDate(config, date) {
+  return weekDateKeys(config).indexOf(date);
 }
 
 export function generateScheduleAssignments(config) {
@@ -494,4 +512,97 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   });
 
   return { config, draft, lessons };
+}
+
+export function adjustScheduleAssignment(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  const draft = findScheduleDraft(db, options);
+
+  if (!draft) {
+    const error = new Error("请先生成排课草稿");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (draft.status === "published") {
+    const error = new Error("已发布课表暂不允许直接调整，请重新生成草稿或走调课流程");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const assignment = (draft.assignments || []).find((item) => item.id === options.assignmentId);
+  if (!assignment) {
+    const error = new Error("未找到要调整的课节");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const nextTeacherId = String(options.teacherId || assignment.teacherId);
+  if (!teacherCanTeachSubject(config, nextTeacherId, assignment.subjectId)) {
+    const error = new Error("选择的老师不属于该科目的可排老师");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const nextDate = String(options.date || assignment.date);
+  const nextDayIndex = dayIndexForDate(config, nextDate);
+  if (nextDayIndex < 0) {
+    const error = new Error("调整日期必须在当前自然周的周一到周五内");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const nextPeriod = Number.parseInt(options.period || assignment.period, 10);
+  const period = config.periods.find((item) => item.period === nextPeriod);
+  if (!period) {
+    const error = new Error("调整节次不在当前排课时段内");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const before = {
+    teacherId: assignment.teacherId,
+    teacherName: assignment.teacherName,
+    date: assignment.date,
+    period: assignment.period,
+    time: assignment.time,
+  };
+
+  assignment.teacherId = nextTeacherId;
+  assignment.teacherName = teacherName(config, nextTeacherId);
+  assignment.date = nextDate;
+  assignment.dayIndex = nextDayIndex;
+  assignment.period = period.period;
+  assignment.time = period.time;
+  assignment.adjustedAt = formatDateTimeMinute();
+  assignment.adjustedByAccountId = actorAccount?.id || "";
+
+  draft.conflicts = validateScheduleConflicts(draft.assignments || []);
+  draft.generatedLessonCount = draft.assignments?.length || 0;
+  draft.unassignedCount = Math.max((draft.requiredLessonCount || 0) - draft.generatedLessonCount, 0);
+  draft.updatedAt = formatDateTimeMinute();
+  draft.adjustedAt = draft.updatedAt;
+  db.meta.updatedAt = new Date().toISOString();
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "schedule_adjust",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    divisionId: config.divisionId,
+    gradeId: config.gradeId,
+    assignmentId: assignment.id,
+    conflictCount: draft.conflicts.length,
+    before,
+    after: {
+      teacherId: assignment.teacherId,
+      teacherName: assignment.teacherName,
+      date: assignment.date,
+      period: assignment.period,
+      time: assignment.time,
+    },
+    createdAt: db.meta.updatedAt,
+  });
+
+  return { config, draft, assignment };
 }
