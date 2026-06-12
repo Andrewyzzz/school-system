@@ -270,6 +270,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     },
     scheduleDrafts: [],
     workloadConfirmations: [],
+    payrollDetails: [],
     payrollBatches: [],
     auditLogs: [],
   };
@@ -467,6 +468,113 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     netPay: Math.round((grossPay - tax) * 100) / 100,
     lines,
   };
+}
+
+function ensurePayrollDetails(db) {
+  if (!Array.isArray(db.payrollDetails)) db.payrollDetails = [];
+  return db.payrollDetails;
+}
+
+function findTeacherPayrollDetail(db, teacherId, month = "2026-06") {
+  return ensurePayrollDetails(db).find((item) => item.teacherId === teacherId && item.month === month);
+}
+
+function buildPayrollRows(db, payroll, workload) {
+  if (!payroll || !workload) return [];
+  return [
+    {
+      name: "基本工资",
+      basis: "任课教师固定基础项",
+      amount: payroll.baseSalary,
+      category: "fixed",
+    },
+    ...workload.categories.map((category) => ({
+      name: category.label,
+      basis: `${category.units} 节 × ${category.rate} 元`,
+      amount: category.amount,
+      category: "lesson",
+    })),
+    {
+      name: "个税代扣",
+      basis: `起征点 ${db.payrollRules.taxThreshold} 元，当前试算税率 ${Math.round(db.payrollRules.taxRate * 100)}%`,
+      amount: -payroll.tax,
+      category: "deduction",
+    },
+  ];
+}
+
+export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
+  const payroll = teacherPayrollPreview(db, teacherId, month);
+  const workload = teacherMonthlyWorkload(db, teacherId, month);
+  if (!payroll || !workload) return null;
+  const generated = findTeacherPayrollDetail(db, teacherId, month);
+  return {
+    ...payroll,
+    rows: buildPayrollRows(db, payroll, workload),
+    workloadSummary: workload.summary,
+    confirmation: workload.confirmation,
+    generated: generated
+      ? {
+          id: generated.id,
+          status: generated.status,
+          generatedAt: generated.generatedAt,
+          generatedByName: generated.generatedByName,
+          summarySnapshot: generated.summarySnapshot,
+        }
+      : null,
+  };
+}
+
+export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  const detail = teacherPayrollDetail(db, teacherId, month);
+  if (!detail) {
+    const error = new Error("教师不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const details = ensurePayrollDetails(db);
+  const existing = findTeacherPayrollDetail(db, teacherId, month);
+  if (existing?.status === "locked") {
+    const error = new Error("本月薪资已锁定，不能重新生成");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const generated = {
+    id: existing?.id || `PAY-${teacherId}-${month.replace("-", "")}`,
+    teacherId,
+    month,
+    status: "generated",
+    generatedAt: now,
+    generatedByAccountId: actorAccount?.id || "",
+    generatedByName: actorAccount?.name || "",
+    summarySnapshot: {
+      baseSalary: detail.baseSalary,
+      lessonAmount: detail.lessonAmount,
+      grossPay: detail.grossPay,
+      tax: detail.tax,
+      netPay: detail.netPay,
+      payableUnits: detail.workloadSummary.payableUnits,
+      pendingCount: detail.workloadSummary.pendingCount,
+      exceptionCount: detail.workloadSummary.exceptionCount,
+      confirmationStatus: detail.confirmation?.status || "unconfirmed",
+    },
+    rowsSnapshot: detail.rows,
+    lineSnapshots: detail.lines,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+  };
+
+  if (existing) {
+    Object.assign(existing, generated);
+  } else {
+    details.push(generated);
+  }
+
+  db.meta.updatedAt = now;
+  return teacherPayrollDetail(db, teacherId, month);
 }
 
 function workloadTypeLabel(type) {

@@ -19,11 +19,13 @@ import {
   ensureDatabase,
   findAccountByUsername,
   findTeacher,
+  generateTeacherPayrollDetail,
   publicAccount,
   queryTeachers,
   saveDatabase,
   teacherLessonsForWeek,
   teacherMonthlyWorkload,
+  teacherPayrollDetail,
   teacherPayrollPreview,
 } from "./storage.js";
 
@@ -345,7 +347,20 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "GET" && parts[3] === "payroll") {
         const month = url.searchParams.get("month") || "2026-06";
-        sendJson(res, 200, teacherPayrollPreview(db, teacherId, month));
+        sendJson(res, 200, teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month));
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "generate") {
+        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或管理账号可以生成薪资明细");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const result = generateTeacherPayrollDetail(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
         return;
       }
     }

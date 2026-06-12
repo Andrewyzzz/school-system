@@ -602,6 +602,16 @@ let financeTeacherPage = {
   loading: false,
   error: "",
 };
+let financeTeacherDetailState = {
+  teacherId: "",
+  month: "2026-06",
+  loading: false,
+  loaded: false,
+  error: "",
+  workload: null,
+  payroll: null,
+  payrollGenerated: false,
+};
 let teacherImportState = {
   csvText: "",
   preview: null,
@@ -846,6 +856,19 @@ function resetTeacherWorkloadState() {
     loaded: false,
     error: "",
     data: null,
+  };
+}
+
+function resetFinanceTeacherDetailState() {
+  financeTeacherDetailState = {
+    teacherId: "",
+    month: "2026-06",
+    loading: false,
+    loaded: false,
+    error: "",
+    workload: null,
+    payroll: null,
+    payrollGenerated: false,
   };
 }
 
@@ -1707,6 +1730,7 @@ async function loadFinanceTeacherPage(overrides = {}) {
     };
     financeTeacherPage.items.forEach(upsertTeacher);
     if (!financeTeacherPage.items.some((teacher) => teacher.id === state.selectedFinanceTeacherId)) {
+      resetFinanceTeacherDetailState();
       state.selectedFinanceTeacherId = financeTeacherPage.items[0]?.id || state.selectedFinanceTeacherId;
     }
   } catch (error) {
@@ -1720,6 +1744,66 @@ async function loadFinanceTeacherPage(overrides = {}) {
 
   if (["finance", "financeRecords", "settlement"].includes(state.activeView)) {
     render();
+  }
+}
+
+async function loadFinanceTeacherDetail(
+  teacherId = state.selectedFinanceTeacherId,
+  { month = "2026-06", generatePayroll = false } = {},
+) {
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  financeTeacherDetailState = {
+    ...financeTeacherDetailState,
+    teacherId,
+    month,
+    loading: true,
+    error: "",
+  };
+
+  try {
+    const workload = await apiRequest(`/api/teachers/${teacherId}/workload?month=${month}`);
+    const payroll = generatePayroll
+      ? await apiRequest(`/api/teachers/${teacherId}/payroll/generate`, {
+          method: "POST",
+          body: { month },
+        })
+      : await apiRequest(`/api/teachers/${teacherId}/payroll?month=${month}`);
+    financeTeacherDetailState = {
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: "",
+      workload,
+      payroll,
+      payrollGenerated: Boolean(payroll.generated),
+    };
+  } catch (error) {
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: error.message || "财务详情加载失败",
+    };
+  }
+
+  if (["financeRecords", "settlement"].includes(state.activeView)) {
+    render();
+  }
+}
+
+function ensureFinanceTeacherDetail(teacherId, { generatePayroll = false } = {}) {
+  const month = "2026-06";
+  const needsDetail =
+    financeTeacherDetailState.teacherId !== teacherId ||
+    financeTeacherDetailState.month !== month ||
+    !financeTeacherDetailState.loaded;
+  const needsGeneratedPayroll = generatePayroll && !financeTeacherDetailState.payrollGenerated;
+
+  if (!financeTeacherDetailState.loading && (needsDetail || needsGeneratedPayroll)) {
+    loadFinanceTeacherDetail(teacherId, { month, generatePayroll });
   }
 }
 
@@ -3340,6 +3424,11 @@ function renderBackendFinanceDashboard() {
 }
 
 function renderFinanceRecords() {
+  if (backendMode() && currentRole() === "finance") {
+    renderBackendFinanceRecords();
+    return;
+  }
+
   const select = document.querySelector("#financeTeacherSelect");
   select.innerHTML = teacherOptions(state.selectedFinanceTeacherId);
   const teacherId = state.selectedFinanceTeacherId;
@@ -3349,7 +3438,77 @@ function renderFinanceRecords() {
     : `<tr><td colspan="8"><div class="empty-state">该老师暂无记录</div></td></tr>`;
 }
 
+function backendFinanceWorkloadRows(workload) {
+  if (!workload) return [];
+  return [
+    ...(workload.payableLines || []).map((line) => ({
+      ...line,
+      status: "completed",
+      note: `可计薪 ${line.units} 节 · 金额 ${formatCurrency(line.amount || 0)}`,
+    })),
+    ...(workload.pendingLines || []).map((line) => ({
+      ...line,
+      status: line.status || "scheduled",
+      note: "未完成签入和签出，暂不计入工资",
+    })),
+    ...(workload.exceptionLines || []).map((line) => ({
+      ...line,
+      status: "exception",
+      note: line.note || "待教务复核",
+    })),
+  ].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+}
+
+function backendFinanceRecordRow(row, teacher) {
+  return `
+    <tr>
+      <td data-label="日期">${formatDate(row.date)}</td>
+      <td data-label="时间">${row.time}</td>
+      <td class="row-title" data-label="老师">${teacher?.name || row.teacherName || "未选择老师"}</td>
+      <td data-label="班级">${row.className}</td>
+      <td data-label="课程">${row.subjectName || row.course}</td>
+      <td data-label="教室">${row.room}</td>
+      <td data-label="考勤状态">${statusTag(row.status)}</td>
+      <td class="muted" data-label="说明">${row.note}</td>
+    </tr>
+  `;
+}
+
+function renderBackendFinanceRecords() {
+  const select = document.querySelector("#financeTeacherSelect");
+  select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
+  const teacherId = state.selectedFinanceTeacherId;
+  ensureFinanceTeacherDetail(teacherId);
+
+  const table = document.querySelector("#financeRecordTable");
+  const detail =
+    financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
+      ? financeTeacherDetailState
+      : null;
+
+  if (financeTeacherDetailState.loading && !detail?.workload) {
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">正在加载该老师后端工作内容...</div></td></tr>`;
+    return;
+  }
+
+  if (financeTeacherDetailState.error) {
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+    return;
+  }
+
+  const rows = backendFinanceWorkloadRows(detail?.workload);
+  const teacher = detail?.workload?.teacher || teacherById(teacherId);
+  table.innerHTML = rows.length
+    ? rows.map((row) => backendFinanceRecordRow(row, teacher)).join("")
+    : `<tr><td colspan="8"><div class="empty-state">该老师暂无后端工作内容</div></td></tr>`;
+}
+
 function renderSettlement() {
+  if (backendMode() && currentRole() === "finance") {
+    renderBackendSettlement();
+    return;
+  }
+
   const select = document.querySelector("#settlementTeacherSelect");
   select.innerHTML = teacherOptions(state.selectedFinanceTeacherId);
   const teacherId = state.selectedFinanceTeacherId;
@@ -3371,6 +3530,75 @@ function renderSettlement() {
           <td class="row-title" data-label="薪资项目">${name}</td>
           <td class="muted" data-label="计算口径">${basis}</td>
           <td data-label="金额">${formatCurrency(amount)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
+function renderBackendSettlement() {
+  const select = document.querySelector("#settlementTeacherSelect");
+  select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
+  const teacherId = state.selectedFinanceTeacherId;
+  ensureFinanceTeacherDetail(teacherId, { generatePayroll: true });
+
+  const detail =
+    financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
+      ? financeTeacherDetailState
+      : null;
+  const payroll = detail?.payroll;
+  const status = document.querySelector("#settlementStatus");
+  const button = document.querySelector("#settleTeacherPayroll");
+  const table = document.querySelector("#settlementSalaryTable");
+
+  if (financeTeacherDetailState.loading && !payroll) {
+    document.querySelector("#settlementGrossSalary").textContent = "读取中";
+    document.querySelector("#settlementTaxSalary").textContent = "读取中";
+    document.querySelector("#settlementNetSalary").textContent = "读取中";
+    status.textContent = "正在生成薪资明细";
+    status.className = "status-pill";
+    button.disabled = true;
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端生成该老师薪资明细...</div></td></tr>`;
+    return;
+  }
+
+  if (financeTeacherDetailState.error) {
+    document.querySelector("#settlementGrossSalary").textContent = "¥0";
+    document.querySelector("#settlementTaxSalary").textContent = "¥0";
+    document.querySelector("#settlementNetSalary").textContent = "¥0";
+    status.textContent = financeTeacherDetailState.error;
+    status.className = "status-pill warning";
+    button.disabled = true;
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+    return;
+  }
+
+  if (!payroll) {
+    document.querySelector("#settlementGrossSalary").textContent = "¥0";
+    document.querySelector("#settlementTaxSalary").textContent = "¥0";
+    document.querySelector("#settlementNetSalary").textContent = "¥0";
+    status.textContent = "暂无薪资明细";
+    status.className = "status-pill";
+    button.disabled = true;
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">请选择老师生成薪资明细</div></td></tr>`;
+    return;
+  }
+
+  document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
+  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
+  document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
+  status.textContent = payroll.generated
+    ? `已生成 ${payroll.generated.generatedAt?.slice(0, 10) || ""}`
+    : "后端试算";
+  status.className = payroll.generated ? "status-pill done" : "status-pill";
+  button.disabled = true;
+  table.innerHTML = (payroll.rows || [])
+    .map(
+      (row) => `
+        <tr>
+          <td class="row-title" data-label="薪资项目">${row.name}</td>
+          <td class="muted" data-label="计算口径">${row.basis}</td>
+          <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
         </tr>
       `,
     )
@@ -3405,6 +3633,21 @@ function teacherOptions(selectedId) {
       (teacher) => `
         <option value="${teacher.id}" ${teacher.id === selectedId ? "selected" : ""}>
           ${teacher.name} · ${teacher.department} · ${teacher.subject}
+        </option>
+      `,
+    )
+    .join("");
+}
+
+function backendFinanceTeacherOptions(selectedId) {
+  const teachers = financeTeacherPage.items.length
+    ? financeTeacherPage.items
+    : state.teachers.filter((teacher) => teacher.id.startsWith("T"));
+  return teachers
+    .map(
+      (teacher) => `
+        <option value="${teacher.id}" ${teacher.id === selectedId ? "selected" : ""}>
+          ${teacher.name} · ${backendTeacherDepartment(teacher)} · ${backendTeacherSubject(teacher)}
         </option>
       `,
     )
@@ -3987,6 +4230,7 @@ function loginAccount(accountId) {
   if (!account) return;
   if (qrScanner) stopCameraScanner();
   resetTeacherWorkloadState();
+  resetFinanceTeacherDetailState();
   sessionAccountId = accountId;
   state.currentAccountId = accountId;
   state.activeView = defaultViewByRole[account.role];
@@ -4140,8 +4384,9 @@ document.addEventListener("click", async (event) => {
   const financeRecordsButton = event.target.closest("[data-finance-records]");
   if (financeRecordsButton) {
     state.selectedFinanceTeacherId = financeRecordsButton.dataset.financeRecords;
+    resetFinanceTeacherDetailState();
     if (backendMode()) {
-      await loadBackendTeacherContext(state.selectedFinanceTeacherId);
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId);
     }
     switchView("financeRecords");
     return;
@@ -4150,8 +4395,9 @@ document.addEventListener("click", async (event) => {
   const financeSettleButton = event.target.closest("[data-finance-settle]");
   if (financeSettleButton) {
     state.selectedFinanceTeacherId = financeSettleButton.dataset.financeSettle;
+    resetFinanceTeacherDetailState();
     if (backendMode()) {
-      await loadBackendTeacherContext(state.selectedFinanceTeacherId);
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
     }
     switchView("settlement");
   }
@@ -4396,13 +4642,23 @@ document.querySelector("#copyQrText").addEventListener("click", async () => {
 document.querySelector("#startScanner").addEventListener("click", startCameraScanner);
 document.querySelector("#stopScanner").addEventListener("click", stopCameraScanner);
 
-document.querySelector("#financeTeacherSelect").addEventListener("change", (event) => {
+document.querySelector("#financeTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
+  resetFinanceTeacherDetailState();
+  if (backendMode() && currentRole() === "finance") {
+    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId);
+    return;
+  }
   renderFinanceRecords();
 });
 
-document.querySelector("#settlementTeacherSelect").addEventListener("change", (event) => {
+document.querySelector("#settlementTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
+  resetFinanceTeacherDetailState();
+  if (backendMode() && currentRole() === "finance") {
+    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
+    return;
+  }
   renderSettlement();
 });
 
