@@ -1509,6 +1509,36 @@ td {
   overflow-wrap: anywhere;
 }
 
+.manual-scan-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 14px;
+}
+
+.manual-qr-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 88px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #fff;
+  margin-bottom: 10px;
+}
+
+.assignment-teacher-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 58px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: var(--ink);
+  background: #fff;
+}
+
 .scanner-note {
   margin-top: 16px;
   box-shadow: none;
@@ -1569,6 +1599,44 @@ td {
   gap: 12px;
   padding: 0 20px 18px;
   flex-wrap: wrap;
+}
+
+.payroll-rule-box {
+  margin: 0 20px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 16px;
+}
+
+.compact-heading {
+  margin-bottom: 12px;
+}
+
+.compact-heading h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.payroll-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.payroll-rule-grid .field-label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.payroll-rule-grid input {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: #fff;
 }
 
 .warning-item {
@@ -1674,6 +1742,10 @@ td {
     grid-template-columns: 1fr;
   }
 
+  .payroll-rule-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .compact-field {
     max-width: none;
   }
@@ -1717,6 +1789,7 @@ td {
   .summary-grid,
   .pay-preview,
   .salary-total,
+  .payroll-rule-grid,
   .confirm-steps {
     grid-template-columns: 1fr;
   }

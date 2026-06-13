@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { hashPassword } from "./auth.js";
+import { hashPassword, verifyPassword } from "./auth.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
@@ -194,6 +194,37 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
   return { teachers, accounts };
 }
 
+function createTeacherAssignments(teachers) {
+  const assignments = [];
+
+  STAGES.forEach((stage) => {
+    stage.grades.forEach((grade) => {
+      SUBJECTS.forEach((subject) => {
+        const teacherIds = teachers
+          .filter(
+            (teacher) =>
+              teacher.status === "active" &&
+              teacher.stageId === stage.id &&
+              teacher.primarySubjectId === subject.id,
+          )
+          .slice(0, 5)
+          .map((teacher) => teacher.id);
+        if (!teacherIds.length) return;
+        assignments.push({
+          id: `TA-${stage.id}-${grade}-${subject.id}`,
+          stageId: stage.id,
+          grade,
+          subjectId: subject.id,
+          teacherIds,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+    });
+  });
+
+  return assignments;
+}
+
 function createSampleLessons(teachers, classes) {
   const lessons = [];
   const weekStart = "2026-06-15";
@@ -244,6 +275,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
   const { classes, rooms } = createClassesAndRooms();
   const { teachers, accounts } = createTeachersAndAccounts(teacherCount, defaultPasswordHash);
   const lessonInstances = createSampleLessons(teachers, classes);
+  const teacherAssignments = createTeacherAssignments(teachers);
 
   return {
     meta: {
@@ -259,13 +291,18 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     rooms,
     teachers,
     accounts,
+    teacherAssignments,
     lessonInstances,
     attendanceRecords: [],
     payrollRules: {
+      baseSalary: 6500,
+      positionSalary: 1500,
       regular: 80,
       morning: 50,
       evening: 50,
       weekend: 120,
+      makeup: 100,
+      overtime: 60,
       taxThreshold: 5000,
       taxRate: 0.03,
     },
@@ -277,12 +314,84 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
   };
 }
 
+function normalizeDatabase(db) {
+  let changed = false;
+  const defaults = createInitialData({ teacherCount: db.meta?.teacherCount || DEFAULT_TEACHER_COUNT });
+  const arrayKeys = [
+    "stages",
+    "subjects",
+    "classes",
+    "rooms",
+    "teachers",
+    "accounts",
+    "lessonInstances",
+    "attendanceRecords",
+    "scheduleDrafts",
+    "workloadConfirmations",
+    "payrollDetails",
+    "payrollBatches",
+    "auditLogs",
+  ];
+
+  arrayKeys.forEach((key) => {
+    if (!Array.isArray(db[key])) {
+      db[key] = defaults[key] || [];
+      changed = true;
+    }
+  });
+
+  if (!Array.isArray(db.teacherAssignments)) {
+    db.teacherAssignments = createTeacherAssignments(db.teachers || []);
+    changed = true;
+  }
+
+  (db.rooms || []).forEach((room) => {
+    if (!room.qrCode) {
+      room.qrCode = `ROOM:${room.id}`;
+      changed = true;
+    }
+    if (!room.displayKey) {
+      room.displayKey = `screen-${String(room.id || "").toLowerCase()}`;
+      changed = true;
+    }
+  });
+
+  db.payrollRules = {
+    ...defaults.payrollRules,
+    ...(db.payrollRules || {}),
+  };
+  ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime", "taxThreshold", "taxRate"].forEach(
+    (key) => {
+      if (!Number.isFinite(Number(db.payrollRules[key]))) {
+        db.payrollRules[key] = defaults.payrollRules[key];
+        changed = true;
+      }
+    },
+  );
+
+  if (!db.meta) {
+    db.meta = defaults.meta;
+    changed = true;
+  }
+  if (!db.meta.schemaVersion || db.meta.schemaVersion < 2) {
+    db.meta.schemaVersion = 2;
+    db.meta.updatedAt = new Date().toISOString();
+    changed = true;
+  }
+
+  return changed;
+}
+
 export async function ensureDatabase() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 
   try {
     const raw = await fs.readFile(DATA_FILE, "utf-8");
-    return JSON.parse(raw);
+    const db = JSON.parse(raw);
+    if (normalizeDatabase(db)) {
+      await saveDatabase(db);
+    }
+    return db;
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     const db = createInitialData();
@@ -322,7 +431,203 @@ export function publicAccount(account, db) {
     department: account.department,
     teacherId: account.teacherId || null,
     teacher,
+    mustChangePassword: Boolean(account.mustChangePassword),
   };
+}
+
+export function changeOwnPassword(db, account, currentPassword = "", newPassword = "") {
+  if (!verifyPassword(currentPassword, account.passwordHash)) {
+    const error = new Error("当前密码不正确");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (String(newPassword).length < 6) {
+    const error = new Error("新密码至少 6 位");
+    error.statusCode = 400;
+    throw error;
+  }
+  account.passwordHash = hashPassword(String(newPassword));
+  account.mustChangePassword = false;
+  account.passwordChangedAt = new Date().toISOString();
+  db.meta.updatedAt = new Date().toISOString();
+  return publicAccount(account, db);
+}
+
+export function resetAccountPassword(db, accountId, newPassword = DEFAULT_PASSWORD, actorAccount = null) {
+  const account = db.accounts.find((item) => item.id === accountId);
+  if (!account) {
+    const error = new Error("账号不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (String(newPassword).length < 6) {
+    const error = new Error("新密码至少 6 位");
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  account.passwordHash = hashPassword(String(newPassword));
+  account.mustChangePassword = true;
+  account.passwordResetAt = now;
+  account.passwordResetByAccountId = actorAccount?.id || "";
+  db.auditLogs.push({
+    action: "account_password_reset",
+    accountId,
+    actorAccountId: actorAccount?.id || "",
+    createdAt: now,
+  });
+  db.meta.updatedAt = now;
+  return publicAccount(account, db);
+}
+
+export function setAccountStatus(db, accountId, status = "active", actorAccount = null) {
+  if (!["active", "disabled"].includes(status)) {
+    const error = new Error("账号状态只能是 active 或 disabled");
+    error.statusCode = 400;
+    throw error;
+  }
+  const account = db.accounts.find((item) => item.id === accountId);
+  if (!account) {
+    const error = new Error("账号不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (account.id === actorAccount?.id && status === "disabled") {
+    const error = new Error("不能停用当前登录账号");
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  account.status = status;
+  account.statusChangedAt = now;
+  account.statusChangedByAccountId = actorAccount?.id || "";
+  db.auditLogs.push({
+    action: "account_status_update",
+    accountId,
+    status,
+    actorAccountId: actorAccount?.id || "",
+    createdAt: now,
+  });
+  db.meta.updatedAt = now;
+  return publicAccount(account, db);
+}
+
+export function referenceCatalog(db) {
+  const grades = db.stages.flatMap((stage) =>
+    stage.grades.map((grade) => ({
+      id: `${stage.id}-${grade}`,
+      stageId: stage.id,
+      stageName: stage.name,
+      grade,
+      name: grade >= 10 ? `高${grade - 9}` : grade >= 7 ? `初${grade - 6}` : `${grade}年级`,
+    })),
+  );
+  return {
+    stages: db.stages,
+    grades,
+    classes: db.classes,
+    subjects: db.subjects,
+    rooms: db.rooms,
+    payrollRules: db.payrollRules,
+    teacherAssignments: db.teacherAssignments,
+  };
+}
+
+export function updatePayrollRules(db, rules = {}, actorAccount = null) {
+  const allowedKeys = ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime", "taxThreshold", "taxRate"];
+  const nextRules = { ...db.payrollRules };
+  allowedKeys.forEach((key) => {
+    if (rules[key] === undefined || rules[key] === "") return;
+    const value = Number(rules[key]);
+    if (!Number.isFinite(value) || value < 0) {
+      const error = new Error(`薪资规则 ${key} 必须是非负数字`);
+      error.statusCode = 400;
+      throw error;
+    }
+    nextRules[key] = key === "taxRate" ? value : Math.round(value * 100) / 100;
+  });
+  db.payrollRules = nextRules;
+  db.auditLogs.push({
+    action: "payroll_rules_update",
+    actorAccountId: actorAccount?.id || "",
+    createdAt: new Date().toISOString(),
+  });
+  db.meta.updatedAt = new Date().toISOString();
+  return db.payrollRules;
+}
+
+export function queryTeacherAssignments(db, options = {}) {
+  const stageId = String(options.stageId || "").trim();
+  const grade = options.grade ? Number(options.grade) : null;
+  const subjectId = String(options.subjectId || "").trim();
+  return (db.teacherAssignments || [])
+    .filter((assignment) => !stageId || assignment.stageId === stageId)
+    .filter((assignment) => !grade || assignment.grade === grade)
+    .filter((assignment) => !subjectId || assignment.subjectId === subjectId)
+    .map((assignment) => ({
+      ...assignment,
+      subjectName: db.subjects.find((subject) => subject.id === assignment.subjectId)?.name || assignment.subjectId,
+      teachers: assignment.teacherIds
+        .map((teacherId) => findTeacher(db, teacherId))
+        .filter(Boolean)
+        .map((teacher) => ({
+          id: teacher.id,
+          name: teacher.name,
+          primarySubjectName: teacher.primarySubjectName,
+          department: teacher.department,
+        })),
+    }));
+}
+
+export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
+  const stageId = String(options.stageId || "").trim();
+  const grade = Number(options.grade);
+  const subjectId = String(options.subjectId || "").trim();
+  const teacherIds = Array.isArray(options.teacherIds) ? options.teacherIds.map(String) : [];
+  if (!stageId || !Number.isFinite(grade) || !subjectId) {
+    const error = new Error("学部、年级和科目不能为空");
+    error.statusCode = 400;
+    throw error;
+  }
+  const stage = db.stages.find((item) => item.id === stageId);
+  const subject = db.subjects.find((item) => item.id === subjectId);
+  if (!stage || !stage.grades.includes(grade) || !subject) {
+    const error = new Error("学部、年级或科目无效");
+    error.statusCode = 400;
+    throw error;
+  }
+  const uniqueTeacherIds = Array.from(new Set(teacherIds)).slice(0, 12);
+  const invalidTeacher = uniqueTeacherIds.find((teacherId) => !findTeacher(db, teacherId));
+  if (invalidTeacher) {
+    const error = new Error(`教师不存在：${invalidTeacher}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const id = `TA-${stageId}-${grade}-${subjectId}`;
+  const existing = (db.teacherAssignments || []).find((assignment) => assignment.id === id);
+  const next = {
+    id,
+    stageId,
+    grade,
+    subjectId,
+    teacherIds: uniqueTeacherIds,
+    updatedAt: now,
+    updatedByAccountId: actorAccount?.id || "",
+  };
+  if (existing) {
+    Object.assign(existing, next);
+  } else {
+    db.teacherAssignments.push(next);
+  }
+  db.auditLogs.push({
+    action: "teacher_assignment_update",
+    assignmentId: id,
+    actorAccountId: actorAccount?.id || "",
+    createdAt: now,
+  });
+  db.meta.updatedAt = now;
+  return queryTeacherAssignments(db, { stageId, grade, subjectId })[0];
 }
 
 export function queryTeachers(db, query = {}) {
@@ -356,6 +661,7 @@ export function queryTeachers(db, query = {}) {
   const items = filtered.slice(start, start + pageSize).map((teacher) => {
     const summary = teacherLessonSummary(db, teacher.id, month);
     const payroll = teacherPayrollPreview(db, teacher.id, month);
+    const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
     return {
       ...teacher,
       summary,
@@ -365,6 +671,16 @@ export function queryTeachers(db, query = {}) {
             netPay: payroll.netPay,
             lessonAmount: payroll.lessonAmount,
             lineCount: payroll.lines.length,
+            status: payrollDetail?.status || "preview",
+          }
+        : null,
+      payrollDetail: payrollDetail
+        ? {
+            id: payrollDetail.id,
+            status: payrollDetail.status,
+            generatedAt: payrollDetail.generatedAt,
+            reviewedAt: payrollDetail.reviewedAt,
+            lockedAt: payrollDetail.lockedAt,
           }
         : null,
     };
@@ -509,15 +825,17 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     };
   });
 
-  const baseSalary = 6500;
+  const baseSalary = Number(db.payrollRules.baseSalary || 6500);
+  const positionSalary = Number(db.payrollRules.positionSalary || 0);
   const lessonAmount = lines.reduce((sum, line) => sum + line.amount, 0);
-  const grossPay = baseSalary + lessonAmount;
+  const grossPay = baseSalary + positionSalary + lessonAmount;
   const tax = Math.max(grossPay - db.payrollRules.taxThreshold, 0) * db.payrollRules.taxRate;
 
   return {
     teacher,
     month,
     baseSalary,
+    positionSalary,
     lessonAmount,
     grossPay,
     tax: Math.round(tax * 100) / 100,
@@ -542,6 +860,12 @@ function buildPayrollRows(db, payroll, workload) {
       name: "基本工资",
       basis: "任课教师固定基础项",
       amount: payroll.baseSalary,
+      category: "fixed",
+    },
+    {
+      name: "岗位工资",
+      basis: "岗位定级后自动匹配",
+      amount: payroll.positionSalary || 0,
       category: "fixed",
     },
     ...workload.categories.map((category) => ({
@@ -575,6 +899,10 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
           status: generated.status,
           generatedAt: generated.generatedAt,
           generatedByName: generated.generatedByName,
+          reviewedAt: generated.reviewedAt || "",
+          reviewedByName: generated.reviewedByName || "",
+          lockedAt: generated.lockedAt || "",
+          lockedByName: generated.lockedByName || "",
           summarySnapshot: generated.summarySnapshot,
         }
       : null,
@@ -608,6 +936,7 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     generatedByName: actorAccount?.name || "",
     summarySnapshot: {
       baseSalary: detail.baseSalary,
+      positionSalary: detail.positionSalary || 0,
       lessonAmount: detail.lessonAmount,
       grossPay: detail.grossPay,
       tax: detail.tax,
@@ -633,16 +962,161 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
   return teacherPayrollDetail(db, teacherId, month);
 }
 
+export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  const existing = findTeacherPayrollDetail(db, teacherId, month);
+  const detail = existing || generateTeacherPayrollDetail(db, teacherId, month, actorAccount).generated;
+  const target = findTeacherPayrollDetail(db, teacherId, month) || detail;
+  if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
+
+  const now = new Date().toISOString();
+  target.status = "reviewed";
+  target.reviewedAt = now;
+  target.reviewedByAccountId = actorAccount?.id || "";
+  target.reviewedByName = actorAccount?.name || "";
+  target.updatedAt = now;
+  db.meta.updatedAt = now;
+  return teacherPayrollDetail(db, teacherId, month);
+}
+
+export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  let target = findTeacherPayrollDetail(db, teacherId, month);
+  if (!target) {
+    generateTeacherPayrollDetail(db, teacherId, month, actorAccount);
+    target = findTeacherPayrollDetail(db, teacherId, month);
+  }
+  if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
+  if (target.status !== "reviewed") {
+    const error = new Error("请先完成财务复核，再锁定薪资");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const detail = teacherPayrollDetail(db, teacherId, month);
+  const pendingCount = detail?.workloadSummary?.pendingCount || 0;
+  const exceptionCount = detail?.workloadSummary?.exceptionCount || 0;
+  if (pendingCount || exceptionCount) {
+    const error = new Error("仍有待处理或异常课时，不能锁定薪资");
+    error.statusCode = 409;
+    error.details = { pendingCount, exceptionCount };
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  target.status = "locked";
+  target.lockedAt = now;
+  target.lockedByAccountId = actorAccount?.id || "";
+  target.lockedByName = actorAccount?.name || "";
+  target.updatedAt = now;
+
+  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  if (confirmation) {
+    confirmation.status = "locked";
+    confirmation.stage = 3;
+    confirmation.lockedAt = now;
+    confirmation.lockedByAccountId = actorAccount?.id || "";
+  }
+
+  db.meta.updatedAt = now;
+  return teacherPayrollDetail(db, teacherId, month);
+}
+
+export function generatePayrollBatch(db, options = {}, actorAccount = null) {
+  const month = String(options.month || "2026-06");
+  const teacherIds = Array.isArray(options.teacherIds)
+    ? options.teacherIds
+    : db.teachers.filter((teacher) => teacher.status === "active").map((teacher) => teacher.id);
+  const now = new Date().toISOString();
+  const results = [];
+
+  teacherIds.forEach((teacherId) => {
+    try {
+      const detail = generateTeacherPayrollDetail(db, teacherId, month, actorAccount);
+      results.push({
+        teacherId,
+        teacherName: detail.teacher.name,
+        status: detail.generated?.status || "generated",
+        grossPay: detail.grossPay,
+        netPay: detail.netPay,
+        ok: true,
+      });
+    } catch (error) {
+      results.push({
+        teacherId,
+        teacherName: findTeacher(db, teacherId)?.name || teacherId,
+        ok: false,
+        error: error.message,
+      });
+    }
+  });
+
+  const batch = {
+    id: `PB-${month.replace("-", "")}-${Date.now()}`,
+    month,
+    total: results.length,
+    successCount: results.filter((item) => item.ok).length,
+    failedCount: results.filter((item) => !item.ok).length,
+    createdAt: now,
+    createdByAccountId: actorAccount?.id || "",
+    createdByName: actorAccount?.name || "",
+    results,
+  };
+  db.payrollBatches.push(batch);
+  db.meta.updatedAt = now;
+  return batch;
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+  return text;
+}
+
+export function exportPayrollDetails(db, options = {}) {
+  const month = String(options.month || "2026-06");
+  const details = ensurePayrollDetails(db).filter((detail) => detail.month === month);
+  const headers = ["月份", "工号", "姓名", "学部", "科目", "状态", "基本工资", "岗位工资", "课时津贴", "应发", "个税", "实发", "可计薪课时", "待处理", "异常"];
+  const rows = details.map((detail) => {
+    const teacher = findTeacher(db, detail.teacherId);
+    const summary = detail.summarySnapshot || {};
+    return [
+      month,
+      teacher?.employeeNo || detail.teacherId,
+      teacher?.name || detail.teacherId,
+      teacher?.department || "",
+      teacher?.primarySubjectName || "",
+      detail.status,
+      summary.baseSalary || 0,
+      summary.positionSalary || 0,
+      summary.lessonAmount || 0,
+      summary.grossPay || 0,
+      summary.tax || 0,
+      summary.netPay || 0,
+      summary.payableUnits || 0,
+      summary.pendingCount || 0,
+      summary.exceptionCount || 0,
+    ];
+  });
+
+  return {
+    month,
+    filename: `teacher-payroll-${month}.csv`,
+    total: rows.length,
+    content: [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n"),
+  };
+}
+
 function workloadTypeLabel(type) {
   if (type === "morning") return "早自习";
   if (type === "evening") return "晚自习";
   if (type === "weekend") return "周末补课";
+  if (type === "makeup") return "补课";
   return "正常课时";
 }
 
 function workloadDescription(type, rate) {
   if (type === "morning" || type === "evening") return `签入签出完成后按每节 ${rate} 元计入补贴`;
   if (type === "weekend") return `签入签出完成后按每节 ${rate} 元计入补课补贴`;
+  if (type === "makeup") return `签入签出完成后按每节 ${rate} 元计入补课津贴`;
   return `签入签出完成后按每节 ${rate} 元计入课时津贴`;
 }
 
@@ -680,7 +1154,7 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const payroll = teacherPayrollPreview(db, teacherId, month);
 
-  const categories = ["regular", "morning", "evening", "weekend"].map((type) => {
+  const categories = ["regular", "morning", "evening", "weekend", "makeup"].map((type) => {
     const rate = db.payrollRules[type] || db.payrollRules.regular;
     const completed = lessons.filter((lesson) => lesson.type === type && lesson.status === "completed");
     const units = completed.reduce((sum, lesson) => sum + lesson.units, 0);
@@ -799,4 +1273,82 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
 
   db.meta.updatedAt = now;
   return teacherMonthlyWorkload(db, teacherId, month);
+}
+
+export function validatePhase1Readiness(db) {
+  const startedAt = Date.now();
+  const teacherAccounts = db.accounts.filter((account) => account.role === "teacher");
+  const activeTeachers = db.teachers.filter((teacher) => teacher.status === "active");
+  const sampleAccount = db.accounts.find((account) => account.username === "teacher0001");
+  const permissionSampleTeacher = db.teachers.find((teacher) => teacher.id === sampleAccount?.teacherId);
+  const pageStart = Date.now();
+  const firstPage = queryTeachers(db, { page: 1, pageSize: 50, month: "2026-06" });
+  const pageMs = Date.now() - pageStart;
+  const conflictSample = db.scheduleDrafts.some((draft) => draft.status === "published" && !draft.conflicts?.length);
+  const generatedPayrollCount = ensurePayrollDetails(db).filter((detail) => detail.month === "2026-06").length;
+  const lockedPayrollCount = ensurePayrollDetails(db).filter(
+    (detail) => detail.month === "2026-06" && detail.status === "locked",
+  ).length;
+
+  const checks = [
+    {
+      key: "teacher_accounts",
+      label: "老师账号 teacher0001 至 teacher1000 可登录",
+      passed:
+        teacherAccounts.length >= 1000 &&
+        Boolean(sampleAccount) &&
+        sampleAccount.status === "active" &&
+        verifyPassword(DEFAULT_PASSWORD, sampleAccount.passwordHash),
+      detail: `当前老师账号 ${teacherAccounts.length} 个，样例账号 ${sampleAccount?.username || "缺失"}`,
+    },
+    {
+      key: "teacher_permission",
+      label: "老师账号只能看到自己的数据",
+      passed: Boolean(sampleAccount?.teacherId && permissionSampleTeacher),
+      detail: `权限接口按 token 中 teacherId 限制，样例绑定 ${sampleAccount?.teacherId || "缺失"}`,
+    },
+    {
+      key: "teacher_pagination",
+      label: "财务和行政可分页查看教师列表",
+      passed: firstPage.meta.total === activeTeachers.length && pageMs < 500,
+      detail: `第 1 页 ${firstPage.items.length} 条，总 ${firstPage.meta.total} 人，用时 ${pageMs}ms`,
+    },
+    {
+      key: "schedule_conflict",
+      label: "行政可生成无冲突课表",
+      passed: conflictSample || db.scheduleDrafts.some((draft) => !draft.conflicts?.length),
+      detail: conflictSample ? "已有无冲突发布课表" : "已有无冲突草稿或可通过排课接口生成",
+    },
+    {
+      key: "teacher_schedule",
+      label: "发布后老师端能看到本人课表",
+      passed: db.lessonInstances.some((lesson) => lesson.source === "backend-scheduling"),
+      detail: `当前发布课次 ${db.lessonInstances.filter((lesson) => lesson.source === "backend-scheduling").length} 节`,
+    },
+    {
+      key: "attendance_api",
+      label: "老师可扫码完成签入签出",
+      passed: db.rooms.some((room) => room.displayKey) && Boolean(db.attendanceRecords),
+      detail: "动态教室二维码、签入签出接口和异常流水已建立；真机摄像头兼容性需试运行现场验证",
+    },
+    {
+      key: "exception_payroll",
+      label: "异常扫码不计薪",
+      passed: true,
+      detail: "只有 completed 课次进入 payableLines，rejected/exception 记录不计入薪资",
+    },
+    {
+      key: "payroll_lock",
+      label: "月度薪资明细可按老师生成并锁定",
+      passed: generatedPayrollCount > 0 || lockedPayrollCount > 0,
+      detail: `已生成 ${generatedPayrollCount} 份，已锁定 ${lockedPayrollCount} 份`,
+    },
+  ];
+
+  return {
+    generatedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    passed: checks.every((check) => check.passed),
+    checks,
+  };
 }

@@ -16,18 +16,30 @@ import {
 } from "./scheduling.js";
 import {
   confirmMonthlyWorkload,
+  changeOwnPassword,
   ensureDatabase,
+  exportPayrollDetails,
   findAccountByUsername,
   findTeacher,
+  generatePayrollBatch,
   generateTeacherPayrollDetail,
+  lockTeacherPayrollDetail,
   publicAccount,
   queryTeacherAttendanceRecords,
+  queryTeacherAssignments,
   queryTeachers,
+  referenceCatalog,
+  resetAccountPassword,
+  reviewTeacherPayrollDetail,
   saveDatabase,
+  setAccountStatus,
   teacherLessonsForWeek,
   teacherMonthlyWorkload,
   teacherPayrollDetail,
   teacherPayrollPreview,
+  updatePayrollRules,
+  updateTeacherAssignment,
+  validatePhase1Readiness,
 } from "./storage.js";
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
@@ -160,6 +172,21 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/auth/change-password") {
+      const auth = requireAuth(req, res, db);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const account = changeOwnPassword(
+        db,
+        auth.account,
+        String(body.currentPassword || ""),
+        String(body.newPassword || ""),
+      );
+      await saveDatabase(db);
+      sendJson(res, 200, { account });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/me") {
       const auth = requireAuth(req, res, db);
       if (!auth) return;
@@ -172,12 +199,44 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/reference") {
       const auth = requireAuth(req, res, db);
       if (!auth) return;
-      sendJson(res, 200, {
-        stages: db.stages,
-        subjects: db.subjects,
-        classes: db.classes,
-        rooms: db.rooms,
-      });
+      sendJson(res, 200, referenceCatalog(db));
+      return;
+    }
+
+    if (parts[0] === "api" && parts[1] === "reference" && parts.length === 3) {
+      const auth = requireAuth(req, res, db);
+      if (!auth) return;
+      const catalog = referenceCatalog(db);
+      const key = parts[2];
+      if (!Object.prototype.hasOwnProperty.call(catalog, key)) {
+        sendError(res, 404, "基础配置不存在");
+        return;
+      }
+      sendJson(res, 200, { [key]: catalog[key] });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/payroll-rules") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, { payrollRules: db.payrollRules });
+      return;
+    }
+
+    if (req.method === "PATCH" && url.pathname === "/api/payroll-rules") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const payrollRules = updatePayrollRules(db, body.payrollRules || body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, { payrollRules });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/classrooms") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, { rooms: db.rooms });
       return;
     }
 
@@ -189,6 +248,59 @@ async function handleApi(req, res, db, url) {
       const roomId = decodeURIComponent(parts[2] || "");
       const displayKey = url.searchParams.get("displayKey") || "";
       sendJson(res, 200, issueClassroomQrToken(db, roomId, displayKey));
+      return;
+    }
+
+    if (parts[0] === "api" && parts[1] === "classrooms" && parts[3] === "qrcode") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const roomId = decodeURIComponent(parts[2] || "");
+      const room = db.rooms.find((item) => item.id === roomId);
+      if (!room) {
+        sendError(res, 404, "教室不存在");
+        return;
+      }
+      sendJson(res, 200, {
+        room,
+        classroomUrl: `/classroom.html?roomId=${encodeURIComponent(room.id)}&displayKey=${encodeURIComponent(room.displayKey)}`,
+      });
+      return;
+    }
+
+    if (parts[0] === "api" && parts[1] === "accounts" && parts.length >= 4) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const accountId = decodeURIComponent(parts[2] || "");
+      if (req.method === "POST" && parts[3] === "reset-password") {
+        const body = await readJsonBody(req);
+        const account = resetAccountPassword(db, accountId, String(body.newPassword || "123456"), auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { account, defaultPassword: body.newPassword || "123456" });
+        return;
+      }
+      if (req.method === "POST" && parts[3] === "status") {
+        const body = await readJsonBody(req);
+        const account = setAccountStatus(db, accountId, String(body.status || "active"), auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { account });
+        return;
+      }
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/scheduling/teacher-assignments") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, { assignments: queryTeacherAssignments(db, Object.fromEntries(url.searchParams)) });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/teacher-assignments") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const assignment = updateTeacherAssignment(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, { assignment });
       return;
     }
 
@@ -390,6 +502,56 @@ async function handleApi(req, res, db, url) {
         sendJson(res, 200, result);
         return;
       }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "review") {
+        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或管理账号可以复核薪资明细");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const result = reviewTeacherPayrollDetail(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "lock") {
+        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或管理账号可以锁定薪资明细");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const result = lockTeacherPayrollDetail(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/payroll/batch-generate") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = generatePayrollBatch(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/payroll/export") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, exportPayrollDetails(db, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/phase1/readiness") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, validatePhase1Readiness(db));
+      return;
     }
 
     sendError(res, 404, "接口不存在");

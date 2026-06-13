@@ -97,6 +97,10 @@
             <span aria-hidden="true">○</span>
             月度确认
           </button>
+          <button class="nav-item" data-view="teacherPayroll" data-role="teacher" type="button">
+            <span aria-hidden="true">¥</span>
+            薪资明细
+          </button>
           <button class="nav-item" data-view="finance" data-role="finance" type="button">
             <span aria-hidden="true">□</span>
             财务首页
@@ -639,6 +643,18 @@
                   停止扫码
                 </button>
               </div>
+              <div class="manual-scan-box">
+                <label class="field-label" for="manualQrText">手动输入兜底</label>
+                <textarea
+                  class="manual-qr-input"
+                  id="manualQrText"
+                  rows="3"
+                  placeholder="摄像头权限失败时，可粘贴教室电脑二维码内容"
+                ></textarea>
+                <button class="ghost-button" id="submitManualQr" type="button">
+                  提交二维码内容
+                </button>
+              </div>
             </section>
           </div>
 
@@ -717,6 +733,44 @@
               <div class="workload-list" id="workloadList"></div>
             </section>
           </div>
+        </section>
+
+        <section class="view" id="teacherPayrollView" aria-labelledby="teacherPayrollTitle">
+          <section class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="teacherPayrollTitle">我的薪资明细</h2>
+                <p>老师端只查看本人月度薪资项目，财务锁定后作为最终发放口径。</p>
+              </div>
+              <span class="status-pill" id="teacherPayrollStatus">读取中</span>
+            </div>
+            <div class="salary-total">
+              <div>
+                <span>应发工资</span>
+                <strong id="teacherPayrollGross">¥0</strong>
+              </div>
+              <div>
+                <span>代扣个税</span>
+                <strong id="teacherPayrollTax">¥0</strong>
+              </div>
+              <div>
+                <span>实发工资</span>
+                <strong id="teacherPayrollNet">¥0</strong>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>薪资项目</th>
+                    <th>计算口径</th>
+                    <th>金额</th>
+                  </tr>
+                </thead>
+                <tbody id="teacherPayrollTable"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="view" id="financeView" aria-labelledby="financeTitle">
@@ -891,11 +945,40 @@
             </div>
             <div class="settlement-actions">
               <span class="status-pill" id="settlementStatus">未结算</span>
+              <button class="ghost-button" id="batchGeneratePayroll" type="button">
+                批量生成本月薪资
+              </button>
+              <button class="ghost-button" id="reviewTeacherPayroll" type="button">
+                财务复核通过
+              </button>
               <button class="primary-button" id="settleTeacherPayroll" type="button">
                 <span aria-hidden="true">✓</span>
-                结算该老师工资
+                锁定该老师工资
+              </button>
+              <button class="ghost-button" id="exportPayrollCsv" type="button">
+                导出工资明细
               </button>
             </div>
+            <section class="payroll-rule-box" aria-labelledby="payrollRuleTitle">
+              <div class="panel-heading compact-heading">
+                <div>
+                  <h3 id="payrollRuleTitle">薪资规则配置</h3>
+                  <p>第一阶段先配置任课老师固定工资、课时津贴、补课和个税试算口径。</p>
+                </div>
+                <button class="ghost-button" id="savePayrollRules" type="button">保存规则</button>
+              </div>
+              <div class="payroll-rule-grid">
+                <label class="field-label">基本工资<input id="ruleBaseSalary" type="number" min="0" /></label>
+                <label class="field-label">岗位工资<input id="rulePositionSalary" type="number" min="0" /></label>
+                <label class="field-label">正常课时<input id="ruleRegular" type="number" min="0" /></label>
+                <label class="field-label">早自习<input id="ruleMorning" type="number" min="0" /></label>
+                <label class="field-label">晚自习<input id="ruleEvening" type="number" min="0" /></label>
+                <label class="field-label">周末课<input id="ruleWeekend" type="number" min="0" /></label>
+                <label class="field-label">补课<input id="ruleMakeup" type="number" min="0" /></label>
+                <label class="field-label">个税起征点<input id="ruleTaxThreshold" type="number" min="0" /></label>
+                <label class="field-label">试算税率<input id="ruleTaxRate" type="number" min="0" step="0.01" /></label>
+              </div>
+            </section>
             <div class="table-wrap">
               <table>
                 <thead>

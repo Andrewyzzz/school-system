@@ -54,9 +54,15 @@ http://127.0.0.1:4173/api/health
 
 - `POST /api/auth/login`：登录，返回 Token
 - `GET /api/me`：查看当前账号
+- `POST /api/auth/change-password`：当前账号修改密码
+- `GET /api/reference` / `GET /api/reference/:kind`：读取学部、年级、班级、科目、教室、薪资规则和任课关系等基础配置
+- `GET /api/payroll-rules` / `PATCH /api/payroll-rules`：读取和更新任课老师薪资规则
 - `GET /api/teachers`：行政/财务分页查看教师列表
+- `POST /api/accounts/:accountId/reset-password`：行政重置账号密码
+- `POST /api/accounts/:accountId/status`：行政停用或启用账号
 - `POST /api/teachers/import/preview`：行政预览并校验教师导入 CSV
 - `POST /api/teachers/import/commit`：行政确认导入教师档案和老师账号
+- `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
 - `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
 - `POST /api/scheduling/generate`：行政生成无教师/班级/教室时间冲突的排课草稿
 - `POST /api/scheduling/adjust`：行政调整草稿中的任课老师、日期、节次或教室，并重新校验冲突
@@ -64,6 +70,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/scheduling/regenerate-unlocked`：行政保留已锁定课节，重新自动排未锁定课程
 - `POST /api/scheduling/publish`：行政确认发布课表，生成老师端课次任务
 - `GET /api/classrooms/:roomId/dynamic-qr`：教室电脑按大屏密钥获取短时有效动态签到二维码
+- `GET /api/classrooms/:roomId/qrcode`：行政查看教室大屏地址和二维码绑定信息
 - `GET /api/teachers/me`：老师查看本人教师信息
 - `GET /api/teachers/:teacherId/schedule`：查看老师自然周课表
 - `GET /api/teachers/:teacherId/attendance-records`：查看老师扫码签到流水和异常拦截记录
@@ -72,6 +79,11 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/:teacherId/workload/confirm`：老师本人确认月度工作量，后端保存确认快照
 - `GET /api/teachers/:teacherId/payroll`：查看老师月度薪资试算和薪资项目明细
 - `POST /api/teachers/:teacherId/payroll/generate`：财务生成任课老师月度薪资明细快照
+- `POST /api/teachers/:teacherId/payroll/review`：财务复核老师月度薪资明细
+- `POST /api/teachers/:teacherId/payroll/lock`：财务锁定老师月度薪资明细
+- `POST /api/payroll/batch-generate`：财务批量生成任课老师月度薪资明细
+- `GET /api/payroll/export`：财务导出工资明细 CSV 内容
+- `GET /api/phase1/readiness`：第一阶段试运行自动验收检查
 
 第一阶段前端已接入：
 
@@ -86,7 +98,9 @@ http://127.0.0.1:4173/api/health
 - 老师扫码页在后端模式下会把签入/签出提交到真实接口，后端进行本人课时、动态教室码签名和有效期、时间窗口和重复计薪拦截校验。
 - 老师端考勤记录和财务端老师记录在后端模式下读取真实扫码流水，包含通过、拦截和只签入未签出的自动异常。
 - 老师月度确认页在后端模式下读取月度工作内容接口，按已完成签入签出的课时生成可计薪工作量，并把老师确认动作保存为后端确认快照。
+- 老师端“薪资明细”已接入后端，只能查看本人薪资项目。
 - 财务端“看记录”已接入单个老师后端工作内容明细，“薪资结算”页会调用后端生成任课老师薪资明细快照。
+- 财务端已支持薪资规则配置、批量生成薪资、单人复核、单人锁定和 CSV 导出。
 - 正式网页摄像头扫码需要 HTTPS 安全上下文和用户授权，权限失败时保留手动输入/上传识别兜底；后续小程序版本改用微信原生扫码入口复用同一套后端考勤接口。
 
 第一阶段文档和模板：
@@ -95,6 +109,9 @@ http://127.0.0.1:4173/api/health
 - 教师导入说明：`docs/teacher-import-guide.md`
 - 教师导入 CSV 模板：`templates/teacher-import-template.csv`
 - 数据库迁移方案：`docs/database-migration-plan.md`
+- 第一阶段试运行操作手册：`docs/phase1-trial-run-guide.md`
+- 第一阶段已知问题清单：`docs/phase1-known-issues.md`
+- 第一阶段上线验收清单：`docs/phase1-acceptance-checklist.md`
 
 后端种子账号：
 

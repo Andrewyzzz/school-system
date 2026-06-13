@@ -119,6 +119,16 @@ function subjectById(db, subjectId) {
   return db.subjects.find((subject) => subject.id === subjectId);
 }
 
+function assignmentTeachers(db, division, grade, subjectId) {
+  const assignment = (db.teacherAssignments || []).find(
+    (item) => item.stageId === division.stageId && item.grade === grade.grade && item.subjectId === subjectId,
+  );
+  if (!assignment?.teacherIds?.length) return [];
+  return assignment.teacherIds
+    .map((teacherId) => db.teachers.find((teacher) => teacher.id === teacherId))
+    .filter((teacher) => teacher?.status === "active");
+}
+
 function activeSubjectTeachers(db, subjectId, limit = 5) {
   return db.teachers
     .filter((teacher) => teacher.status === "active" && teacher.primarySubjectId === subjectId)
@@ -137,11 +147,12 @@ function schedulingTeacherRows(db, subjects) {
     }));
 }
 
-function schedulingSubjects(db, division) {
+function schedulingSubjects(db, division, grade) {
   return division.subjectRules
     .map((rule) => {
       const subject = subjectById(db, rule.subjectId);
-      const teachers = activeSubjectTeachers(db, rule.subjectId);
+      const configuredTeachers = assignmentTeachers(db, division, grade, rule.subjectId);
+      const teachers = configuredTeachers.length ? configuredTeachers : activeSubjectTeachers(db, rule.subjectId);
       return subject
         ? {
             id: subject.id,
@@ -173,7 +184,7 @@ export function buildSchedulingConfig(db, options = {}) {
   ensureSchedulingStore(db);
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
-  const subjects = schedulingSubjects(db, division);
+  const subjects = schedulingSubjects(db, division, grade);
   const classes = schedulingClasses(db, division, grade);
 
   return {

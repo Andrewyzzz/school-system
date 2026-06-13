@@ -602,6 +602,20 @@ let attendanceRecordState = {
   summary: null,
   teacher: null,
 };
+let teacherPayrollState = {
+  teacherId: "",
+  month: "2026-06",
+  loading: false,
+  loaded: false,
+  error: "",
+  data: null,
+};
+let payrollRuleState = {
+  loading: false,
+  loaded: false,
+  error: "",
+  rules: null,
+};
 let financeTeacherPage = {
   items: [],
   meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
@@ -691,6 +705,11 @@ const views = {
     role: "teacher",
     title: "月度工作量确认",
     el: document.querySelector("#confirmView"),
+  },
+  teacherPayroll: {
+    role: "teacher",
+    title: "我的薪资明细",
+    el: document.querySelector("#teacherPayrollView"),
   },
   finance: {
     role: "finance",
@@ -879,6 +898,17 @@ function resetAttendanceRecordState() {
     records: [],
     summary: null,
     teacher: null,
+  };
+}
+
+function resetTeacherPayrollState() {
+  teacherPayrollState = {
+    teacherId: "",
+    month: "2026-06",
+    loading: false,
+    loaded: false,
+    error: "",
+    data: null,
   };
 }
 
@@ -1722,6 +1752,210 @@ function ensureBackendAttendanceRecords(teacherId, month = "2026-06") {
   }
 }
 
+async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month = "2026-06") {
+  if (!backendMode() || !teacherId) return;
+  teacherPayrollState = {
+    ...teacherPayrollState,
+    teacherId,
+    month,
+    loading: true,
+    error: "",
+  };
+
+  try {
+    const data = await apiRequest(`/api/teachers/${teacherId}/payroll?month=${month}`);
+    teacherPayrollState = {
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: "",
+      data,
+    };
+  } catch (error) {
+    teacherPayrollState = {
+      ...teacherPayrollState,
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: error.message || "薪资明细加载失败",
+      data: null,
+    };
+  }
+
+  if (state.activeView === "teacherPayroll") render();
+}
+
+function ensureBackendTeacherPayroll(teacherId, month = "2026-06") {
+  const needsPayroll =
+    teacherPayrollState.teacherId !== teacherId ||
+    teacherPayrollState.month !== month ||
+    !teacherPayrollState.loaded;
+  if (!teacherPayrollState.loading && needsPayroll) {
+    loadBackendTeacherPayroll(teacherId, month);
+  }
+}
+
+async function loadPayrollRules() {
+  if (!backendMode() || currentRole() !== "finance") return;
+  payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
+  try {
+    const data = await apiRequest("/api/payroll-rules");
+    payrollRuleState = {
+      loading: false,
+      loaded: true,
+      error: "",
+      rules: data.payrollRules || null,
+    };
+  } catch (error) {
+    payrollRuleState = {
+      ...payrollRuleState,
+      loading: false,
+      loaded: true,
+      error: error.message || "薪资规则加载失败",
+    };
+  }
+  if (state.activeView === "settlement") renderSettlement();
+}
+
+function payrollRulesFromInputs() {
+  return {
+    baseSalary: Number(document.querySelector("#ruleBaseSalary").value || 0),
+    positionSalary: Number(document.querySelector("#rulePositionSalary").value || 0),
+    regular: Number(document.querySelector("#ruleRegular").value || 0),
+    morning: Number(document.querySelector("#ruleMorning").value || 0),
+    evening: Number(document.querySelector("#ruleEvening").value || 0),
+    weekend: Number(document.querySelector("#ruleWeekend").value || 0),
+    makeup: Number(document.querySelector("#ruleMakeup").value || 0),
+    taxThreshold: Number(document.querySelector("#ruleTaxThreshold").value || 0),
+    taxRate: Number(document.querySelector("#ruleTaxRate").value || 0),
+  };
+}
+
+async function saveBackendPayrollRules() {
+  if (!backendMode() || currentRole() !== "finance") {
+    showToast("请使用后端财务账号保存薪资规则");
+    return;
+  }
+  payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    const data = await apiRequest("/api/payroll-rules", {
+      method: "PATCH",
+      body: { payrollRules: payrollRulesFromInputs() },
+    });
+    payrollRuleState = {
+      loading: false,
+      loaded: true,
+      error: "",
+      rules: data.payrollRules,
+    };
+    resetFinanceTeacherDetailState();
+    teacherPayrollState.loaded = false;
+    financeTeacherPage.loaded = false;
+    showToast("薪资规则已保存，薪资试算会按新规则刷新");
+  } catch (error) {
+    payrollRuleState = {
+      ...payrollRuleState,
+      loading: false,
+      loaded: true,
+      error: error.message || "薪资规则保存失败",
+    };
+    showToast(payrollRuleState.error);
+  }
+  render();
+}
+
+async function reviewBackendPayroll() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/review`, {
+      method: "POST",
+      body: { month: "2026-06" },
+    });
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      loaded: true,
+      error: "",
+      payroll,
+      payrollGenerated: true,
+    };
+    financeTeacherPage.loaded = false;
+    showToast("财务复核已通过，可以锁定该老师工资");
+  } catch (error) {
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "财务复核失败" };
+    showToast(financeTeacherDetailState.error);
+  }
+  render();
+}
+
+async function lockBackendPayroll() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/lock`, {
+      method: "POST",
+      body: { month: "2026-06" },
+    });
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      loaded: true,
+      error: "",
+      payroll,
+      payrollGenerated: true,
+    };
+    financeTeacherPage.loaded = false;
+    showToast("该老师本月工资已锁定");
+  } catch (error) {
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资锁定失败" };
+    showToast(financeTeacherDetailState.error);
+  }
+  render();
+}
+
+async function batchGenerateBackendPayroll() {
+  if (!backendMode() || currentRole() !== "finance") return;
+  try {
+    const result = await apiRequest("/api/payroll/batch-generate", {
+      method: "POST",
+      body: { month: "2026-06" },
+    });
+    financeTeacherPage.loaded = false;
+    resetFinanceTeacherDetailState();
+    showToast(`已批量生成 ${result.successCount} 份薪资明细，失败 ${result.failedCount} 份`);
+    render();
+  } catch (error) {
+    showToast(error.message || "批量生成薪资失败");
+  }
+}
+
+async function exportBackendPayrollCsv() {
+  if (!backendMode() || currentRole() !== "finance") return;
+  try {
+    const result = await apiRequest("/api/payroll/export?month=2026-06");
+    const blob = new Blob([result.content || ""], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = result.filename || "teacher-payroll-2026-06.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    showToast(`已导出 ${result.total || 0} 份工资明细`);
+  } catch (error) {
+    showToast(error.message || "工资明细导出失败");
+  }
+}
+
 function backendWorkloadStage(data) {
   const status = data?.confirmation?.status || "";
   if (status === "locked") return 3;
@@ -1756,6 +1990,7 @@ async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2
       data,
     };
     state.confirmationStages[teacherId] = backendWorkloadStage(data);
+    resetTeacherPayrollState();
     const pendingCount = data.summary?.pendingCount || 0;
     showToast(pendingCount > 0 ? "已确认，未完成考勤项目暂不计入工资" : "本月工作量已确认");
   } catch (error) {
@@ -2392,6 +2627,18 @@ function settlementTag(teacherId) {
   return `<span class="tag pending">未结算</span>`;
 }
 
+function payrollStatusLabel(status = "preview") {
+  if (status === "locked") return "已锁定";
+  if (status === "reviewed") return "已复核";
+  if (status === "generated") return "已生成";
+  return "试算";
+}
+
+function payrollStatusTag(status = "preview") {
+  const className = status === "locked" ? "locked" : status === "reviewed" ? "completed" : "pending";
+  return `<span class="tag ${className}">${payrollStatusLabel(status)}</span>`;
+}
+
 function render() {
   renderAuth();
   if (!sessionAccountId) return;
@@ -2411,6 +2658,7 @@ function render() {
   renderScanner();
   renderRecords();
   renderConfirmation();
+  renderTeacherPayroll();
   renderFinanceDashboard();
   renderFinanceRecords();
   renderSettlement();
@@ -3096,6 +3344,11 @@ function adminSubjectConfigItem(subject) {
         <span>每班每周 ${subject.weeklyLessons} 节</span>
       </div>
       <p>${teachers}</p>
+      <label class="field-label">
+        任课老师 ID
+        <textarea class="assignment-teacher-input" data-assignment-teachers="${subject.id}" rows="2">${subject.teacherIds.join(", ")}</textarea>
+      </label>
+      <button class="mini-button" data-save-assignment="${subject.id}" type="button">保存任课关系</button>
     </article>
   `;
 }
@@ -3403,6 +3656,77 @@ function renderBackendConfirmation() {
   document.querySelector("#simulateApproval").disabled = true;
 }
 
+function renderTeacherPayroll() {
+  const table = document.querySelector("#teacherPayrollTable");
+  if (!table) return;
+  const teacherId = currentRole() === "teacher" ? currentTeacherId() : "";
+
+  if (backendMode() && currentRole() === "teacher") {
+    ensureBackendTeacherPayroll(teacherId);
+    const isCurrent = teacherPayrollState.teacherId === teacherId;
+    const payroll = isCurrent ? teacherPayrollState.data : null;
+    const status = document.querySelector("#teacherPayrollStatus");
+
+    if (teacherPayrollState.loading && (!isCurrent || !teacherPayrollState.loaded)) {
+      document.querySelector("#teacherPayrollGross").textContent = "读取中";
+      document.querySelector("#teacherPayrollTax").textContent = "读取中";
+      document.querySelector("#teacherPayrollNet").textContent = "读取中";
+      status.textContent = "正在读取后端薪资明细";
+      status.className = "status-pill";
+      table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在读取本人薪资明细...</div></td></tr>`;
+      return;
+    }
+
+    if (teacherPayrollState.error && isCurrent) {
+      document.querySelector("#teacherPayrollGross").textContent = "¥0";
+      document.querySelector("#teacherPayrollTax").textContent = "¥0";
+      document.querySelector("#teacherPayrollNet").textContent = "¥0";
+      status.textContent = teacherPayrollState.error;
+      status.className = "status-pill warning";
+      table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${teacherPayrollState.error}</div></td></tr>`;
+      return;
+    }
+
+    document.querySelector("#teacherPayrollGross").textContent = formatCurrency(payroll?.grossPay || 0);
+    document.querySelector("#teacherPayrollTax").textContent = formatCurrency(payroll?.tax || 0);
+    document.querySelector("#teacherPayrollNet").textContent = formatCurrency(payroll?.netPay || 0);
+    status.textContent = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
+    status.className = payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done";
+    table.innerHTML = payroll?.rows?.length
+      ? payroll.rows
+          .map(
+            (row) => `
+              <tr>
+                <td class="row-title" data-label="薪资项目">${row.name}</td>
+                <td class="muted" data-label="计算口径">${row.basis}</td>
+                <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
+              </tr>
+            `,
+          )
+          .join("")
+      : `<tr><td colspan="3"><div class="empty-state">暂无薪资明细</div></td></tr>`;
+    return;
+  }
+
+  const salary = calculateSalary(teacherId);
+  document.querySelector("#teacherPayrollGross").textContent = formatCurrency(salary.gross);
+  document.querySelector("#teacherPayrollTax").textContent = formatCurrency(salary.tax);
+  document.querySelector("#teacherPayrollNet").textContent = formatCurrency(salary.net);
+  document.querySelector("#teacherPayrollStatus").textContent = settlementText(teacherId);
+  document.querySelector("#teacherPayrollStatus").className = "status-pill";
+  table.innerHTML = salaryRows(teacherId)
+    .map(
+      ([name, basis, amount]) => `
+        <tr>
+          <td class="row-title" data-label="薪资项目">${name}</td>
+          <td class="muted" data-label="计算口径">${basis}</td>
+          <td data-label="金额">${formatCurrency(amount)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+}
+
 function renderFinanceDashboard() {
   if (backendMode() && currentRole() === "finance") {
     renderBackendFinanceDashboard();
@@ -3490,7 +3814,9 @@ function renderBackendFinanceDashboard() {
   document.querySelector("#financeTeacherCount").textContent = meta.total || 0;
   document.querySelector("#financePendingCount").textContent = totals.pending;
   document.querySelector("#financeWarningCount").textContent = totals.exception;
-  document.querySelector("#financeSettledCount").textContent = "0";
+  document.querySelector("#financeSettledCount").textContent = financeTeacherPage.items.filter(
+    (teacher) => teacher.payrollDetail?.status === "locked" || teacher.payroll?.status === "locked",
+  ).length;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
   document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
 
@@ -3546,7 +3872,7 @@ function renderBackendFinanceDashboard() {
                 <td data-label="待处理">${teacher.summary?.pendingCount || 0} 节</td>
                 <td data-label="异常">${teacher.summary?.exceptionCount || 0} 条</td>
                 <td data-label="预计实发">${formatCurrency(teacher.payroll?.netPay || 0)}</td>
-                <td data-label="结算状态"><span class="tag">后端试算</span></td>
+                <td data-label="结算状态">${payrollStatusTag(teacher.payrollDetail?.status || teacher.payroll?.status || "preview")}</td>
                 <td data-label="操作">
                   <button class="mini-button" data-finance-records="${teacher.id}" type="button">看记录</button>
                   <button class="mini-button primary" data-finance-settle="${teacher.id}" type="button">结算</button>
@@ -3664,6 +3990,10 @@ function renderSettlement() {
   status.textContent = settled ? `已结算 ${settlement.settledAt}` : "未结算";
   status.className = settled ? "status-pill locked" : "status-pill";
   document.querySelector("#settleTeacherPayroll").disabled = settled;
+  document.querySelector("#reviewTeacherPayroll").disabled = true;
+  document.querySelector("#batchGeneratePayroll").disabled = true;
+  document.querySelector("#exportPayrollCsv").disabled = true;
+  renderPayrollRulesPanel();
   document.querySelector("#settlementSalaryTable").innerHTML = salaryRows(teacherId)
     .map(
       ([name, basis, amount]) => `
@@ -3682,6 +4012,10 @@ function renderBackendSettlement() {
   select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
   const teacherId = state.selectedFinanceTeacherId;
   ensureFinanceTeacherDetail(teacherId, { generatePayroll: true });
+  if (!payrollRuleState.loaded && !payrollRuleState.loading) {
+    loadPayrollRules();
+  }
+  renderPayrollRulesPanel();
 
   const detail =
     financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
@@ -3690,6 +4024,9 @@ function renderBackendSettlement() {
   const payroll = detail?.payroll;
   const status = document.querySelector("#settlementStatus");
   const button = document.querySelector("#settleTeacherPayroll");
+  const reviewButton = document.querySelector("#reviewTeacherPayroll");
+  const batchButton = document.querySelector("#batchGeneratePayroll");
+  const exportButton = document.querySelector("#exportPayrollCsv");
   const table = document.querySelector("#settlementSalaryTable");
 
   if (financeTeacherDetailState.loading && !payroll) {
@@ -3699,6 +4036,9 @@ function renderBackendSettlement() {
     status.textContent = "正在生成薪资明细";
     status.className = "status-pill";
     button.disabled = true;
+    reviewButton.disabled = true;
+    batchButton.disabled = true;
+    exportButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端生成该老师薪资明细...</div></td></tr>`;
     return;
   }
@@ -3710,6 +4050,9 @@ function renderBackendSettlement() {
     status.textContent = financeTeacherDetailState.error;
     status.className = "status-pill warning";
     button.disabled = true;
+    reviewButton.disabled = true;
+    batchButton.disabled = false;
+    exportButton.disabled = false;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
     return;
   }
@@ -3721,6 +4064,9 @@ function renderBackendSettlement() {
     status.textContent = "暂无薪资明细";
     status.className = "status-pill";
     button.disabled = true;
+    reviewButton.disabled = true;
+    batchButton.disabled = false;
+    exportButton.disabled = false;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">请选择老师生成薪资明细</div></td></tr>`;
     return;
   }
@@ -3728,11 +4074,15 @@ function renderBackendSettlement() {
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
+  const payrollStatus = payroll.generated?.status || "generated";
   status.textContent = payroll.generated
-    ? `已生成 ${payroll.generated.generatedAt?.slice(0, 10) || ""}`
+    ? `${payrollStatusLabel(payrollStatus)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
     : "后端试算";
-  status.className = payroll.generated ? "status-pill done" : "status-pill";
-  button.disabled = true;
+  status.className = payrollStatus === "locked" ? "status-pill locked" : "status-pill done";
+  reviewButton.disabled = financeTeacherDetailState.loading || payrollStatus !== "generated";
+  button.disabled = financeTeacherDetailState.loading || payrollStatus !== "reviewed";
+  batchButton.disabled = financeTeacherDetailState.loading;
+  exportButton.disabled = financeTeacherDetailState.loading;
   table.innerHTML = (payroll.rows || [])
     .map(
       (row) => `
@@ -3744,6 +4094,40 @@ function renderBackendSettlement() {
       `,
     )
     .join("");
+}
+
+function renderPayrollRulesPanel() {
+  const rules = payrollRuleState.rules || {
+    baseSalary: 6500,
+    positionSalary: 1500,
+    regular: state.rules.regularLessonRate,
+    morning: state.rules.selfStudyRate,
+    evening: state.rules.selfStudyRate,
+    weekend: state.rules.weekendRate,
+    makeup: 100,
+    taxThreshold: state.rules.taxThreshold,
+    taxRate: state.rules.taxRate,
+  };
+  const fields = [
+    ["#ruleBaseSalary", rules.baseSalary],
+    ["#rulePositionSalary", rules.positionSalary],
+    ["#ruleRegular", rules.regular],
+    ["#ruleMorning", rules.morning],
+    ["#ruleEvening", rules.evening],
+    ["#ruleWeekend", rules.weekend],
+    ["#ruleMakeup", rules.makeup],
+    ["#ruleTaxThreshold", rules.taxThreshold],
+    ["#ruleTaxRate", rules.taxRate],
+  ];
+  fields.forEach(([selector, value]) => {
+    const input = document.querySelector(selector);
+    if (input && document.activeElement !== input) input.value = value ?? 0;
+  });
+  const saveButton = document.querySelector("#savePayrollRules");
+  if (saveButton) {
+    saveButton.disabled = payrollRuleState.loading || !backendMode();
+    saveButton.textContent = payrollRuleState.loading ? "保存中" : "保存规则";
+  }
 }
 
 function renderWarnings() {
@@ -4262,6 +4646,7 @@ async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
     }
     teacherWorkloadState.loaded = false;
     teacherWorkloadState.data = null;
+    resetTeacherPayrollState();
     resetAttendanceRecordState();
     const label = action === "checkIn" ? "签入" : "签出";
     showToast(`${normalized.className} ${normalized.course} 后端${label}成功`);
@@ -4269,6 +4654,7 @@ async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
   } catch (error) {
     state.lastSecurityChecks = error.details?.checks || state.lastSecurityChecks;
     state.lastSecurityPassed = false;
+    resetTeacherPayrollState();
     resetAttendanceRecordState();
     showToast(error.message || "后端考勤提交失败");
     render();
@@ -4427,6 +4813,12 @@ function startCameraScanner() {
     showToast("扫码库未加载，无法启动摄像头");
     return;
   }
+  if (!window.isSecureContext && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") {
+    showToast("摄像头需要 HTTPS 或 localhost，请使用手动输入兜底");
+    document.querySelector("#scannerStatus").textContent = "需要 HTTPS";
+    document.querySelector("#scannerStatus").className = "status-pill warning";
+    return;
+  }
 
   const scannerConfig = {
     fps: 10,
@@ -4480,6 +4872,7 @@ function loginAccount(accountId) {
   if (qrScanner) stopCameraScanner();
   resetTeacherWorkloadState();
   resetAttendanceRecordState();
+  resetTeacherPayrollState();
   resetFinanceTeacherDetailState();
   sessionAccountId = accountId;
   state.currentAccountId = accountId;
@@ -4547,6 +4940,7 @@ async function authenticate(username, password) {
           error: "",
         };
         await loadFinanceTeacherPage({ page: 1 });
+        await loadPayrollRules();
       }
       if (payload.account.role === "admin") {
         schedulingBackendState = { loaded: false, loading: false, error: "" };
@@ -4651,6 +5045,37 @@ document.addEventListener("click", async (event) => {
       await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
     }
     switchView("settlement");
+    return;
+  }
+
+  const saveAssignmentButton = event.target.closest("[data-save-assignment]");
+  if (saveAssignmentButton) {
+    if (!backendMode() || currentRole() !== "admin") {
+      showToast("请使用后端行政账号保存任课关系");
+      return;
+    }
+    const subjectId = saveAssignmentButton.dataset.saveAssignment;
+    const input = document.querySelector(`[data-assignment-teachers="${subjectId}"]`);
+    const teacherIds = String(input?.value || "")
+      .split(/[,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    try {
+      await apiRequest("/api/scheduling/teacher-assignments", {
+        method: "POST",
+        body: {
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          subjectId,
+          teacherIds,
+        },
+      });
+      showToast("任课关系已保存，重新生成排课时生效");
+      await loadBackendSchedulingContext();
+    } catch (error) {
+      showToast(error.message || "任课关系保存失败");
+    }
+    return;
   }
 });
 
@@ -4794,8 +5219,11 @@ document.querySelector("#qrLessonSelect").addEventListener("change", (event) => 
   renderScanner();
 });
 
-document.querySelector("#scheduleWeekSelect").addEventListener("change", (event) => {
+document.querySelector("#scheduleWeekSelect").addEventListener("change", async (event) => {
   state.selectedScheduleWeekStart = event.target.value;
+  if (backendMode() && currentRole() === "teacher") {
+    await loadBackendTeacherContext(currentTeacherId(), event.target.value);
+  }
   renderSchedule();
 });
 
@@ -4915,7 +5343,11 @@ document.querySelector("#settlementTeacherSelect").addEventListener("change", as
   renderSettlement();
 });
 
-document.querySelector("#settleTeacherPayroll").addEventListener("click", () => {
+document.querySelector("#settleTeacherPayroll").addEventListener("click", async () => {
+  if (backendMode() && currentRole() === "finance") {
+    await lockBackendPayroll();
+    return;
+  }
   const teacherId = state.selectedFinanceTeacherId;
   state.settlements[teacherId] = {
     status: "settled",
@@ -4923,6 +5355,20 @@ document.querySelector("#settleTeacherPayroll").addEventListener("click", () => 
   };
   showToast(`${teacherName(teacherId)} 本月工资已结算锁定`);
   render();
+});
+
+document.querySelector("#reviewTeacherPayroll").addEventListener("click", reviewBackendPayroll);
+document.querySelector("#batchGeneratePayroll").addEventListener("click", batchGenerateBackendPayroll);
+document.querySelector("#exportPayrollCsv").addEventListener("click", exportBackendPayrollCsv);
+document.querySelector("#savePayrollRules").addEventListener("click", saveBackendPayrollRules);
+
+document.querySelector("#submitManualQr").addEventListener("click", async () => {
+  const text = document.querySelector("#manualQrText").value.trim();
+  if (!text) {
+    showToast("请先粘贴二维码内容");
+    return;
+  }
+  await handleDecodedScan(text, selectedScannerActionContext());
 });
 
 render();
@@ -4933,6 +5379,7 @@ if (backendMode()) {
   }
   if (currentRole() === "finance") {
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
+    loadPayrollRules();
   }
   if (currentRole() === "admin") {
     loadBackendSchedulingContext();
