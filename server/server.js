@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { issueClassroomQrToken, submitTeacherAttendance } from "./attendance.js";
+import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAttendance } from "./attendance.js";
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
@@ -21,6 +21,7 @@ import {
   findTeacher,
   generateTeacherPayrollDetail,
   publicAccount,
+  queryTeacherAttendanceRecords,
   queryTeachers,
   saveDatabase,
   teacherLessonsForWeek,
@@ -318,7 +319,19 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
+      if (req.method === "GET" && parts[3] === "attendance-records") {
+        if (markMissingCheckOutExceptions(db)) {
+          await saveDatabase(db);
+        }
+        const month = url.searchParams.get("month") || "2026-06";
+        sendJson(res, 200, queryTeacherAttendanceRecords(db, teacherId, month));
+        return;
+      }
+
       if (req.method === "GET" && parts[3] === "workload") {
+        if (markMissingCheckOutExceptions(db)) {
+          await saveDatabase(db);
+        }
         const month = url.searchParams.get("month") || "2026-06";
         sendJson(res, 200, teacherMonthlyWorkload(db, teacherId, month));
         return;
@@ -357,6 +370,9 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts[3] === "payroll") {
+        if (markMissingCheckOutExceptions(db)) {
+          await saveDatabase(db);
+        }
         const month = url.searchParams.get("month") || "2026-06";
         sendJson(res, 200, teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month));
         return;

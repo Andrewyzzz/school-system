@@ -166,6 +166,47 @@ function recordAttendanceAttempt(db, lesson, actorAccount, action, occurredAt, p
   return record;
 }
 
+export function markMissingCheckOutExceptions(db, asOf = new Date()) {
+  if (!Array.isArray(db.lessonInstances)) return false;
+  let changed = false;
+
+  db.lessonInstances
+    .filter((lesson) => lesson.status === "checkedIn")
+    .forEach((lesson) => {
+      const window = lessonWindow(lesson);
+      if (asOf <= window.checkOutEndsAt) return;
+
+      lesson.status = "exception";
+      lesson.attendanceNote = "只签入未签出，系统自动标记异常，暂不计入薪资";
+
+      const hasRecord = (db.attendanceRecords || []).some(
+        (record) => record.lessonId === lesson.id && record.action === "missingCheckOut",
+      );
+      if (!hasRecord) {
+        recordAttendanceAttempt(
+          db,
+          lesson,
+          { id: "SYSTEM", teacherId: lesson.teacherId },
+          "missingCheckOut",
+          window.checkOutEndsAt,
+          false,
+          [
+            {
+              label: "签出完成",
+              passed: false,
+              detail: "课程已签入但超过签出窗口仍未签出",
+            },
+          ],
+          { roomId: lesson.roomId },
+        );
+      }
+      changed = true;
+    });
+
+  if (changed) db.meta.updatedAt = new Date().toISOString();
+  return changed;
+}
+
 function validateAttendance(db, lesson, actorAccount, action, payload, occurredAt) {
   const checks = [];
   const roomName = lessonRoomName(db, lesson);

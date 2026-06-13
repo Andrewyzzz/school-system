@@ -427,6 +427,61 @@ export function teacherLessonsForWeek(db, teacherId, weekStart) {
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
 
+function attendanceActionLabel(action) {
+  if (action === "checkOut") return "签出";
+  if (action === "missingCheckOut") return "未签出异常";
+  return "签入";
+}
+
+export function queryTeacherAttendanceRecords(db, teacherId, month = "2026-06") {
+  const teacher = findTeacher(db, teacherId);
+  if (!teacher) return null;
+
+  const records = (db.attendanceRecords || [])
+    .filter((record) => record.teacherId === teacherId && String(record.occurredAt || "").startsWith(month))
+    .sort((a, b) => String(a.occurredAt || "").localeCompare(String(b.occurredAt || "")))
+    .map((record) => {
+      const lesson = db.lessonInstances.find((item) => item.id === record.lessonId);
+      const failedCheck = (record.checks || []).find((check) => !check.passed);
+      const actionLabel = attendanceActionLabel(record.action);
+      const status = record.action === "missingCheckOut" ? "exception" : record.status || "rejected";
+      return {
+        id: record.id,
+        lessonId: record.lessonId,
+        teacherId: record.teacherId,
+        teacherName: teacher.name,
+        action: record.action,
+        actionLabel,
+        status,
+        occurredAt: record.occurredAt,
+        date: String(record.occurredAt || lesson?.date || "").slice(0, 10),
+        time: String(record.occurredAt || "").slice(11, 16),
+        className: lesson?.className || "",
+        subjectName: lesson?.subjectName || "",
+        roomId: record.roomId || lesson?.roomId || "",
+        room: record.room || (lesson ? lessonRoomName(db, lesson) : ""),
+        resultText:
+          status === "accepted"
+            ? `${actionLabel}通过`
+            : failedCheck?.detail || record.failureReason || "防作弊规则拦截",
+        checks: record.checks || [],
+        createdAt: record.createdAt,
+      };
+    });
+
+  return {
+    teacher,
+    month,
+    summary: {
+      total: records.length,
+      acceptedCount: records.filter((record) => record.status === "accepted").length,
+      rejectedCount: records.filter((record) => record.status === "rejected").length,
+      exceptionCount: records.filter((record) => record.status === "exception").length,
+    },
+    records,
+  };
+}
+
 export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   const teacher = findTeacher(db, teacherId);
   if (!teacher) return null;

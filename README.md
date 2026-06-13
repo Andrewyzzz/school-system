@@ -66,6 +66,7 @@ http://127.0.0.1:4173/api/health
 - `GET /api/classrooms/:roomId/dynamic-qr`：教室电脑按大屏密钥获取短时有效动态签到二维码
 - `GET /api/teachers/me`：老师查看本人教师信息
 - `GET /api/teachers/:teacherId/schedule`：查看老师自然周课表
+- `GET /api/teachers/:teacherId/attendance-records`：查看老师扫码签到流水和异常拦截记录
 - `POST /api/teachers/:teacherId/attendance`：老师本人提交签入/签出，校验教室码、时间窗口和重复计薪
 - `GET /api/teachers/:teacherId/workload`：查看老师月度工作内容，汇总可计薪课时、待处理、异常和薪资试算
 - `POST /api/teachers/:teacherId/workload/confirm`：老师本人确认月度工作量，后端保存确认快照
@@ -83,6 +84,7 @@ http://127.0.0.1:4173/api/health
 - 行政可锁定已确认课节，再触发“重排未锁定课程”，系统会保留锁定课节并补排剩余课程。
 - 教室电脑可打开 `classroom.html?roomId=ROOM-primary-1-01&displayKey=screen-room-primary-1-01` 展示实时动态签到二维码。
 - 老师扫码页在后端模式下会把签入/签出提交到真实接口，后端进行本人课时、动态教室码签名和有效期、时间窗口和重复计薪拦截校验。
+- 老师端考勤记录和财务端老师记录在后端模式下读取真实扫码流水，包含通过、拦截和只签入未签出的自动异常。
 - 老师月度确认页在后端模式下读取月度工作内容接口，按已完成签入签出的课时生成可计薪工作量，并把老师确认动作保存为后端确认快照。
 - 财务端“看记录”已接入单个老师后端工作内容明细，“薪资结算”页会调用后端生成任课老师薪资明细快照。
 - 正式网页摄像头扫码需要 HTTPS 安全上下文和用户授权，权限失败时保留手动输入/上传识别兜底；后续小程序版本改用微信原生扫码入口复用同一套后端考勤接口。

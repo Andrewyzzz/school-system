@@ -592,6 +592,16 @@ let teacherWorkloadState = {
   error: "",
   data: null,
 };
+let attendanceRecordState = {
+  teacherId: "",
+  month: "2026-06",
+  loading: false,
+  loaded: false,
+  error: "",
+  records: [],
+  summary: null,
+  teacher: null,
+};
 let financeTeacherPage = {
   items: [],
   meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
@@ -856,6 +866,19 @@ function resetTeacherWorkloadState() {
     loaded: false,
     error: "",
     data: null,
+  };
+}
+
+function resetAttendanceRecordState() {
+  attendanceRecordState = {
+    teacherId: "",
+    month: "2026-06",
+    loading: false,
+    loaded: false,
+    error: "",
+    records: [],
+    summary: null,
+    teacher: null,
   };
 }
 
@@ -1648,6 +1671,54 @@ async function loadBackendWorkload(teacherId = currentTeacherId(), month = "2026
 
   if (state.activeView === "confirm") {
     render();
+  }
+}
+
+async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), month = "2026-06") {
+  if (!backendMode() || !teacherId) return;
+  attendanceRecordState = {
+    ...attendanceRecordState,
+    teacherId,
+    month,
+    loading: true,
+    error: "",
+  };
+
+  try {
+    const data = await apiRequest(`/api/teachers/${teacherId}/attendance-records?month=${month}`);
+    attendanceRecordState = {
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: "",
+      records: data.records || [],
+      summary: data.summary || null,
+      teacher: data.teacher || null,
+    };
+  } catch (error) {
+    attendanceRecordState = {
+      ...attendanceRecordState,
+      teacherId,
+      month,
+      loading: false,
+      loaded: true,
+      error: error.message || "考勤记录加载失败",
+    };
+  }
+
+  if (["records", "financeRecords", "warnings"].includes(state.activeView)) {
+    render();
+  }
+}
+
+function ensureBackendAttendanceRecords(teacherId, month = "2026-06") {
+  const needsRecords =
+    attendanceRecordState.teacherId !== teacherId ||
+    attendanceRecordState.month !== month ||
+    !attendanceRecordState.loaded;
+  if (!attendanceRecordState.loading && needsRecords) {
+    loadBackendAttendanceRecords(teacherId, month);
   }
 }
 
@@ -3156,6 +3227,11 @@ function renderScanner() {
 }
 
 function renderRecords() {
+  if (backendMode() && currentRole() === "teacher") {
+    renderBackendTeacherRecords();
+    return;
+  }
+
   const teacherId = currentTeacherId();
   const records = teacherLessons(teacherId).filter(
     (lesson) => lesson.status === "checkedIn" || lesson.status === "completed" || lesson.status === "exception",
@@ -3163,6 +3239,52 @@ function renderRecords() {
   document.querySelector("#teacherRecordTable").innerHTML = records.length
     ? records.map(recordRow).join("")
     : `<tr><td colspan="7"><div class="empty-state">暂无考勤记录</div></td></tr>`;
+}
+
+function attendanceRecordTag(record) {
+  if (record.status === "accepted") {
+    return `<span class="tag completed">${record.actionLabel || "通过"}</span>`;
+  }
+  if (record.status === "exception") {
+    return `<span class="tag exception">异常</span>`;
+  }
+  return `<span class="tag exception">已拦截</span>`;
+}
+
+function backendTeacherRecordRow(record) {
+  return `
+    <tr>
+      <td data-label="日期">${formatDate(record.date)}</td>
+      <td data-label="时间">${record.time || "-"}</td>
+      <td class="row-title" data-label="班级">${record.className || "-"}</td>
+      <td data-label="课程">${record.subjectName || "-"}</td>
+      <td data-label="教室">${record.room || "-"}</td>
+      <td data-label="考勤状态">${attendanceRecordTag(record)}</td>
+      <td class="muted" data-label="记录说明">${record.resultText || "-"}</td>
+    </tr>
+  `;
+}
+
+function renderBackendTeacherRecords() {
+  const teacherId = currentTeacherId();
+  ensureBackendAttendanceRecords(teacherId);
+  const table = document.querySelector("#teacherRecordTable");
+  const isCurrent = attendanceRecordState.teacherId === teacherId;
+
+  if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
+    table.innerHTML = `<tr><td colspan="7"><div class="empty-state">正在加载后端考勤记录...</div></td></tr>`;
+    return;
+  }
+
+  if (attendanceRecordState.error && isCurrent) {
+    table.innerHTML = `<tr><td colspan="7"><div class="empty-state">${attendanceRecordState.error}</div></td></tr>`;
+    return;
+  }
+
+  const records = isCurrent ? attendanceRecordState.records : [];
+  table.innerHTML = records.length
+    ? records.map(backendTeacherRecordRow).join("")
+    : `<tr><td colspan="7"><div class="empty-state">暂无后端考勤记录</div></td></tr>`;
 }
 
 function renderConfirmation() {
@@ -3480,7 +3602,7 @@ function backendFinanceRecordRow(row, teacher) {
       <td data-label="班级">${row.className}</td>
       <td data-label="课程">${row.subjectName || row.course}</td>
       <td data-label="教室">${row.room}</td>
-      <td data-label="考勤状态">${statusTag(row.status)}</td>
+      <td data-label="考勤状态">${attendanceRecordTag(row)}</td>
       <td class="muted" data-label="说明">${row.note}</td>
     </tr>
   `;
@@ -3490,29 +3612,36 @@ function renderBackendFinanceRecords() {
   const select = document.querySelector("#financeTeacherSelect");
   select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
   const teacherId = state.selectedFinanceTeacherId;
-  ensureFinanceTeacherDetail(teacherId);
+  ensureBackendAttendanceRecords(teacherId);
 
   const table = document.querySelector("#financeRecordTable");
-  const detail =
-    financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
-      ? financeTeacherDetailState
-      : null;
+  const isCurrent = attendanceRecordState.teacherId === teacherId;
 
-  if (financeTeacherDetailState.loading && !detail?.workload) {
-    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">正在加载该老师后端工作内容...</div></td></tr>`;
+  if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">正在加载该老师后端扫码记录...</div></td></tr>`;
     return;
   }
 
-  if (financeTeacherDetailState.error) {
-    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+  if (attendanceRecordState.error && isCurrent) {
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">${attendanceRecordState.error}</div></td></tr>`;
     return;
   }
 
-  const rows = backendFinanceWorkloadRows(detail?.workload);
-  const teacher = detail?.workload?.teacher || teacherById(teacherId);
+  const rows = isCurrent ? attendanceRecordState.records : [];
+  const teacher = attendanceRecordState.teacher || teacherById(teacherId);
   table.innerHTML = rows.length
-    ? rows.map((row) => backendFinanceRecordRow(row, teacher)).join("")
-    : `<tr><td colspan="8"><div class="empty-state">该老师暂无后端工作内容</div></td></tr>`;
+    ? rows
+        .map((row) =>
+          backendFinanceRecordRow(
+            {
+              ...row,
+              note: row.resultText,
+            },
+            teacher,
+          ),
+        )
+        .join("")
+    : `<tr><td colspan="8"><div class="empty-state">该老师暂无后端扫码记录</div></td></tr>`;
 }
 
 function renderSettlement() {
@@ -3618,6 +3747,11 @@ function renderBackendSettlement() {
 }
 
 function renderWarnings() {
+  if (backendMode()) {
+    renderBackendWarnings();
+    return;
+  }
+
   const role = currentRole();
   const teacherId = role === "teacher" ? currentTeacherId() : null;
   const warnings = buildWarnings(teacherId);
@@ -3637,6 +3771,42 @@ function renderWarnings() {
         )
         .join("")
     : `<div class="empty-state">暂无异常提醒</div>`;
+}
+
+function renderBackendWarnings() {
+  const role = currentRole();
+  const teacherId = role === "teacher" ? currentTeacherId() : state.selectedFinanceTeacherId;
+  ensureBackendAttendanceRecords(teacherId);
+  const isCurrent = attendanceRecordState.teacherId === teacherId;
+  document.querySelector("#warningsTitle").textContent = role === "teacher" ? "我的异常提醒" : "老师异常扫码记录";
+
+  const list = document.querySelector("#warningList");
+  if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
+    list.innerHTML = `<div class="empty-state">正在加载后端异常记录...</div>`;
+    return;
+  }
+
+  if (attendanceRecordState.error && isCurrent) {
+    list.innerHTML = `<div class="empty-state">${attendanceRecordState.error}</div>`;
+    return;
+  }
+
+  const warnings = (isCurrent ? attendanceRecordState.records : []).filter((record) => record.status !== "accepted");
+  list.innerHTML = warnings.length
+    ? warnings
+        .map(
+          (warning) => `
+            <article class="warning-item">
+              <header>
+                <strong>${warning.actionLabel} · ${warning.className || "未匹配课次"}</strong>
+                <span class="tag exception">${warning.status === "exception" ? "异常" : "拦截"}</span>
+              </header>
+              <p>${formatDate(warning.date)} ${warning.time || ""} · ${warning.room || "未知教室"} · ${warning.resultText}</p>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">暂无后端异常记录</div>`;
 }
 
 function teacherOptions(selectedId) {
@@ -4092,12 +4262,14 @@ async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
     }
     teacherWorkloadState.loaded = false;
     teacherWorkloadState.data = null;
+    resetAttendanceRecordState();
     const label = action === "checkIn" ? "签入" : "签出";
     showToast(`${normalized.className} ${normalized.course} 后端${label}成功`);
     render();
   } catch (error) {
     state.lastSecurityChecks = error.details?.checks || state.lastSecurityChecks;
     state.lastSecurityPassed = false;
+    resetAttendanceRecordState();
     showToast(error.message || "后端考勤提交失败");
     render();
   }
@@ -4307,6 +4479,7 @@ function loginAccount(accountId) {
   if (!account) return;
   if (qrScanner) stopCameraScanner();
   resetTeacherWorkloadState();
+  resetAttendanceRecordState();
   resetFinanceTeacherDetailState();
   sessionAccountId = accountId;
   state.currentAccountId = accountId;
@@ -4461,9 +4634,10 @@ document.addEventListener("click", async (event) => {
   const financeRecordsButton = event.target.closest("[data-finance-records]");
   if (financeRecordsButton) {
     state.selectedFinanceTeacherId = financeRecordsButton.dataset.financeRecords;
+    resetAttendanceRecordState();
     resetFinanceTeacherDetailState();
     if (backendMode()) {
-      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId);
+      await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
     }
     switchView("financeRecords");
     return;
@@ -4722,9 +4896,10 @@ document.querySelector("#stopScanner").addEventListener("click", stopCameraScann
 
 document.querySelector("#financeTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
+  resetAttendanceRecordState();
   resetFinanceTeacherDetailState();
   if (backendMode() && currentRole() === "finance") {
-    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId);
+    await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
     return;
   }
   renderFinanceRecords();
