@@ -113,6 +113,7 @@ function createClassesAndRooms() {
           stageId: stage.id,
           name: roomName,
           qrCode: `ROOM:${roomId}`,
+          displayKey: `screen-${roomId.toLowerCase()}`,
           active: true,
         });
       }

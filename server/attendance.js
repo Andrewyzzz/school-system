@@ -1,5 +1,9 @@
+import crypto from "node:crypto";
+
 const SECURITY_SECRET = "school-demo-signing-key";
 const CHECK_WINDOW_MINUTES = 15;
+const DYNAMIC_QR_TTL_SECONDS = 30;
+const DYNAMIC_QR_CLOCK_SKEW_SECONDS = 5;
 
 function parseJsonPayload(rawPayload) {
   if (typeof rawPayload === "object" && rawPayload) return rawPayload;
@@ -17,6 +21,24 @@ function signingBase(payload) {
   ].join("|");
 }
 
+function dynamicSigningBase(payload) {
+  return [
+    payload.app,
+    payload.type,
+    payload.roomId,
+    payload.issuedAt,
+    payload.expiresAt,
+    payload.nonce,
+  ].join("|");
+}
+
+function signDynamicPayload(payload) {
+  return crypto
+    .createHmac("sha256", SECURITY_SECRET)
+    .update(dynamicSigningBase(payload))
+    .digest("hex");
+}
+
 function signPayload(payload) {
   const text = signingBase(payload);
   let hash = 0;
@@ -25,6 +47,51 @@ function signPayload(payload) {
     hash |= 0;
   }
   return Math.abs(hash).toString(36).padStart(7, "0");
+}
+
+function roomDisplayKey(room) {
+  return room.displayKey || `screen-${String(room.id).toLowerCase()}`;
+}
+
+export function issueClassroomQrToken(db, roomId, displayKey = "") {
+  const room = db.rooms.find((item) => item.id === roomId);
+  if (!room || room.active === false) {
+    const error = new Error("教室不存在或已停用");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (displayKey !== roomDisplayKey(room)) {
+    const error = new Error("教室大屏密钥不正确");
+    error.statusCode = 403;
+    throw error;
+  }
+
+  const issuedAt = new Date();
+  const expiresAt = addMinutes(issuedAt, DYNAMIC_QR_TTL_SECONDS / 60);
+  const payload = {
+    app: "school-system",
+    type: "classroom-dynamic-qr",
+    roomId: room.id,
+    roomName: room.name,
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: expiresAt.toISOString(),
+    nonce: crypto.randomBytes(8).toString("hex"),
+  };
+
+  return {
+    room: {
+      id: room.id,
+      name: room.name,
+      stageId: room.stageId,
+    },
+    ttlSeconds: DYNAMIC_QR_TTL_SECONDS,
+    refreshInSeconds: Math.max(DYNAMIC_QR_TTL_SECONDS - 5, 10),
+    payload: {
+      ...payload,
+      signature: signDynamicPayload(payload),
+    },
+  };
 }
 
 function addMinutes(date, minutes) {
@@ -116,17 +183,31 @@ function validateAttendance(db, lesson, actorAccount, action, payload, occurredA
     lesson.teacherId === actorAccount.teacherId ? "课时属于当前老师" : "不能代签其他老师课时",
   );
 
-  const typePassed = payload?.app === "school-teacher-pay-demo" && payload?.action === "classroom-checkin";
-  pushCheck(checks, "二维码类型", typePassed, typePassed ? "属于固定教室考勤码" : "不是本系统教室码");
+  const typePassed = payload?.app === "school-system" && payload?.type === "classroom-dynamic-qr";
+  pushCheck(checks, "动态二维码类型", typePassed, typePassed ? "属于教室大屏动态考勤码" : "不是本系统动态教室码");
 
-  const signaturePassed = Boolean(payload?.signature) && payload.signature === signPayload(payload);
-  pushCheck(checks, "教室码防伪", signaturePassed, signaturePassed ? "签名匹配" : "签名不匹配或缺失");
+  const signaturePassed = typePassed && Boolean(payload?.signature) && payload.signature === signDynamicPayload(payload);
+  pushCheck(checks, "动态码防伪", signaturePassed, signaturePassed ? "后端签名匹配" : "签名不匹配或缺失");
 
-  const roomPassed =
-    payload?.room === roomName ||
-    payload?.room === lesson.roomId ||
-    payload?.roomCode === `ROOM-${roomName}` ||
-    payload?.roomCode === `ROOM-${lesson.roomId}`;
+  const issuedAt = payload?.issuedAt ? new Date(payload.issuedAt) : null;
+  const expiresAt = payload?.expiresAt ? new Date(payload.expiresAt) : null;
+  const serverNow = new Date();
+  const freshnessPassed =
+    typePassed &&
+    issuedAt &&
+    expiresAt &&
+    !Number.isNaN(issuedAt.getTime()) &&
+    !Number.isNaN(expiresAt.getTime()) &&
+    issuedAt.getTime() <= serverNow.getTime() + DYNAMIC_QR_CLOCK_SKEW_SECONDS * 1000 &&
+    expiresAt.getTime() >= serverNow.getTime() - DYNAMIC_QR_CLOCK_SKEW_SECONDS * 1000;
+  pushCheck(
+    checks,
+    "动态码有效期",
+    freshnessPassed,
+    freshnessPassed ? "二维码仍在有效期内" : "二维码已过期或时间异常",
+  );
+
+  const roomPassed = payload?.roomId === lesson.roomId;
   pushCheck(checks, "指定教室", roomPassed, roomPassed ? `匹配 ${roomName}` : "扫码教室与课表教室不一致");
 
   const window = lessonWindow(lesson);

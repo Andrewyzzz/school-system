@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { submitTeacherAttendance } from "./attendance.js";
+import { issueClassroomQrToken, submitTeacherAttendance } from "./attendance.js";
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
@@ -177,6 +177,17 @@ async function handleApi(req, res, db, url) {
         classes: db.classes,
         rooms: db.rooms,
       });
+      return;
+    }
+
+    if (parts[0] === "api" && parts[1] === "classrooms" && parts[3] === "dynamic-qr") {
+      if (req.method !== "GET") {
+        sendError(res, 405, "接口方法不支持");
+        return;
+      }
+      const roomId = decodeURIComponent(parts[2] || "");
+      const displayKey = url.searchParams.get("displayKey") || "";
+      sendJson(res, 200, issueClassroomQrToken(db, roomId, displayKey));
       return;
     }
 

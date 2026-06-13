@@ -976,6 +976,7 @@ function normalizeBackendLesson(lesson) {
     time: lesson.time,
     className: lesson.className,
     course: lesson.subjectName,
+    roomId: lesson.roomId,
     room: lesson.room || lesson.roomId,
     type: lesson.type || "regular",
     units: lesson.units || 1,
@@ -3123,15 +3124,26 @@ function renderScanner() {
   const qrBox = document.querySelector("#qrCodeBox");
   const payloadText = document.querySelector("#qrPayloadText");
 
-  payloadText.textContent = payload;
   if (!lesson) {
+    payloadText.textContent = "";
     qrBox.innerHTML = `<div class="empty-state">暂无可生成二维码的课时</div>`;
+  } else if (backendMode() && lesson.source === "backend-api") {
+    const screenPath = classroomScreenPathForLesson(lesson);
+    payloadText.textContent = `${window.location.origin}/${screenPath}`;
+    qrBox.innerHTML = `
+      <div class="empty-state">
+        教室电脑打开动态签到屏<br />
+        <code>${screenPath}</code>
+      </div>
+    `;
   } else if (typeof qrcode === "function") {
+    payloadText.textContent = payload;
     const qr = qrcode(0, "M");
     qr.addData(payload);
     qr.make();
     qrBox.innerHTML = qr.createSvgTag(6, 1);
   } else {
+    payloadText.textContent = payload;
     qrBox.innerHTML = `<div class="empty-state">二维码生成库未加载</div>`;
   }
 
@@ -3803,6 +3815,27 @@ function buildQrPayload(lesson, options = {}) {
   });
 }
 
+function roomDisplayKeyForDevelopment(roomId) {
+  return `screen-${String(roomId || "").toLowerCase()}`;
+}
+
+async function dynamicQrPayloadForLesson(lesson) {
+  if (!backendMode() || !lesson?.roomId) return buildQrPayload(lesson);
+  const result = await apiRequest(
+    `/api/classrooms/${encodeURIComponent(lesson.roomId)}/dynamic-qr?displayKey=${encodeURIComponent(
+      roomDisplayKeyForDevelopment(lesson.roomId),
+    )}`,
+  );
+  return JSON.stringify(result.payload);
+}
+
+function classroomScreenPathForLesson(lesson) {
+  if (!lesson?.roomId) return "";
+  return `classroom.html?roomId=${encodeURIComponent(lesson.roomId)}&displayKey=${encodeURIComponent(
+    roomDisplayKeyForDevelopment(lesson.roomId),
+  )}`;
+}
+
 function lessonWindow(lesson) {
   const [startTime, endTime] = lesson.time.split("-");
   const start = new Date(`${lesson.date}T${startTime}:00+08:00`);
@@ -3842,12 +3875,24 @@ function actionLabel(action) {
   return action === "checkOut" ? "签出" : "签入";
 }
 
-function findCurrentLessonForRoom(room, action, targetLessonId, nowText = state.demoNow) {
+function lessonMatchesQrRoom(lesson, payload) {
+  return (
+    (payload.roomId && lesson.roomId === payload.roomId) ||
+    (payload.roomName && lesson.room === payload.roomName) ||
+    (payload.room && lesson.room === payload.room)
+  );
+}
+
+function qrRoomLabel(payload) {
+  return payload.roomName || payload.room || payload.roomId || "未知教室";
+}
+
+function findCurrentLessonForPayload(payload, action, targetLessonId, nowText = state.demoNow) {
   const teacherId = currentTeacherId();
   const now = new Date(nowText);
   return teacherLessons(teacherId).find((lesson) => {
     if (targetLessonId && lesson.id !== targetLessonId) return false;
-    if (lesson.room !== room) return false;
+    if (!lessonMatchesQrRoom(lesson, payload)) return false;
     const window = lessonWindow(lesson);
     if (action === "checkOut") {
       return now >= window.checkOutStartsAt && now <= window.endsAt;
@@ -3875,12 +3920,43 @@ function validateQrPayload(decodedText, options = {}) {
     return { ok: false, checks };
   }
 
-  const typePassed = payload.app === "school-teacher-pay-demo" && payload.action === "classroom-checkin";
-  pushCheck(checks, "业务类型", typePassed, typePassed ? "属于固定教室考勤码" : "不是本系统教室二维码");
+  const dynamicPayload = payload.app === "school-system" && payload.type === "classroom-dynamic-qr";
+  const staticPayload = payload.app === "school-teacher-pay-demo" && payload.action === "classroom-checkin";
+  const typePassed = backendMode() ? dynamicPayload : dynamicPayload || staticPayload;
+  pushCheck(
+    checks,
+    "业务类型",
+    typePassed,
+    dynamicPayload
+      ? "属于教室电脑实时二维码"
+      : staticPayload
+        ? "属于本地固定教室码"
+        : "不是本系统教室二维码",
+  );
 
-  const expectedSignature = signPayload(payload);
-  const signaturePassed = Boolean(payload.signature) && payload.signature === expectedSignature;
-  pushCheck(checks, "教室码防伪", signaturePassed, signaturePassed ? "固定教室码签名匹配" : "签名不匹配，疑似伪造或篡改");
+  let signaturePassed = false;
+  if (dynamicPayload) {
+    signaturePassed = Boolean(payload.signature);
+  } else {
+    const expectedSignature = signPayload(payload);
+    signaturePassed = Boolean(payload.signature) && payload.signature === expectedSignature;
+  }
+  pushCheck(
+    checks,
+    "教室码防伪",
+    signaturePassed,
+    dynamicPayload
+      ? "动态码签名将由后端验签"
+      : signaturePassed
+        ? "固定教室码签名匹配"
+        : "签名不匹配，疑似伪造或篡改",
+  );
+
+  if (dynamicPayload) {
+    const expiresAt = new Date(payload.expiresAt);
+    const freshnessPassed = !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() >= Date.now();
+    pushCheck(checks, "动态码有效期", freshnessPassed, freshnessPassed ? "二维码未过期" : "二维码已过期，请扫教室屏幕新码");
+  }
 
   const rolePassed = currentRole() === "teacher";
   pushCheck(checks, "账号角色", rolePassed, rolePassed ? "当前为老师账号" : "财务账号不能代替老师考勤");
@@ -3889,10 +3965,10 @@ function validateQrPayload(decodedText, options = {}) {
   const devicePassed = currentAccount().deviceId && teacher?.boundDeviceId === currentAccount().deviceId;
   pushCheck(checks, "绑定设备", devicePassed, devicePassed ? "当前设备与老师账号绑定信息一致" : "非绑定设备，需重新认证");
 
-  const roomExists = state.lessons.some((item) => item.room === payload.room);
-  pushCheck(checks, "教室存在", roomExists, roomExists ? `识别到教室 ${payload.room}` : "系统没有这个教室码");
+  const roomExists = state.lessons.some((item) => lessonMatchesQrRoom(item, payload));
+  pushCheck(checks, "教室存在", roomExists, roomExists ? `识别到教室 ${qrRoomLabel(payload)}` : "系统没有这个教室码");
 
-  lesson = findCurrentLessonForRoom(payload.room, action, options.lessonId, nowText);
+  lesson = findCurrentLessonForPayload(payload, action, options.lessonId, nowText);
   pushCheck(
     checks,
     `${actionLabel(action)}时间匹配课表`,
@@ -3931,7 +4007,7 @@ function renderSecurityChecks() {
   if (!state.lastSecurityChecks.length) {
     summary.textContent = "等待扫码";
     summary.className = "status-pill";
-    list.innerHTML = `<div class="empty-state">扫码后会显示格式、固定教室码防伪、老师账号、绑定设备、签入/签出时间窗口、课时状态、重复计薪拦截等校验结果。</div>`;
+    list.innerHTML = `<div class="empty-state">扫码后会显示格式、动态教室码防伪、有效期、老师账号、绑定设备、签入/签出时间窗口、课时状态、重复计薪拦截等校验结果。</div>`;
     return;
   }
 
@@ -3986,7 +4062,8 @@ async function attemptSecureAttendance(id, action = null) {
   const lesson = state.lessons.find((item) => item.id === id);
   if (!lesson) return;
   const attendanceAction = action || actionForLesson(lesson);
-  await handleDecodedScan(buildQrPayload(lesson), {
+  const qrPayload = await dynamicQrPayloadForLesson(lesson);
+  await handleDecodedScan(qrPayload, {
     action: attendanceAction,
     lessonId: lesson.id,
     nowText: demoTimeForAction(lesson, attendanceAction),
@@ -4593,7 +4670,7 @@ document.querySelector("#simulateQrRead").addEventListener("click", async () => 
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
   const action = actionForLesson(lesson);
-  await handleDecodedScan(buildQrPayload(lesson), {
+  await handleDecodedScan(await dynamicQrPayloadForLesson(lesson), {
     action,
     lessonId: lesson.id,
     nowText: demoTimeForAction(lesson, action),
@@ -4605,7 +4682,7 @@ document.querySelector("#simulateOutOfWindowQr").addEventListener("click", async
   if (!lesson) return;
   const originalNow = state.demoNow;
   state.demoNow = "2026-06-09T12:30:00+08:00";
-  await handleDecodedScan(buildQrPayload(lesson), {
+  await handleDecodedScan(await dynamicQrPayloadForLesson(lesson), {
     action: actionForLesson(lesson),
     lessonId: lesson.id,
     nowText: state.demoNow,
@@ -4616,8 +4693,9 @@ document.querySelector("#simulateOutOfWindowQr").addEventListener("click", async
 document.querySelector("#simulateTamperedQr").addEventListener("click", async () => {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
-  const payload = JSON.parse(buildQrPayload(lesson));
-  payload.room = "X999";
+  const payload = JSON.parse(await dynamicQrPayloadForLesson(lesson));
+  payload.roomId = "ROOM-tampered";
+  payload.roomName = "伪造教室";
   await handleDecodedScan(JSON.stringify(payload), {
     action: actionForLesson(lesson),
     lessonId: lesson.id,
@@ -4628,7 +4706,7 @@ document.querySelector("#simulateTamperedQr").addEventListener("click", async ()
 document.querySelector("#copyQrText").addEventListener("click", async () => {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) return;
-  const text = buildQrPayload(lesson);
+  const text = backendMode() && lesson.source === "backend-api" ? classroomScreenPathForLesson(lesson) : buildQrPayload(lesson);
   try {
     await navigator.clipboard.writeText(text);
     showToast("二维码内容已复制");

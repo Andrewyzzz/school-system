@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>教室动态签到码</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family:
+          Inter,
+          "PingFang SC",
+          "Microsoft YaHei",
+          Arial,
+          sans-serif;
+        background: #f4f6f8;
+        color: #18202b;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 32px;
+      }
+
+      main {
+        width: min(1080px, 100%);
+      }
+
+      .screen {
+        display: grid;
+        grid-template-columns: minmax(320px, 420px) 1fr;
+        gap: 32px;
+        align-items: stretch;
+      }
+
+      .panel {
+        background: #ffffff;
+        border: 1px solid #dfe5eb;
+        border-radius: 8px;
+        box-shadow: 0 12px 36px rgba(24, 32, 43, 0.08);
+        padding: 28px;
+      }
+
+      .qr-panel {
+        display: grid;
+        place-items: center;
+        min-height: 520px;
+      }
+
+      .qr-box {
+        width: min(360px, 72vw);
+        aspect-ratio: 1;
+        display: grid;
+        place-items: center;
+        border: 1px solid #dfe5eb;
+        border-radius: 8px;
+        padding: 18px;
+        background: #fff;
+      }
+
+      .qr-box svg {
+        width: 100%;
+        height: 100%;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 40px;
+        line-height: 1.15;
+      }
+
+      h2 {
+        font-size: 22px;
+      }
+
+      .meta {
+        display: grid;
+        gap: 18px;
+      }
+
+      .meta-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 18px;
+        padding: 16px 0;
+        border-bottom: 1px solid #edf1f5;
+      }
+
+      .meta-row span {
+        color: #637083;
+      }
+
+      .meta-row strong {
+        text-align: right;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        width: fit-content;
+        min-height: 32px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: #e9f7ef;
+        color: #187343;
+        font-weight: 700;
+      }
+
+      .status.warning {
+        background: #fff4e5;
+        color: #955a00;
+      }
+
+      .setup {
+        max-width: 560px;
+        margin: 0 auto;
+      }
+
+      form {
+        display: grid;
+        gap: 16px;
+        margin-top: 24px;
+      }
+
+      label {
+        display: grid;
+        gap: 8px;
+        color: #637083;
+        font-size: 14px;
+      }
+
+      input {
+        min-height: 46px;
+        border: 1px solid #cfd8e3;
+        border-radius: 6px;
+        padding: 0 12px;
+        font: inherit;
+      }
+
+      button {
+        min-height: 46px;
+        border: 0;
+        border-radius: 6px;
+        background: #1769e0;
+        color: #fff;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      code {
+        display: block;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        padding: 14px;
+        border-radius: 6px;
+        background: #f4f6f8;
+        color: #425064;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      @media (max-width: 860px) {
+        body {
+          padding: 18px;
+        }
+
+        .screen {
+          grid-template-columns: 1fr;
+        }
+
+        h1 {
+          font-size: 30px;
+        }
+
+        .qr-panel {
+          min-height: 420px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel setup" id="setupPanel" hidden>
+        <h1>教室动态签到码</h1>
+        <p style="margin-top: 12px; color: #637083">请输入教室编号和大屏密钥，绑定后本机将持续展示实时二维码。</p>
+        <form id="setupForm">
+          <label>
+            教室编号
+            <input id="roomIdInput" placeholder="ROOM-primary-1-01" autocomplete="off" />
+          </label>
+          <label>
+            大屏密钥
+            <input id="displayKeyInput" placeholder="screen-room-primary-1-01" autocomplete="off" />
+          </label>
+          <button type="submit">打开教室签到屏</button>
+        </form>
+      </section>
+
+      <section class="screen" id="screenPanel" hidden>
+        <section class="panel qr-panel">
+          <div>
+            <div class="qr-box" id="qrBox">正在生成二维码</div>
+            <p style="margin-top: 16px; text-align: center; color: #637083">老师使用手机端扫描此动态码完成签入或签出</p>
+          </div>
+        </section>
+
+        <section class="panel meta">
+          <span class="status" id="statusText">运行中</span>
+          <div>
+            <h1 id="roomName">教室签到屏</h1>
+            <p style="margin-top: 12px; color: #637083">二维码由后端签发，短时有效，过期自动刷新。</p>
+          </div>
+          <div>
+            <div class="meta-row">
+              <span>教室编号</span>
+              <strong id="roomIdText">-</strong>
+            </div>
+            <div class="meta-row">
+              <span>本机时间</span>
+              <strong id="clockText">-</strong>
+            </div>
+            <div class="meta-row">
+              <span>二维码过期倒计时</span>
+              <strong id="countdownText">-</strong>
+            </div>
+            <div class="meta-row">
+              <span>过期时间</span>
+              <strong id="expiresAtText">-</strong>
+            </div>
+          </div>
+          <code id="payloadText">等待后端签发</code>
+        </section>
+      </section>
+    </main>
+
+    <script src="vendor/qrcode.min.js"></script>
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const roomId = params.get("roomId") || "";
+      const displayKey = params.get("displayKey") || "";
+      const setupPanel = document.querySelector("#setupPanel");
+      const screenPanel = document.querySelector("#screenPanel");
+      const state = {
+        expiresAt: null,
+        refreshTimer: null,
+      };
+
+      function formatClock(date) {
+        return date.toLocaleString("zh-CN", {
+          hour12: false,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+      }
+
+      function renderQr(payloadText) {
+        const qrBox = document.querySelector("#qrBox");
+        if (typeof qrcode !== "function") {
+          qrBox.textContent = "二维码库加载失败";
+          return;
+        }
+        const qr = qrcode(0, "M");
+        qr.addData(payloadText);
+        qr.make();
+        qrBox.innerHTML = qr.createSvgTag(8, 1);
+      }
+
+      function updateClock() {
+        const now = new Date();
+        document.querySelector("#clockText").textContent = formatClock(now);
+        if (!state.expiresAt) return;
+        const remaining = Math.max(0, Math.ceil((state.expiresAt.getTime() - now.getTime()) / 1000));
+        document.querySelector("#countdownText").textContent = `${remaining} 秒`;
+      }
+
+      async function refreshQr() {
+        window.clearTimeout(state.refreshTimer);
+        const status = document.querySelector("#statusText");
+        try {
+          status.textContent = "正在刷新";
+          status.className = "status warning";
+          const response = await fetch(
+            `/api/classrooms/${encodeURIComponent(roomId)}/dynamic-qr?displayKey=${encodeURIComponent(displayKey)}`,
+          );
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error?.message || "二维码签发失败");
+          const payloadText = JSON.stringify(data.payload);
+          state.expiresAt = new Date(data.payload.expiresAt);
+          document.querySelector("#roomName").textContent = data.room.name;
+          document.querySelector("#roomIdText").textContent = data.room.id;
+          document.querySelector("#expiresAtText").textContent = formatClock(state.expiresAt);
+          document.querySelector("#payloadText").textContent = payloadText;
+          renderQr(payloadText);
+          status.textContent = "运行中";
+          status.className = "status";
+          state.refreshTimer = window.setTimeout(refreshQr, Math.max(data.refreshInSeconds || 20, 10) * 1000);
+        } catch (error) {
+          status.textContent = error.message || "刷新失败";
+          status.className = "status warning";
+          state.refreshTimer = window.setTimeout(refreshQr, 8000);
+        }
+      }
+
+      document.querySelector("#setupForm").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const nextRoomId = document.querySelector("#roomIdInput").value.trim();
+        const nextDisplayKey = document.querySelector("#displayKeyInput").value.trim();
+        if (!nextRoomId || !nextDisplayKey) return;
+        window.location.href = `classroom.html?roomId=${encodeURIComponent(nextRoomId)}&displayKey=${encodeURIComponent(nextDisplayKey)}`;
+      });
+
+      window.setInterval(updateClock, 1000);
+      updateClock();
+
+      if (!roomId || !displayKey) {
+        setupPanel.hidden = false;
+      } else {
+        screenPanel.hidden = false;
+        refreshQr();
+      }
+    </script>
+  </body>
+</html>

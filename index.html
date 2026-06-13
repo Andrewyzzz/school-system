@@ -589,15 +589,15 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <h2 id="scannerTitle">教室二维码</h2>
-                  <p>演示固定贴在教室里的二维码。扫码后由系统按老师账号、当前时间和课表匹配课时。</p>
+                  <h2 id="scannerTitle">教室动态二维码</h2>
+                  <p>正式签到使用教室电脑实时二维码。老师扫码后由系统按老师账号、动态码、当前时间和课表匹配课时。</p>
                 </div>
               </div>
               <label class="field-label" for="qrLessonSelect">选择要演示的课时</label>
               <select class="lesson-select" id="qrLessonSelect"></select>
               <div class="generated-qr" id="qrCodeBox" aria-label="课时二维码"></div>
               <div class="qr-payload">
-                <span>固定教室码内容</span>
+                <span>教室大屏地址或二维码内容</span>
                 <code id="qrPayloadText"></code>
               </div>
               <div class="action-row">
@@ -621,7 +621,7 @@
               <div class="panel-heading">
                 <div>
                   <h2>摄像头扫码</h2>
-                  <p>网页端 Demo 可调用电脑或手机浏览器摄像头。正式小程序会改用微信扫码接口。</p>
+                  <p>老师用手机扫描教室电脑上持续刷新的二维码，过期码和伪造码会被后端拦截。</p>
                 </div>
                 <span class="status-pill" id="scannerStatus">未启动</span>
               </div>
@@ -644,7 +644,7 @@
 
           <section class="panel scanner-note" aria-label="扫码落地说明">
             <strong>落地时的关键校验</strong>
-            <p>二维码只代表固定教室，扫码后还要校验老师身份、绑定设备、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
+            <p>二维码由教室电脑向后端实时获取，扫码后还要校验老师身份、绑定设备、动态码有效期、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
           </section>
 
           <section class="panel security-panel" aria-label="防作弊校验结果">
