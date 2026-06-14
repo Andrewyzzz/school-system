@@ -768,19 +768,41 @@ h2 {
 }
 
 .course-rule-list {
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
   margin-bottom: 12px;
 }
 
 .course-rule-item {
   display: grid;
-  grid-template-columns: minmax(112px, 1fr) minmax(84px, 96px) minmax(132px, 150px);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.course-rule-top {
+  display: grid;
+  grid-template-columns: minmax(112px, 1fr) minmax(84px, 96px) minmax(132px, 150px) auto;
   gap: 10px;
   align-items: end;
 }
 
-.course-rule-item.editing {
-  grid-template-columns: minmax(112px, 1fr) minmax(84px, 96px) minmax(132px, 150px) auto;
+.course-rule-item:not(.editing) .course-rule-top {
+  grid-template-columns: minmax(112px, 1fr) minmax(84px, 96px) minmax(132px, 150px);
+}
+
+.course-rule-summary {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.course-rule-constraint-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
 }
 
 .panel-heading-actions {
@@ -2558,6 +2580,8 @@ td {
 
   .course-rule-list,
   .course-rule-item,
+  .course-rule-top,
+  .course-rule-constraint-grid,
   .course-builder,
   .constraint-builder,
   .teacher-rule-builder {

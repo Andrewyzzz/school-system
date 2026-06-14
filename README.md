@@ -64,6 +64,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/import/commit`：行政确认导入教师档案和老师账号
 - `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
 - `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
+- `POST /api/scheduling/course-rules`：行政保存年级课程、周课时、每节时长和课程级排课限制
 - `POST /api/scheduling/generate`：行政生成无教师/班级/教室时间冲突的排课草稿
 - `POST /api/scheduling/adjust`：行政调整草稿中的任课老师、日期、节次或教室，并重新校验冲突
 - `POST /api/scheduling/lock`：行政锁定或解锁草稿中的某节课，重排时保留已锁定课节
@@ -92,6 +93,7 @@ http://127.0.0.1:4173/api/health
 - 老师账号登录后会读取后端自然周课表。
 - 行政端新增教师导入页面，可粘贴 CSV、预览校验并确认写入教师档案和账号。
 - 行政排课页在后端模式下可调用真实排课接口，生成草稿、校验冲突并发布到老师端课表。
+- 行政可为每门课配置课程级限制：每班每天最多节数、是否允许同班连堂、禁排节次、偏好上午/下午；这些规则会进入 OR-Tools 求解、冲突校验、手动调整和调课校验。
 - 行政排课草稿支持手动调整老师、日期、节次和教室，调整后会重新展示教师/班级/教室冲突，存在冲突时不能发布。
 - 行政可锁定已确认课节，再触发“重排未锁定课程”，系统会保留锁定课节并补排剩余课程。
 - 教室电脑可打开 `classroom.html?roomId=ROOM-primary-1-01&displayKey=screen-room-primary-1-01` 展示实时动态签到二维码。

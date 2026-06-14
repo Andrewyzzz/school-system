@@ -14,6 +14,11 @@ const PERIODS = [
 
 const DAY_LABELS = ["周一", "周二", "周三", "周四", "周五"];
 const DEFAULT_LESSON_DURATION_MINUTES = 40;
+const DAY_PARTS = {
+  any: "不限",
+  morning: "上午",
+  afternoon: "下午",
+};
 
 const DIVISIONS = [
   {
@@ -34,7 +39,7 @@ const DIVISIONS = [
       { subjectId: "chinese", weeklyLessons: 5 },
       { subjectId: "math", weeklyLessons: 5 },
       { subjectId: "english", weeklyLessons: 4 },
-      { subjectId: "pe", weeklyLessons: 2 },
+      { subjectId: "pe", weeklyLessons: 2, maxPerClassPerDay: 1, allowConsecutive: false, preferredDayPart: "afternoon" },
       { subjectId: "physics", weeklyLessons: 2 },
       { subjectId: "chemistry", weeklyLessons: 2 },
     ],
@@ -56,7 +61,7 @@ const DIVISIONS = [
       { subjectId: "english", weeklyLessons: 4 },
       { subjectId: "physics", weeklyLessons: 3 },
       { subjectId: "chemistry", weeklyLessons: 2 },
-      { subjectId: "pe", weeklyLessons: 2 },
+      { subjectId: "pe", weeklyLessons: 2, maxPerClassPerDay: 1, allowConsecutive: false, preferredDayPart: "afternoon" },
     ],
   },
   {
@@ -76,7 +81,7 @@ const DIVISIONS = [
       { subjectId: "english", weeklyLessons: 4 },
       { subjectId: "physics", weeklyLessons: 3 },
       { subjectId: "chemistry", weeklyLessons: 3 },
-      { subjectId: "pe", weeklyLessons: 2 },
+      { subjectId: "pe", weeklyLessons: 2, maxPerClassPerDay: 1, allowConsecutive: false, preferredDayPart: "afternoon" },
     ],
   },
 ];
@@ -237,6 +242,45 @@ function normalizeDurationMinutes(value, fallback = DEFAULT_LESSON_DURATION_MINU
   return Math.min(Math.max(number, 20), 120);
 }
 
+function normalizeMaxPerClassPerDay(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(number, 0), PERIODS.length);
+}
+
+function normalizeAllowConsecutive(value, fallback = true) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return String(value) === "true" || String(value) === "1";
+}
+
+function normalizePreferredDayPart(value, fallback = "any") {
+  const text = String(value || fallback || "any").trim();
+  return Object.hasOwn(DAY_PARTS, text) ? text : "any";
+}
+
+function normalizeSubjectForbiddenPeriods(value) {
+  return normalizedConstraintNumbers(value, 1, PERIODS.length);
+}
+
+function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
+  return {
+    maxPerClassPerDay: normalizeMaxPerClassPerDay(
+      rule.maxPerClassPerDay ?? fallbackRule.maxPerClassPerDay,
+      fallbackRule.maxPerClassPerDay || 0,
+    ),
+    allowConsecutive: normalizeAllowConsecutive(
+      rule.allowConsecutive ?? fallbackRule.allowConsecutive,
+      fallbackRule.allowConsecutive !== undefined ? Boolean(fallbackRule.allowConsecutive) : true,
+    ),
+    forbiddenPeriods: normalizeSubjectForbiddenPeriods(rule.forbiddenPeriods ?? fallbackRule.forbiddenPeriods),
+    preferredDayPart: normalizePreferredDayPart(
+      rule.preferredDayPart ?? fallbackRule.preferredDayPart,
+      fallbackRule.preferredDayPart || "any",
+    ),
+  };
+}
+
 function schedulingCourseRules(db, division, grade) {
   const savedRules = new Map(
     (db.gradeCourseRules || [])
@@ -256,6 +300,7 @@ function schedulingCourseRules(db, division, grade) {
       savedRule?.durationMinutes ?? defaultRule?.durationMinutes,
       DEFAULT_LESSON_DURATION_MINUTES,
     );
+    const constraintFields = courseRuleConstraintFields(savedRule || {}, defaultRule || {});
     return {
       id: `CR-${division.stageId}-${grade.grade}-${subject.id}`,
       stageId: division.stageId,
@@ -265,6 +310,7 @@ function schedulingCourseRules(db, division, grade) {
       enabled,
       weeklyLessons,
       durationMinutes,
+      ...constraintFields,
     };
   });
 }
@@ -331,6 +377,10 @@ function schedulingSubjects(db, division, grade) {
             name: subject.name,
             weeklyLessons: rule.weeklyLessons,
             durationMinutes: rule.durationMinutes,
+            maxPerClassPerDay: rule.maxPerClassPerDay,
+            allowConsecutive: rule.allowConsecutive,
+            forbiddenPeriods: rule.forbiddenPeriods || [],
+            preferredDayPart: rule.preferredDayPart,
             teacherIds: teachers.map((teacher) => teacher.id),
             availableTeachers: availableTeachers.map(publicSchedulingTeacher),
           }
@@ -412,6 +462,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
     const subjectId = String(rule.subjectId || "").trim();
     const subject = subjectById(db, subjectId);
     if (!subject) return;
+    const defaultRule = defaultCourseRule(division, subjectId) || {};
     bySubject.set(subjectId, {
       id: `CR-${division.stageId}-${grade.grade}-${subjectId}`,
       stageId: division.stageId,
@@ -420,6 +471,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
       enabled: Boolean(rule.enabled),
       weeklyLessons: normalizeWeeklyLessons(rule.weeklyLessons, 1),
       durationMinutes: normalizeDurationMinutes(rule.durationMinutes, DEFAULT_LESSON_DURATION_MINUTES),
+      ...courseRuleConstraintFields(rule, defaultRule),
       updatedAt: new Date().toISOString(),
       updatedByAccountId: actorAccount?.id || "",
     });
@@ -473,6 +525,7 @@ function createSubjectId(db) {
 
 function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAccount = null) {
   const now = new Date().toISOString();
+  const defaultRule = defaultCourseRule(division, subjectId) || {};
   const next = {
     id: `CR-${division.stageId}-${grade.grade}-${subjectId}`,
     stageId: division.stageId,
@@ -481,6 +534,7 @@ function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAcc
     enabled: Boolean(options.enabled),
     weeklyLessons: normalizeWeeklyLessons(options.weeklyLessons, 1),
     durationMinutes: normalizeDurationMinutes(options.durationMinutes, DEFAULT_LESSON_DURATION_MINUTES),
+    ...courseRuleConstraintFields(options, defaultRule),
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
   };
@@ -884,6 +938,80 @@ function scheduleConstraintText(config, constraint) {
     config.subjects.find((subject) => subject.id === constraint.subjectId)?.name ||
     constraint.subjectId;
   return `${subjectName} 不能出现在 ${days} ${periods}${constraint.reason ? `：${constraint.reason}` : ""}`;
+}
+
+function scheduleSubjectRuleFor(config, subjectId) {
+  return (config.subjects || []).find((subject) => subject.id === subjectId) || null;
+}
+
+function periodDayPart(period) {
+  return Number(period) <= 4 ? "morning" : "afternoon";
+}
+
+function subjectRuleSummary(config, subjectId) {
+  const subject = scheduleSubjectRuleFor(config, subjectId);
+  const subjectName = subject?.name || subjectId;
+  const rules = [];
+  const maxPerClassPerDay = Number(subject?.maxPerClassPerDay || 0);
+  if (maxPerClassPerDay > 0) rules.push(`每班每天最多 ${maxPerClassPerDay} 节`);
+  if (subject?.allowConsecutive === false) rules.push("不允许同班连堂");
+  if ((subject?.forbiddenPeriods || []).length) {
+    rules.push(`禁排第 ${(subject.forbiddenPeriods || []).map(Number).join("、")} 节`);
+  }
+  if (subject?.preferredDayPart && subject.preferredDayPart !== "any") {
+    rules.push(`偏好${DAY_PARTS[subject.preferredDayPart] || subject.preferredDayPart}`);
+  }
+  return `${subjectName}${rules.length ? `：${rules.join("，")}` : "无特殊课程规则"}`;
+}
+
+function subjectRulePreferencePenalty(subject, period) {
+  if (!subject?.preferredDayPart || subject.preferredDayPart === "any") return 0;
+  return periodDayPart(period) === subject.preferredDayPart ? -2 : 10;
+}
+
+function subjectHardRuleViolation(config, subjectId, slot, assignments = [], classId = "") {
+  const subject = scheduleSubjectRuleFor(config, subjectId);
+  if (!subject) return null;
+  const subjectName = subject.name || subjectId;
+  const period = Number(slot.period);
+  if ((subject.forbiddenPeriods || []).map(Number).includes(period)) {
+    return {
+      type: "subject-forbidden-period",
+      title: `${subjectName} 命中课程禁排节次`,
+      text: `${subjectName} 已设置禁排第 ${period} 节，${dayLabel(Number(slot.dayIndex))}第 ${period} 节不可排。`,
+    };
+  }
+
+  if (!classId) return null;
+  const sameClassSubjectDayItems = assignments.filter(
+    (assignment) =>
+      assignment.classId === classId &&
+      assignment.subjectId === subjectId &&
+      assignment.date === slot.date,
+  );
+  const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
+  if (maxPerClassPerDay > 0 && sameClassSubjectDayItems.length + 1 > maxPerClassPerDay) {
+    return {
+      type: "subject-max-per-day",
+      title: `${subjectName} 超过每日上限`,
+      text: `${subjectName} 已设置每班每天最多 ${maxPerClassPerDay} 节，${dayLabel(Number(slot.dayIndex))}再加入第 ${period} 节会超过上限。`,
+    };
+  }
+
+  if (subject.allowConsecutive === false) {
+    const adjacent = sameClassSubjectDayItems.find(
+      (assignment) => Math.abs(Number(assignment.period) - period) === 1,
+    );
+    if (adjacent) {
+      return {
+        type: "subject-consecutive",
+        title: `${subjectName} 不允许同班连堂`,
+        text: `${subjectName} 已设置不允许同班连堂，第 ${adjacent.period} 节旁边不能再排第 ${period} 节。`,
+      };
+    }
+  }
+
+  return null;
 }
 
 function teacherScheduleRuleFor(config, teacherId) {
@@ -1329,6 +1457,7 @@ function candidateSoftScore(config, state, task, slot, teacherId, random) {
     sameSubjectDay * 24 +
     compactnessPenalty * 4 +
     teacherPeriodPreferencePenalty(config, teacherId, slot.period) +
+    subjectRulePreferencePenalty(task.subject, slot.period) +
     periodSoftPenalty(task.subject, slot.period) +
     slot.dayIndex * 0.35 +
     random() * 2.5
@@ -1343,8 +1472,7 @@ function buildCandidateList(config, state, task, slots, random) {
     if (state.classBusy.get(task.classId)?.has(slot.slotKey)) return;
     if ((state.roomBusy.get(task.roomId) || new Set()).has(slot.slotKey)) return;
     if (firstScheduleConstraintViolation(config, task.subjectId, slot)) return;
-    const sameSubjectDay = state.classSubjectDay.get(classSubjectDayKey(task.classId, task.subjectId, slot.date)) || 0;
-    if (sameSubjectDay >= 2) return;
+    if (subjectHardRuleViolation(config, task.subjectId, slot, state.assignments, task.classId)) return;
 
     task.teacherIds.forEach((teacherId) => {
       if ((state.teacherBusy.get(teacherId) || new Set()).has(slot.slotKey)) return;
@@ -1381,6 +1509,7 @@ function scheduleQualityScore(config, assignments) {
     teacherDayPeriods.get(periodKey).push(Number(assignment.period));
     score += periodSoftPenalty(subject, Number(assignment.period));
     score += teacherPeriodPreferencePenalty(config, assignment.teacherId, Number(assignment.period));
+    score += subjectRulePreferencePenalty(subject, Number(assignment.period));
   });
 
   const targetClassDayLoad = Math.ceil(weeklyLessonsPerClass(config) / 5);
@@ -1771,15 +1900,20 @@ function generateGreedyScheduleAssignments(config, options = {}) {
         const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
         if (busyRooms.has(slot.slotKey)) return;
         if (firstScheduleConstraintViolation(config, subject.id, slot)) return;
+        if (subjectHardRuleViolation(config, subject.id, slot, assignments, schoolClass.id)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
-        if (sameSubjectDayCount >= 2) return;
 
         subject.teacherIds.forEach((teacherId) => {
           const busySlots = teacherBusy.get(teacherId) || new Set();
           if (busySlots.has(slot.slotKey)) return;
 
           const load = teacherLoad.get(teacherId) || 0;
-          const score = load * 12 + sameSubjectDayCount * 8 + slot.period + slot.dayIndex * 0.25;
+          const score =
+            load * 12 +
+            sameSubjectDayCount * 8 +
+            subjectRulePreferencePenalty(subject, slot.period) +
+            slot.period +
+            slot.dayIndex * 0.25;
           if (!best || score < best.score) {
             best = { slot, teacherId, score };
           }
@@ -1867,6 +2001,20 @@ export function validateScheduleConflicts(assignments, options = {}) {
           type: "constraint",
           title: `${assignment.subjectName} 命中自定义硬约束`,
           text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${scheduleConstraintText(config, violation)}`,
+        });
+      }
+      const subjectRuleViolation = subjectHardRuleViolation(
+        config,
+        assignment.subjectId,
+        { ...assignment, dayIndex },
+        assignments.filter((item) => item.id !== assignment.id),
+        assignment.classId,
+      );
+      if (subjectRuleViolation) {
+        conflicts.push({
+          type: subjectRuleViolation.type,
+          title: subjectRuleViolation.title,
+          text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${subjectRuleViolation.text}`,
         });
       }
       const unavailable = teacherRuleBlocksSlot(config, assignment.teacherId, {
@@ -2257,6 +2405,18 @@ function validatePublishedLessonChange(db, config, lesson, next) {
     room: room.name,
     roomId: room.id,
   };
+  const subjectRuleViolation = subjectHardRuleViolation(
+    config,
+    lesson.subjectId,
+    proposed,
+    currentScopeLessons,
+    lesson.classId,
+  );
+  if (subjectRuleViolation) {
+    const error = new Error(subjectRuleViolation.text || subjectRuleViolation.title);
+    error.statusCode = 400;
+    throw error;
+  }
   const teacherDayItems = [
     ...currentScopeLessons,
     ...globalTeacherBusyAssignments(db, config),
@@ -2512,6 +2672,19 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   const nextRoom = roomById(config, nextRoomId);
   if (!nextRoom) {
     const error = new Error("调整教室不在当前年级可用教室范围内");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const subjectRuleViolation = subjectHardRuleViolation(
+    config,
+    assignment.subjectId,
+    { date: nextDate, dayIndex: nextDayIndex, period: period.period, time: period.time },
+    (draft.assignments || []).filter((item) => item.id !== assignment.id),
+    assignment.classId,
+  );
+  if (subjectRuleViolation) {
+    const error = new Error(subjectRuleViolation.text || subjectRuleViolation.title);
     error.statusCode = 400;
     throw error;
   }

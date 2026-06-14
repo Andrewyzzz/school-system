@@ -52,6 +52,16 @@ const schedule = generateScheduleDraft(
 assert.equal(schedule.draft.conflicts.length, 0);
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
+const peLessonsByClassDay = new Map();
+published.lessons
+  .filter((lesson) => lesson.subjectId === "pe")
+  .forEach((lesson) => {
+    const key = `${lesson.classId}:${lesson.date}`;
+    peLessonsByClassDay.set(key, (peLessonsByClassDay.get(key) || 0) + 1);
+  });
+peLessonsByClassDay.forEach((count) => {
+  assert.ok(count <= 1, "体育课应满足每班每天最多 1 节");
+});
 
 const token = "phase1-production-session-token";
 createSession(db, admin, token, { userAgent: "phase1-test" });

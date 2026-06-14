@@ -58,7 +58,15 @@ const schedulingCatalog = {
     chinese: { id: "chinese", name: "语文", weeklyLessons: 5, teacherIds: ["SCH-CN01", "SCH-CN02", "SCH-CN03", "SCH-CN04", "SCH-CN05"] },
     math: { id: "math", name: "数学", weeklyLessons: 5, teacherIds: ["T001", "SCH-MA02", "SCH-MA03", "SCH-MA04", "SCH-MA05"] },
     english: { id: "english", name: "英语", weeklyLessons: 4, teacherIds: ["T002", "SCH-EN02", "SCH-EN03", "SCH-EN04", "SCH-EN05"] },
-    pe: { id: "pe", name: "体育", weeklyLessons: 2, teacherIds: ["SCH-PE01", "SCH-PE02", "SCH-PE03", "SCH-PE04"] },
+    pe: {
+      id: "pe",
+      name: "体育",
+      weeklyLessons: 2,
+      teacherIds: ["SCH-PE01", "SCH-PE02", "SCH-PE03", "SCH-PE04"],
+      maxPerClassPerDay: 1,
+      allowConsecutive: false,
+      preferredDayPart: "afternoon",
+    },
     science: { id: "science", name: "科学", weeklyLessons: 2, teacherIds: ["SCH-SC01", "SCH-SC02", "SCH-SC03", "SCH-SC04"] },
     music: { id: "music", name: "音乐", weeklyLessons: 1, teacherIds: ["SCH-MU01", "SCH-MU02", "SCH-MU03"] },
     art: { id: "art", name: "美术", weeklyLessons: 1, teacherIds: ["SCH-AR01", "SCH-AR02", "SCH-AR03"] },
@@ -151,6 +159,10 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     enabled: enabledSubjectIds.has(subject.id),
     weeklyLessons: subject.weeklyLessons || 1,
     durationMinutes: subject.durationMinutes || 40,
+    maxPerClassPerDay: subject.maxPerClassPerDay || 0,
+    allowConsecutive: subject.allowConsecutive !== false,
+    forbiddenPeriods: Array.isArray(subject.forbiddenPeriods) ? subject.forbiddenPeriods : [],
+    preferredDayPart: subject.preferredDayPart || "any",
   }));
   const classes = Array.from({ length: division.classCount }, (_, index) => {
     const roomNumber = String(index + 1).padStart(2, "0");
@@ -1370,6 +1382,81 @@ function countClassSubjectOnDay(assignments, classId, subjectId, date) {
   ).length;
 }
 
+function normalizeCourseRuleMaxPerDay(value) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(Math.max(number, 0), state.schedulingConfig.periods?.length || 6);
+}
+
+function normalizeCourseRulePeriods(value) {
+  const raw = Array.isArray(value) ? value : String(value || "").split(/[,\s，、]+/);
+  return Array.from(
+    new Set(
+      raw
+        .map((item) => Number.parseInt(item, 10))
+        .filter((number) => Number.isFinite(number) && number >= 1 && number <= (state.schedulingConfig.periods?.length || 6)),
+    ),
+  ).sort((a, b) => a - b);
+}
+
+function normalizePreferredDayPart(value) {
+  return ["any", "morning", "afternoon"].includes(value) ? value : "any";
+}
+
+function periodDayPart(period) {
+  return Number(period) <= 4 ? "morning" : "afternoon";
+}
+
+function localSubjectRuleFor(subjectId) {
+  return (state.schedulingConfig.subjects || []).find((subject) => subject.id === subjectId) || null;
+}
+
+function subjectRulePreferencePenalty(subject, period) {
+  if (!subject?.preferredDayPart || subject.preferredDayPart === "any") return 0;
+  return periodDayPart(period) === subject.preferredDayPart ? -2 : 10;
+}
+
+function localSubjectRuleViolation(subjectId, slot, assignments = [], classId = "") {
+  const subject = localSubjectRuleFor(subjectId);
+  if (!subject) return null;
+  const period = Number(slot.period);
+  if ((subject.forbiddenPeriods || []).map(Number).includes(period)) {
+    return {
+      type: "subject-forbidden-period",
+      title: `${subject.name} 命中课程禁排节次`,
+      text: `${subject.name} 已设置禁排第 ${period} 节，${scheduleConstraintDayText([Number(slot.dayIndex)])}第 ${period} 节不可排。`,
+    };
+  }
+  if (!classId) return null;
+  const sameClassSubjectDayItems = assignments.filter(
+    (assignment) =>
+      assignment.classId === classId &&
+      assignment.subjectId === subjectId &&
+      assignment.date === slot.date,
+  );
+  const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
+  if (maxPerClassPerDay > 0 && sameClassSubjectDayItems.length + 1 > maxPerClassPerDay) {
+    return {
+      type: "subject-max-per-day",
+      title: `${subject.name} 超过每日上限`,
+      text: `${subject.name} 已设置每班每天最多 ${maxPerClassPerDay} 节，继续排入会超过上限。`,
+    };
+  }
+  if (subject.allowConsecutive === false) {
+    const adjacent = sameClassSubjectDayItems.find(
+      (assignment) => Math.abs(Number(assignment.period) - period) === 1,
+    );
+    if (adjacent) {
+      return {
+        type: "subject-consecutive",
+        title: `${subject.name} 不允许同班连堂`,
+        text: `${subject.name} 已设置不允许同班连堂，第 ${adjacent.period} 节旁边不能再排第 ${period} 节。`,
+      };
+    }
+  }
+  return null;
+}
+
 function slotKeyFor(date, period) {
   return `${date}-${period}`;
 }
@@ -1453,15 +1540,20 @@ function generateScheduleAssignments(options = {}) {
         const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
         if (busyRooms.has(slot.slotKey)) return;
         if (localScheduleConstraintViolation(subject.id, slot)) return;
+        if (localSubjectRuleViolation(subject.id, slot, assignments, schoolClass.id)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
-        if (sameSubjectDayCount >= 2) return;
 
         subject.teacherIds.forEach((teacherId) => {
           const busySlots = teacherBusy.get(teacherId) || new Set();
           if (busySlots.has(slot.slotKey)) return;
 
           const load = teacherLoad.get(teacherId) || 0;
-          const score = load * 12 + sameSubjectDayCount * 8 + slot.period + slot.dayIndex * 0.25;
+          const score =
+            load * 12 +
+            sameSubjectDayCount * 8 +
+            subjectRulePreferencePenalty(subject, slot.period) +
+            slot.period +
+            slot.dayIndex * 0.25;
           if (!best || score < best.score) {
             best = { slot, teacherId, score };
           }
@@ -1537,6 +1629,19 @@ function validateScheduleConflicts(assignments) {
         type: "constraint",
         title: `${assignment.subjectName} 命中自定义硬约束`,
         text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${violation.subjectName || assignment.subjectName} 不能出现在 ${scheduleConstraintDayText(violation.dayIndexes)} ${scheduleConstraintPeriodText(violation.periods)}`,
+      });
+    }
+    const subjectRuleViolation = localSubjectRuleViolation(
+      assignment.subjectId,
+      { ...assignment, dayIndex },
+      assignments.filter((item) => item.id !== assignment.id),
+      assignment.classId,
+    );
+    if (subjectRuleViolation) {
+      conflicts.push({
+        type: subjectRuleViolation.type,
+        title: subjectRuleViolation.title,
+        text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${subjectRuleViolation.text}`,
       });
     }
   });
@@ -2436,6 +2541,17 @@ function collectCourseRulesFromForm() {
       enabled: true,
       weeklyLessons: Number.parseInt(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0", 10),
       durationMinutes: Number.parseInt(document.querySelector(`[data-course-rule-duration="${subjectId}"]`)?.value || "40", 10),
+      maxPerClassPerDay: normalizeCourseRuleMaxPerDay(
+        document.querySelector(`[data-course-rule-max-day="${subjectId}"]`)?.value || "0",
+      ),
+      allowConsecutive:
+        (document.querySelector(`[data-course-rule-consecutive="${subjectId}"]`)?.value || "true") === "true",
+      forbiddenPeriods: normalizeCourseRulePeriods(
+        document.querySelector(`[data-course-rule-forbidden-periods="${subjectId}"]`)?.value || "",
+      ),
+      preferredDayPart: normalizePreferredDayPart(
+        document.querySelector(`[data-course-rule-preferred-day-part="${subjectId}"]`)?.value || "any",
+      ),
     };
   });
 }
@@ -2450,6 +2566,10 @@ function localSubjectFromCourseRule(rule) {
     ...subject,
     weeklyLessons: rule.weeklyLessons,
     durationMinutes: rule.durationMinutes,
+    maxPerClassPerDay: normalizeCourseRuleMaxPerDay(rule.maxPerClassPerDay || 0),
+    allowConsecutive: rule.allowConsecutive !== false,
+    forbiddenPeriods: normalizeCourseRulePeriods(rule.forbiddenPeriods || []),
+    preferredDayPart: normalizePreferredDayPart(rule.preferredDayPart || "any"),
     availableTeachers,
   };
 }
@@ -2539,6 +2659,10 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
       durationMinutes,
       teacherIds: [],
       custom: true,
+      maxPerClassPerDay: 0,
+      allowConsecutive: true,
+      forbiddenPeriods: [],
+      preferredDayPart: "any",
     };
   if (!existingSubject) schedulingCatalog.subjects[subject.id] = subject;
   const existingRule = state.schedulingConfig.courseRules.find((rule) => rule.subjectId === subject.id);
@@ -2551,6 +2675,10 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
     enabled: true,
     weeklyLessons,
     durationMinutes,
+    maxPerClassPerDay: existingRule?.maxPerClassPerDay || subject.maxPerClassPerDay || 0,
+    allowConsecutive: existingRule?.allowConsecutive ?? subject.allowConsecutive ?? true,
+    forbiddenPeriods: existingRule?.forbiddenPeriods || subject.forbiddenPeriods || [],
+    preferredDayPart: existingRule?.preferredDayPart || subject.preferredDayPart || "any",
   };
   if (existingRule) {
     Object.assign(existingRule, nextRule);
@@ -2832,6 +2960,16 @@ function adjustLocalSchedule() {
     showToast(
       `该调整违反硬约束：${violation.subjectName || assignment.subjectName} 不能出现在 ${scheduleConstraintDayText(violation.dayIndexes)} ${scheduleConstraintPeriodText(violation.periods)}`,
     );
+    return;
+  }
+  const subjectRuleViolation = localSubjectRuleViolation(
+    assignment.subjectId,
+    { date, dayIndex, period: period.period, time: period.time },
+    (state.schedulingDraft.assignments || []).filter((item) => item.id !== assignment.id),
+    assignment.classId,
+  );
+  if (subjectRuleViolation) {
+    showToast(subjectRuleViolation.text || subjectRuleViolation.title);
     return;
   }
 
@@ -4385,43 +4523,134 @@ function updateSubjectTeacherSelectionCount(subjectId) {
   if (countNode) countNode.textContent = `${count} 位已选`;
 }
 
+function courseRuleForbiddenPeriodsValue(rule) {
+  return normalizeCourseRulePeriods(rule.forbiddenPeriods || []).join(",");
+}
+
+function courseRulePreferredDayPartText(value) {
+  const map = { any: "不限", morning: "上午", afternoon: "下午" };
+  return map[normalizePreferredDayPart(value || "any")] || "不限";
+}
+
+function courseRuleConstraintSummary(rule) {
+  const parts = [];
+  const maxPerClassPerDay = Number(rule.maxPerClassPerDay || 0);
+  if (maxPerClassPerDay > 0) {
+    parts.push(`每班每天最多 ${maxPerClassPerDay} 节`);
+  } else {
+    parts.push("每日节数不限");
+  }
+  parts.push(rule.allowConsecutive === false ? "不允许连堂" : "允许连堂");
+  const forbiddenPeriods = normalizeCourseRulePeriods(rule.forbiddenPeriods || []);
+  parts.push(forbiddenPeriods.length ? `禁排第 ${forbiddenPeriods.join("、")} 节` : "无禁排节次");
+  const preferred = normalizePreferredDayPart(rule.preferredDayPart || "any");
+  parts.push(preferred === "any" ? "时段不限" : `偏好${courseRulePreferredDayPartText(preferred)}`);
+  return parts.join(" · ");
+}
+
 function adminCourseRuleItem(rule) {
+  const subjectId = escapeHtml(rule.subjectId);
+  const allowConsecutive = rule.allowConsecutive !== false;
+  const preferredDayPart = normalizePreferredDayPart(rule.preferredDayPart || "any");
   return `
     <article class="course-rule-item ${courseRulesEditMode ? "editing" : ""}" data-course-rule-id="${escapeHtml(rule.subjectId)}">
-      <div class="course-rule-name">
-        <strong>${escapeHtml(rule.subjectName)}</strong>
-        <small>当前年级课程</small>
-      </div>
-      <label class="field-label compact-field" for="courseWeekly-${escapeHtml(rule.subjectId)}">
-        <span>每周节数</span>
-        <input
-          id="courseWeekly-${escapeHtml(rule.subjectId)}"
-          data-course-rule-weekly="${escapeHtml(rule.subjectId)}"
-          type="number"
-          min="0"
-          max="12"
-          value="${Number(rule.weeklyLessons || 0)}"
-        />
-      </label>
-      <label class="field-label compact-field" for="courseDuration-${escapeHtml(rule.subjectId)}">
-        <span>每节时长</span>
-        <div class="input-with-unit">
-          <input
-            id="courseDuration-${escapeHtml(rule.subjectId)}"
-            data-course-rule-duration="${escapeHtml(rule.subjectId)}"
-            type="number"
-            min="20"
-            max="120"
-            step="5"
-            value="${Number(rule.durationMinutes || 40)}"
-          />
-          <em>分钟</em>
+      <div class="course-rule-top">
+        <div class="course-rule-name">
+          <strong>${escapeHtml(rule.subjectName)}</strong>
+          <small>当前年级课程</small>
         </div>
-      </label>
+        <label class="field-label compact-field" for="courseWeekly-${subjectId}">
+          <span>每周节数</span>
+          <input
+            id="courseWeekly-${subjectId}"
+            data-course-rule-weekly="${subjectId}"
+            type="number"
+            min="0"
+            max="12"
+            value="${Number(rule.weeklyLessons || 0)}"
+          />
+        </label>
+        <label class="field-label compact-field" for="courseDuration-${subjectId}">
+          <span>每节时长</span>
+          <div class="input-with-unit">
+            <input
+              id="courseDuration-${subjectId}"
+              data-course-rule-duration="${subjectId}"
+              type="number"
+              min="20"
+              max="120"
+              step="5"
+              value="${Number(rule.durationMinutes || 40)}"
+            />
+            <em>分钟</em>
+          </div>
+        </label>
+        ${
+          courseRulesEditMode
+            ? `<button class="mini-button danger" data-delete-grade-course="${subjectId}" type="button">删除</button>`
+            : ""
+        }
+      </div>
+      <p class="course-rule-summary">${escapeHtml(courseRuleConstraintSummary(rule))}</p>
       ${
         courseRulesEditMode
-          ? `<button class="mini-button danger" data-delete-grade-course="${escapeHtml(rule.subjectId)}" type="button">删除</button>`
-          : ""
+          ? `
+            <div class="course-rule-constraint-grid" aria-label="${escapeHtml(rule.subjectName)}课程限制">
+              <label class="field-label compact-field" for="courseMaxDay-${subjectId}">
+                <span>每班每天最多</span>
+                <div class="input-with-unit">
+                  <input
+                    id="courseMaxDay-${subjectId}"
+                    data-course-rule-max-day="${subjectId}"
+                    type="number"
+                    min="0"
+                    max="${state.schedulingConfig.periods?.length || 6}"
+                    value="${Number(rule.maxPerClassPerDay || 0)}"
+                  />
+                  <em>节</em>
+                </div>
+              </label>
+              <label class="field-label compact-field" for="courseConsecutive-${subjectId}">
+                <span>同班连堂</span>
+                <select
+                  class="lesson-select"
+                  id="courseConsecutive-${subjectId}"
+                  data-course-rule-consecutive="${subjectId}"
+                >
+                  <option value="true" ${allowConsecutive ? "selected" : ""}>允许</option>
+                  <option value="false" ${allowConsecutive ? "" : "selected"}>不允许</option>
+                </select>
+              </label>
+              <label class="field-label compact-field" for="courseForbidden-${subjectId}">
+                <span>禁排节次</span>
+                <input
+                  id="courseForbidden-${subjectId}"
+                  data-course-rule-forbidden-periods="${subjectId}"
+                  type="text"
+                  placeholder="例如 1,6"
+                  value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}"
+                />
+              </label>
+              <label class="field-label compact-field" for="coursePreferred-${subjectId}">
+                <span>偏好时段</span>
+                <select
+                  class="lesson-select"
+                  id="coursePreferred-${subjectId}"
+                  data-course-rule-preferred-day-part="${subjectId}"
+                >
+                  <option value="any" ${preferredDayPart === "any" ? "selected" : ""}>不限</option>
+                  <option value="morning" ${preferredDayPart === "morning" ? "selected" : ""}>上午</option>
+                  <option value="afternoon" ${preferredDayPart === "afternoon" ? "selected" : ""}>下午</option>
+                </select>
+              </label>
+            </div>
+          `
+          : `
+            <input type="hidden" data-course-rule-max-day="${subjectId}" value="${Number(rule.maxPerClassPerDay || 0)}" />
+            <input type="hidden" data-course-rule-consecutive="${subjectId}" value="${allowConsecutive ? "true" : "false"}" />
+            <input type="hidden" data-course-rule-forbidden-periods="${subjectId}" value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}" />
+            <input type="hidden" data-course-rule-preferred-day-part="${subjectId}" value="${preferredDayPart}" />
+          `
       }
     </article>
   `;

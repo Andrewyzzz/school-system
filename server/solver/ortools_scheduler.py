@@ -57,6 +57,22 @@ def period_cost(subject, period):
     return 2 if period >= 5 else 1
 
 
+def period_day_part(period):
+    return "morning" if int(period) <= 4 else "afternoon"
+
+
+def subject_preference_cost(subject, period):
+    preferred = subject.get("preferredDayPart") or "any"
+    if preferred == "any":
+        return 0
+    return -2 if period_day_part(period) == preferred else 10
+
+
+def subject_forbidden_period(subject, period):
+    periods = [int(value) for value in subject.get("forbiddenPeriods") or []]
+    return int(period) in periods
+
+
 def constraint_applies(constraint, subject_id, day_index, period):
     if not constraint or constraint.get("active") is False:
         return False
@@ -233,6 +249,7 @@ def solve(payload):
     room_busy = set()
     class_busy = set()
     class_subject_day_locked = {}
+    class_subject_day_period_locked = {}
     teacher_fixed_load = {}
     teacher_fixed_day_load = {}
     teacher_fixed_day_periods = {}
@@ -254,6 +271,13 @@ def solve(payload):
         class_busy.add((assignment.get("classId"), key))
         day_key = (assignment.get("classId"), assignment.get("subjectId"), assignment.get("date"))
         class_subject_day_locked[day_key] = class_subject_day_locked.get(day_key, 0) + 1
+        day_period_key = (
+            assignment.get("classId"),
+            assignment.get("subjectId"),
+            assignment.get("date"),
+            int(assignment.get("period") or 0),
+        )
+        class_subject_day_period_locked[day_period_key] = class_subject_day_period_locked.get(day_period_key, 0) + 1
         teacher_fixed_load[assignment.get("teacherId")] = teacher_fixed_load.get(assignment.get("teacherId"), 0) + 1
         teacher_day_key = (assignment.get("teacherId"), assignment.get("date"))
         teacher_fixed_day_load[teacher_day_key] = teacher_fixed_day_load.get(teacher_day_key, 0) + 1
@@ -270,8 +294,10 @@ def solve(payload):
     teacher_day_vars = {}
     teacher_day_period_vars = {}
     class_day_vars = {}
+    class_subject_day_period_vars = {}
     objective_terms = []
     candidate_limit = int(options.get("candidateLimit") or 64)
+    subjects_by_id = {subject["id"]: subject for subject in config.get("subjects") or []}
 
     for task_index, task in enumerate(tasks):
         task_vars[task_index] = []
@@ -280,6 +306,8 @@ def solve(payload):
             if (task["classId"], slot["slotKey"]) in class_busy:
                 continue
             if (task["roomId"], slot["slotKey"]) in room_busy:
+                continue
+            if subject_forbidden_period(task["subject"], int(slot["period"])):
                 continue
             if any(
                 constraint_applies(constraint, task["subjectId"], slot["dayIndex"], int(slot["period"]))
@@ -297,6 +325,7 @@ def solve(payload):
                         "slot": slot,
                         "teacherId": teacher_id,
                         "cost": period_cost(task["subject"], int(slot["period"]))
+                        + subject_preference_cost(task["subject"], int(slot["period"]))
                         + teacher_preference_cost(rule, int(slot["period"]))
                         + int(slot["period"]) * 0.25
                         + int(slot["dayIndex"]) * 0.15
@@ -324,6 +353,10 @@ def solve(payload):
             class_slot_vars.setdefault((task["classId"], slot["slotKey"]), []).append(var)
             room_slot_vars.setdefault((task["roomId"], slot["slotKey"]), []).append(var)
             class_subject_day_vars.setdefault((task["classId"], task["subjectId"], slot["date"]), []).append(var)
+            class_subject_day_period_vars.setdefault(
+                (task["classId"], task["subjectId"], slot["date"], int(slot["period"])),
+                [],
+            ).append(var)
             teacher_vars.setdefault(teacher_id, []).append(var)
             teacher_day_vars.setdefault((teacher_id, slot["date"]), []).append(var)
             teacher_day_period_vars.setdefault((teacher_id, slot["date"], int(slot["period"])), []).append(var)
@@ -346,7 +379,16 @@ def solve(payload):
         model.Add(sum(variables) <= 1)
     for key, variables in class_subject_day_vars.items():
         locked_count = class_subject_day_locked.get(key, 0)
-        model.Add(sum(variables) <= max(0, 2 - locked_count))
+        subject = subjects_by_id.get(key[1], {})
+        max_per_class_per_day = int(subject.get("maxPerClassPerDay") or 0)
+        if max_per_class_per_day > 0:
+            if locked_count > max_per_class_per_day:
+                return {
+                    "ok": False,
+                    "error": "CP_SAT_INFEASIBLE",
+                    "message": f"{key[0]} {key[2]} {subject.get('name') or key[1]} 已锁定课程超过每日上限",
+                }
+            model.Add(sum(variables) + locked_count <= max_per_class_per_day)
 
     teacher_load_vars = []
     max_load = model.NewIntVar(0, len(tasks) + len(locked_assignments) + len(external_assignments), "max_teacher_load")
@@ -389,6 +431,32 @@ def solve(payload):
         objective_terms.append(excess * 10)
 
     period_numbers = [int(period["period"]) for period in config.get("periods") or []]
+    class_subject_day_keys = set(
+        (class_id, subject_id, date)
+        for class_id, subject_id, date, _period in class_subject_day_period_vars.keys()
+    ) | set(class_subject_day_locked.keys())
+    for class_id, subject_id, date in class_subject_day_keys:
+        subject = subjects_by_id.get(subject_id, {})
+        if subject.get("allowConsecutive", True) is not False:
+            continue
+        for index in range(0, len(period_numbers) - 1):
+            window = period_numbers[index : index + 2]
+            fixed_count = sum(
+                class_subject_day_period_locked.get((class_id, subject_id, date, period), 0)
+                for period in window
+            )
+            variables = []
+            for period in window:
+                variables.extend(class_subject_day_period_vars.get((class_id, subject_id, date, period), []))
+            if fixed_count > 1:
+                return {
+                    "ok": False,
+                    "error": "CP_SAT_INFEASIBLE",
+                    "message": f"{class_id} {date} {subject.get('name') or subject_id} 已锁定课程违反不连堂规则",
+                }
+            if variables:
+                model.Add(sum(variables) + fixed_count <= 1)
+
     teacher_day_keys = set(teacher_day_vars.keys()) | set(teacher_fixed_day_periods.keys())
     for teacher_id, date in teacher_day_keys:
         rule = rules_by_teacher.get(teacher_id) or {}
