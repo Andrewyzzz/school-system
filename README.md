@@ -105,6 +105,7 @@ http://127.0.0.1:4173/api/health
 
 第一阶段文档和模板：
 
+- 第一阶段 PRD：`docs/学校教学薪资管理系统-第一阶段PRD.md`
 - 字段字典：`docs/phase1-field-dictionary.md`
 - 教师导入说明：`docs/teacher-import-guide.md`
 - 教师导入 CSV 模板：`templates/teacher-import-template.csv`
