@@ -1,12 +1,16 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { hashPassword, verifyPassword } from "./auth.js";
+import { hashPassword, hashToken, verifyPassword } from "./auth.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
 const DATA_DIR = fileURLToPath(new URL("./data", import.meta.url));
 const DATA_FILE = path.join(DATA_DIR, "phase1-db.json");
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const MAX_BACKUP_FILES = 50;
+const SESSION_TTL_HOURS = 12;
+const NOTIFICATION_AUDIENCES = new Set(["all", "teacher", "finance", "admin", "system_admin"]);
 
 const STAGES = [
   { id: "primary", name: "小学部", grades: [1, 2, 3, 4, 5, 6], classesPerGrade: 10 },
@@ -48,33 +52,150 @@ const SURNAMES = [
   "郭",
   "马",
   "罗",
+  "梁",
+  "宋",
+  "郑",
+  "谢",
+  "韩",
+  "唐",
+  "冯",
+  "于",
+  "董",
+  "萧",
+  "程",
+  "曹",
+  "袁",
+  "邓",
+  "许",
+  "傅",
+  "沈",
+  "曾",
+  "彭",
+  "吕",
+  "苏",
+  "卢",
+  "蒋",
+  "蔡",
+  "贾",
+  "丁",
+  "魏",
+  "薛",
+  "叶",
+  "阎",
+  "余",
+  "潘",
+  "杜",
+  "戴",
+  "夏",
+  "钟",
+  "汪",
+  "田",
+  "任",
+  "姜",
+  "范",
+  "方",
+  "石",
+  "姚",
+  "谭",
+  "廖",
+  "邹",
+  "熊",
+  "金",
+  "陆",
+  "郝",
+  "孔",
+  "白",
+  "崔",
+  "康",
+  "毛",
+  "邱",
+  "秦",
+  "江",
+  "史",
 ];
 
-const GIVEN_NAMES = [
+const GIVEN_FIRST_CHARS = [
+  "子",
+  "嘉",
+  "若",
+  "思",
   "明",
-  "雅",
-  "悦",
+  "承",
+  "书",
+  "景",
+  "雨",
+  "梓",
+  "云",
+  "亦",
   "晨",
-  "琳",
-  "航",
+  "沐",
+  "知",
+  "文",
+  "安",
+  "泽",
+  "佳",
+  "予",
+  "欣",
+  "一",
+  "可",
+  "卓",
+  "启",
+  "彦",
+  "清",
+  "楚",
+  "昱",
+  "奕",
+];
+
+const GIVEN_SECOND_CHARS = [
+  "涵",
+  "轩",
   "宁",
   "然",
-  "雪",
-  "博",
-  "文",
+  "辰",
+  "航",
+  "妍",
   "琪",
-  "洁",
-  "帆",
-  "欣",
-  "楠",
+  "琳",
+  "宇",
+  "瑶",
+  "哲",
+  "昕",
+  "诺",
+  "彤",
+  "远",
+  "铭",
+  "悦",
+  "晗",
+  "宸",
+  "瑜",
+  "珂",
+  "骁",
+  "璇",
+  "禾",
+  "乔",
+  "朗",
+  "澄",
   "越",
-  "强",
-  "青",
+  "琛",
+  "翊",
+  "棠",
+  "晟",
   "岚",
 ];
 
 function pad(number, length = 4) {
   return String(number).padStart(length, "0");
+}
+
+function teacherDisplayName(index) {
+  if (index === 1) return "李明";
+  const nameIndex = index - 1;
+  const generation = Math.floor(nameIndex / SURNAMES.length);
+  const surname = SURNAMES[nameIndex % SURNAMES.length];
+  const first = GIVEN_FIRST_CHARS[(nameIndex * 5 + generation) % GIVEN_FIRST_CHARS.length];
+  const second = GIVEN_SECOND_CHARS[(nameIndex * 7 + generation * 11) % GIVEN_SECOND_CHARS.length];
+  return `${surname}${first}${second}`;
 }
 
 function addDays(dateKey, days) {
@@ -86,6 +207,14 @@ function addDays(dateKey, days) {
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function startOfNaturalWeek(dateKey) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  const dayIndex = date.getDay();
+  const offset = dayIndex === 0 ? 6 : dayIndex - 1;
+  return addDays(dateKey, -offset);
 }
 
 function createClassesAndRooms() {
@@ -160,9 +289,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
     const stage = STAGES[(index - 1) % STAGES.length];
     const subject = SUBJECTS[(index - 1) % SUBJECTS.length];
     const teacherId = `T${pad(index)}`;
-    const surname = index === 1 ? "李" : SURNAMES[(index - 1) % SURNAMES.length];
-    const givenName = index === 1 ? "明" : GIVEN_NAMES[(index + 3) % GIVEN_NAMES.length];
-    const name = `${surname}${givenName}${index === 1 ? "" : pad(index, 2)}`;
+    const name = teacherDisplayName(index);
 
     teachers.push({
       id: teacherId,
@@ -292,6 +419,10 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     teachers,
     accounts,
     teacherAssignments,
+    gradeCourseRules: [],
+    scheduleConstraints: [],
+    teacherScheduleRules: [],
+    scheduleChangeRequests: [],
     lessonInstances,
     attendanceRecords: [],
     payrollRules: {
@@ -310,6 +441,8 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     workloadConfirmations: [],
     payrollDetails: [],
     payrollBatches: [],
+    sessions: [],
+    notifications: [],
     auditLogs: [],
   };
 }
@@ -324,12 +457,18 @@ function normalizeDatabase(db) {
     "rooms",
     "teachers",
     "accounts",
+    "gradeCourseRules",
+    "scheduleConstraints",
+    "teacherScheduleRules",
+    "scheduleChangeRequests",
     "lessonInstances",
     "attendanceRecords",
     "scheduleDrafts",
     "workloadConfirmations",
     "payrollDetails",
     "payrollBatches",
+    "sessions",
+    "notifications",
     "auditLogs",
   ];
 
@@ -342,6 +481,67 @@ function normalizeDatabase(db) {
 
   if (!Array.isArray(db.teacherAssignments)) {
     db.teacherAssignments = createTeacherAssignments(db.teachers || []);
+    changed = true;
+  }
+
+  if (!db.notifications.length) {
+    const now = new Date().toISOString();
+    db.notifications = [
+      {
+        id: "NTF-SEED-TEACHER",
+        audience: "teacher",
+        teacherIds: [],
+        accountIds: [],
+        title: "课表与签到规则已启用",
+        text: "老师端会显示已发布课表，请按课前签入、课后签出的规则完成课堂考勤。",
+        source: "教务处",
+        level: "info",
+        createdAt: now,
+        createdByAccountId: "SYSTEM",
+        createdByName: "系统",
+        readByAccountIds: [],
+        readReceipts: {},
+      },
+      {
+        id: "NTF-SEED-FINANCE",
+        audience: "finance",
+        teacherIds: [],
+        accountIds: [],
+        title: "任课老师薪资明细流程已启用",
+        text: "薪资锁定前需完成老师确认、教务审批和总校审批，异常课时不会计入薪资。",
+        source: "总校",
+        level: "warning",
+        createdAt: now,
+        createdByAccountId: "SYSTEM",
+        createdByName: "系统",
+        readByAccountIds: [],
+        readReceipts: {},
+      },
+      {
+        id: "NTF-SEED-ADMIN",
+        audience: "admin",
+        teacherIds: [],
+        accountIds: [],
+        title: "排课发布将同步老师端",
+        text: "行政端发布课表后，相关老师会收到通知，老师端按发布课表生成签到任务。",
+        source: "教务处",
+        level: "info",
+        createdAt: now,
+        createdByAccountId: "SYSTEM",
+        createdByName: "系统",
+        readByAccountIds: [],
+        readReceipts: {},
+      },
+    ];
+    changed = true;
+  }
+
+  const demoTeacher = (db.teachers || []).find((teacher) => teacher.id === "T0003");
+  const demoTeacherAccount = (db.accounts || []).find((account) => account.username === "teacher");
+  if (demoTeacher && demoTeacherAccount && demoTeacherAccount.teacherId !== demoTeacher.id) {
+    demoTeacherAccount.teacherId = demoTeacher.id;
+    demoTeacherAccount.name = demoTeacher.name;
+    demoTeacherAccount.department = demoTeacher.department || demoTeacher.stageName || "高中部";
     changed = true;
   }
 
@@ -402,15 +602,131 @@ export async function ensureDatabase() {
 
 export async function saveDatabase(db) {
   await fs.mkdir(DATA_DIR, { recursive: true });
+  await backupDatabaseFile();
   const tmpFile = `${DATA_FILE}.tmp`;
   await fs.writeFile(tmpFile, JSON.stringify(db, null, 2));
   await fs.rename(tmpFile, DATA_FILE);
+}
+
+async function backupDatabaseFile() {
+  try {
+    await fs.access(DATA_FILE);
+  } catch {
+    return;
+  }
+
+  await fs.mkdir(BACKUP_DIR, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupFile = path.join(BACKUP_DIR, `phase1-db-${timestamp}.json`);
+  await fs.copyFile(DATA_FILE, backupFile);
+
+  try {
+    const entries = await fs.readdir(BACKUP_DIR);
+    const backupFiles = entries
+      .filter((name) => name.startsWith("phase1-db-") && name.endsWith(".json"))
+      .sort();
+    const removable = backupFiles.slice(0, Math.max(backupFiles.length - MAX_BACKUP_FILES, 0));
+    await Promise.all(removable.map((name) => fs.unlink(path.join(BACKUP_DIR, name))));
+  } catch {
+    // Backup pruning must never block the business write path.
+  }
 }
 
 export async function resetDatabase(options = {}) {
   const db = createInitialData(options);
   await saveDatabase(db);
   return db;
+}
+
+function addHours(date, hours) {
+  return new Date(date.getTime() + hours * 60 * 60 * 1000);
+}
+
+function ensureAuditLogs(db) {
+  if (!Array.isArray(db.auditLogs)) db.auditLogs = [];
+  return db.auditLogs;
+}
+
+function ensureSessions(db) {
+  if (!Array.isArray(db.sessions)) db.sessions = [];
+  return db.sessions;
+}
+
+function ensureNotifications(db) {
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  return db.notifications;
+}
+
+function appendAuditLog(db, entry = {}) {
+  const now = new Date().toISOString();
+  ensureAuditLogs(db).push({
+    id: `AUDIT-${Date.now()}-${ensureAuditLogs(db).length + 1}`,
+    actorAccountId: entry.actorAccountId || entry.actorAccount?.id || "",
+    actorName: entry.actorName || entry.actorAccount?.name || "",
+    createdAt: now,
+    ...entry,
+  });
+  db.meta.updatedAt = now;
+}
+
+export function createSession(db, account, token, context = {}) {
+  const now = new Date();
+  const session = {
+    id: `SES-${Date.now()}-${ensureSessions(db).length + 1}`,
+    accountId: account.id,
+    tokenHash: hashToken(token),
+    createdAt: now.toISOString(),
+    expiresAt: addHours(now, SESSION_TTL_HOURS).toISOString(),
+    lastSeenAt: now.toISOString(),
+    revokedAt: "",
+    userAgent: context.userAgent || "",
+  };
+  ensureSessions(db).push(session);
+  appendAuditLog(db, {
+    action: "auth_login",
+    actorAccountId: account.id,
+    actorName: account.name,
+    sessionId: session.id,
+  });
+  return session;
+}
+
+export function findActiveSession(db, token = "") {
+  const tokenHashValue = hashToken(token);
+  const session = ensureSessions(db).find(
+    (item) => item.tokenHash === tokenHashValue && !item.revokedAt,
+  );
+  if (!session) return null;
+  if (new Date(session.expiresAt).getTime() <= Date.now()) {
+    session.revokedAt = new Date().toISOString();
+    return null;
+  }
+  session.lastSeenAt = new Date().toISOString();
+  return session;
+}
+
+export function revokeSession(db, token = "", actorAccount = null) {
+  const tokenHashValue = hashToken(token);
+  const session = ensureSessions(db).find((item) => item.tokenHash === tokenHashValue && !item.revokedAt);
+  if (!session) return false;
+  session.revokedAt = new Date().toISOString();
+  appendAuditLog(db, {
+    action: "auth_logout",
+    actorAccountId: actorAccount?.id || session.accountId,
+    actorName: actorAccount?.name || "",
+    sessionId: session.id,
+  });
+  return true;
+}
+
+function revokeAccountSessions(db, accountId, reason = "account_security_update") {
+  const now = new Date().toISOString();
+  ensureSessions(db)
+    .filter((session) => session.accountId === accountId && !session.revokedAt)
+    .forEach((session) => {
+      session.revokedAt = now;
+      session.revokedReason = reason;
+    });
 }
 
 export function findAccountByUsername(db, username) {
@@ -435,6 +751,121 @@ export function publicAccount(account, db) {
   };
 }
 
+function publicNotification(notification, account) {
+  const readByAccountIds = Array.isArray(notification.readByAccountIds) ? notification.readByAccountIds : [];
+  return {
+    id: notification.id,
+    audience: notification.audience,
+    teacherIds: notification.teacherIds || [],
+    title: notification.title,
+    text: notification.text,
+    source: notification.source || "系统",
+    level: notification.level || "info",
+    createdAt: notification.createdAt,
+    createdByName: notification.createdByName || "",
+    read: readByAccountIds.includes(account.id),
+    readAt: notification.readReceipts?.[account.id] || "",
+  };
+}
+
+function notificationVisibleToAccount(notification, account) {
+  if (notification.audience === "all") return true;
+  if (notification.audience === account.role) {
+    if (!notification.teacherIds?.length) return true;
+    return account.teacherId && notification.teacherIds.includes(account.teacherId);
+  }
+  if (account.role === "teacher" && notification.teacherIds?.includes(account.teacherId)) return true;
+  if (notification.accountIds?.includes(account.id)) return true;
+  return false;
+}
+
+export function queryNotifications(db, account, query = {}) {
+  const limit = Math.min(Math.max(Number.parseInt(query.limit || "50", 10), 1), 100);
+  const unreadOnly = String(query.unreadOnly || "false") === "true";
+  const items = ensureNotifications(db)
+    .filter((notification) => notificationVisibleToAccount(notification, account))
+    .map((notification) => publicNotification(notification, account))
+    .filter((notification) => !unreadOnly || !notification.read)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, limit);
+
+  return {
+    items,
+    summary: {
+      total: items.length,
+      unread: items.filter((notification) => !notification.read).length,
+    },
+  };
+}
+
+export function createNotification(db, options = {}, actorAccount = null) {
+  const audience = String(options.audience || "all").trim();
+  if (!NOTIFICATION_AUDIENCES.has(audience)) {
+    const error = new Error("通知接收对象不正确");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const title = String(options.title || "").trim();
+  const text = String(options.text || "").trim();
+  if (!title || !text) {
+    const error = new Error("通知标题和内容不能为空");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const teacherIds = Array.isArray(options.teacherIds)
+    ? Array.from(new Set(options.teacherIds.map((id) => String(id).trim()).filter(Boolean)))
+    : [];
+  const accountIds = Array.isArray(options.accountIds)
+    ? Array.from(new Set(options.accountIds.map((id) => String(id).trim()).filter(Boolean)))
+    : [];
+  const now = new Date().toISOString();
+  const notification = {
+    id: `NTF-${Date.now()}-${ensureNotifications(db).length + 1}`,
+    audience,
+    teacherIds,
+    accountIds,
+    title,
+    text,
+    source: String(options.source || actorAccount?.department || "系统").trim(),
+    level: ["info", "warning"].includes(options.level) ? options.level : "info",
+    createdAt: now,
+    createdByAccountId: actorAccount?.id || "SYSTEM",
+    createdByName: actorAccount?.name || "系统",
+    readByAccountIds: [],
+    readReceipts: {},
+  };
+  ensureNotifications(db).push(notification);
+  appendAuditLog(db, {
+    action: "notification_create",
+    actorAccountId: actorAccount?.id || "SYSTEM",
+    actorName: actorAccount?.name || "系统",
+    notificationId: notification.id,
+    audience,
+    teacherCount: teacherIds.length,
+  });
+  return notification;
+}
+
+export function markNotificationRead(db, notificationId, account) {
+  const notification = ensureNotifications(db).find((item) => item.id === notificationId);
+  if (!notification || !notificationVisibleToAccount(notification, account)) {
+    const error = new Error("通知不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  if (!Array.isArray(notification.readByAccountIds)) notification.readByAccountIds = [];
+  if (!notification.readReceipts || typeof notification.readReceipts !== "object") notification.readReceipts = {};
+  if (!notification.readByAccountIds.includes(account.id)) {
+    notification.readByAccountIds.push(account.id);
+    notification.readReceipts[account.id] = new Date().toISOString();
+    db.meta.updatedAt = notification.readReceipts[account.id];
+  }
+  return publicNotification(notification, account);
+}
+
 export function changeOwnPassword(db, account, currentPassword = "", newPassword = "") {
   if (!verifyPassword(currentPassword, account.passwordHash)) {
     const error = new Error("当前密码不正确");
@@ -449,6 +880,13 @@ export function changeOwnPassword(db, account, currentPassword = "", newPassword
   account.passwordHash = hashPassword(String(newPassword));
   account.mustChangePassword = false;
   account.passwordChangedAt = new Date().toISOString();
+  revokeAccountSessions(db, account.id, "password_changed");
+  appendAuditLog(db, {
+    action: "account_password_change",
+    actorAccountId: account.id,
+    actorName: account.name,
+    accountId: account.id,
+  });
   db.meta.updatedAt = new Date().toISOString();
   return publicAccount(account, db);
 }
@@ -470,6 +908,7 @@ export function resetAccountPassword(db, accountId, newPassword = DEFAULT_PASSWO
   account.mustChangePassword = true;
   account.passwordResetAt = now;
   account.passwordResetByAccountId = actorAccount?.id || "";
+  revokeAccountSessions(db, account.id, "password_reset");
   db.auditLogs.push({
     action: "account_password_reset",
     accountId,
@@ -501,6 +940,7 @@ export function setAccountStatus(db, accountId, status = "active", actorAccount 
   account.status = status;
   account.statusChangedAt = now;
   account.statusChangedByAccountId = actorAccount?.id || "";
+  if (status === "disabled") revokeAccountSessions(db, account.id, "account_disabled");
   db.auditLogs.push({
     action: "account_status_update",
     accountId,
@@ -530,6 +970,167 @@ export function referenceCatalog(db) {
     rooms: db.rooms,
     payrollRules: db.payrollRules,
     teacherAssignments: db.teacherAssignments,
+  };
+}
+
+function displayGrade(grade) {
+  const chineseNumbers = ["", "一", "二", "三", "四", "五", "六"];
+  if (grade >= 10) return `高${chineseNumbers[grade - 9] || grade - 9}`;
+  if (grade >= 7) return `初${chineseNumbers[grade - 6] || grade - 6}`;
+  return `${chineseNumbers[grade] || grade}年级`;
+}
+
+function gradeCoverageText(db, teacher) {
+  const stage = db.stages.find((item) => item.id === teacher.stageId);
+  const assignmentGrades = (db.teacherAssignments || [])
+    .filter((assignment) => assignment.teacherIds.includes(teacher.id))
+    .map((assignment) => assignment.grade);
+  const grades = Array.from(new Set(assignmentGrades.length ? assignmentGrades : stage?.grades || [])).sort(
+    (a, b) => a - b,
+  );
+  if (!grades.length) return "未设置年级";
+  if (grades.length === 1) return displayGrade(grades[0]);
+  const contiguous = grades.every((grade, index) => index === 0 || grade === grades[index - 1] + 1);
+  if (contiguous) return `${displayGrade(grades[0])}-${displayGrade(grades[grades.length - 1])}`;
+  return grades.map(displayGrade).join("、");
+}
+
+function publicPersonnelRows(db) {
+  const accountsByTeacherId = new Map();
+  db.accounts.forEach((account) => {
+    if (!account.teacherId) return;
+    if (!accountsByTeacherId.has(account.teacherId)) accountsByTeacherId.set(account.teacherId, []);
+    accountsByTeacherId.get(account.teacherId).push(account);
+  });
+
+  const teacherRows = db.teachers.map((teacher) => {
+    const accounts = accountsByTeacherId.get(teacher.id) || [];
+    const activeAccount = accounts.find((account) => account.status === "active") || accounts[0] || null;
+    return {
+      id: `teacher:${teacher.id}`,
+      personType: "teacher",
+      role: "teacher",
+      roleName: "任课教师",
+      accountId: activeAccount?.id || "",
+      username: activeAccount?.username || "",
+      usernames: accounts.map((account) => account.username),
+      teacherId: teacher.id,
+      employeeNo: teacher.employeeNo,
+      name: teacher.name,
+      department: teacher.department || teacher.stageName,
+      stageId: teacher.stageId,
+      stageName: teacher.stageName || teacher.department,
+      gradeText: gradeCoverageText(db, teacher),
+      subjectName: teacher.primarySubjectName,
+      title: teacher.title,
+      phone: teacher.phone,
+      hiredAt: teacher.hiredAt,
+      status: teacher.status || activeAccount?.status || "active",
+      accountStatus: activeAccount?.status || "未开通账号",
+    };
+  });
+
+  const nonTeacherRows = db.accounts
+    .filter((account) => !account.teacherId)
+    .map((account) => ({
+      id: `account:${account.id}`,
+      personType: "account",
+      role: account.role,
+      roleName:
+        account.role === "admin"
+          ? "行政"
+          : account.role === "finance"
+            ? "财务"
+            : account.role === "system_admin"
+              ? "系统管理员"
+              : "账号",
+      accountId: account.id,
+      username: account.username,
+      usernames: [account.username],
+      teacherId: "",
+      employeeNo: "",
+      name: account.name,
+      department: account.department || "未设置部门",
+      stageId: "",
+      stageName: account.department || "未设置学部",
+      gradeText: "不适用",
+      subjectName: "不适用",
+      title: account.role === "finance" ? "财务人员" : account.role === "admin" ? "行政人员" : "系统账号",
+      phone: "",
+      hiredAt: "",
+      status: account.status || "active",
+      accountStatus: account.status || "active",
+    }));
+
+  return [...nonTeacherRows, ...teacherRows];
+}
+
+export function queryPersonnel(db, query = {}) {
+  const page = Math.max(Number.parseInt(query.page || "1", 10), 1);
+  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || "20", 10), 1), 100);
+  const search = String(query.search || "").trim().toLowerCase();
+  const role = String(query.role || "all").trim();
+  const status = String(query.status || "active").trim();
+  const stageId = String(query.stageId || "").trim();
+  const rows = publicPersonnelRows(db);
+
+  const filtered = rows.filter((row) => {
+    if (role && role !== "all" && row.role !== role) return false;
+    if (status && status !== "all" && row.status !== status) return false;
+    if (stageId && row.stageId !== stageId) return false;
+    if (!search) return true;
+    return [
+      row.name,
+      row.username,
+      row.usernames.join(" "),
+      row.employeeNo,
+      row.teacherId,
+      row.roleName,
+      row.department,
+      row.stageName,
+      row.gradeText,
+      row.subjectName,
+      row.title,
+      row.phone,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(search);
+  });
+
+  const roleOrder = {
+    system_admin: 1,
+    admin: 2,
+    finance: 3,
+    teacher: 4,
+  };
+  filtered.sort((a, b) => {
+    const roleDiff = (roleOrder[a.role] || 99) - (roleOrder[b.role] || 99);
+    if (roleDiff) return roleDiff;
+    const stageDiff = String(a.stageName || "").localeCompare(String(b.stageName || ""), "zh-CN");
+    if (stageDiff) return stageDiff;
+    return String(a.employeeNo || a.username).localeCompare(String(b.employeeNo || b.username), "zh-CN");
+  });
+
+  const start = (page - 1) * pageSize;
+  const items = filtered.slice(start, start + pageSize);
+  const activeRows = rows.filter((row) => row.status === "active");
+
+  return {
+    items,
+    summary: {
+      total: rows.length,
+      active: activeRows.length,
+      teachers: rows.filter((row) => row.role === "teacher").length,
+      adminFinance: rows.filter((row) => ["admin", "finance", "system_admin"].includes(row.role)).length,
+      filtered: filtered.length,
+    },
+    meta: {
+      page,
+      pageSize,
+      total: filtered.length,
+      totalPages: Math.max(Math.ceil(filtered.length / pageSize), 1),
+    },
   };
 }
 
@@ -596,10 +1197,23 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     error.statusCode = 400;
     throw error;
   }
-  const uniqueTeacherIds = Array.from(new Set(teacherIds)).slice(0, 12);
-  const invalidTeacher = uniqueTeacherIds.find((teacherId) => !findTeacher(db, teacherId));
+  const uniqueTeacherIds = Array.from(new Set(teacherIds));
+  const invalidTeacherId = uniqueTeacherIds.find((teacherId) => !findTeacher(db, teacherId));
+  if (invalidTeacherId) {
+    const error = new Error(`教师不存在：${invalidTeacherId}`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const invalidTeacher = uniqueTeacherIds
+    .map((teacherId) => findTeacher(db, teacherId))
+    .find(
+      (teacher) =>
+        teacher.status !== "active" ||
+        teacher.stageId !== stageId ||
+        teacher.primarySubjectId !== subjectId,
+    );
   if (invalidTeacher) {
-    const error = new Error(`教师不存在：${invalidTeacher}`);
+    const error = new Error(`${invalidTeacher.name} 不属于当前学部或学科，不能加入该任课池`);
     error.statusCode = 400;
     throw error;
   }
@@ -743,6 +1357,29 @@ export function teacherLessonsForWeek(db, teacherId, weekStart) {
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
 
+export function teacherScheduleWeeks(db, teacherId) {
+  const weekMap = new Map();
+  db.lessonInstances
+    .filter((lesson) => lesson.teacherId === teacherId)
+    .forEach((lesson) => {
+      const weekStart = startOfNaturalWeek(lesson.date);
+      const current = weekMap.get(weekStart) || {
+        weekStart,
+        lessonCount: 0,
+        publishedCount: 0,
+        latestDate: lesson.date,
+      };
+      current.lessonCount += 1;
+      if (lesson.source === "backend-scheduling") current.publishedCount += 1;
+      if (lesson.date > current.latestDate) current.latestDate = lesson.date;
+      weekMap.set(weekStart, current);
+    });
+  return Array.from(weekMap.values()).sort((a, b) => {
+    if (b.publishedCount !== a.publishedCount) return b.publishedCount - a.publishedCount;
+    return b.weekStart.localeCompare(a.weekStart);
+  });
+}
+
 function attendanceActionLabel(action) {
   if (action === "checkOut") return "签出";
   if (action === "missingCheckOut") return "未签出异常";
@@ -853,6 +1490,17 @@ function findTeacherPayrollDetail(db, teacherId, month = "2026-06") {
   return ensurePayrollDetails(db).find((item) => item.teacherId === teacherId && item.month === month);
 }
 
+function assertWorkloadSchoolApproved(db, teacherId, month = "2026-06") {
+  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  if (!["school_approved", "locked"].includes(confirmation?.status)) {
+    const error = new Error("请先完成老师确认、教务审批和总校审批，再进行薪资复核或锁定");
+    error.statusCode = 409;
+    error.details = { confirmationStatus: confirmation?.status || "unconfirmed" };
+    throw error;
+  }
+  return confirmation;
+}
+
 function buildPayrollRows(db, payroll, workload) {
   if (!payroll || !workload) return [];
   return [
@@ -959,10 +1607,20 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
   }
 
   db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_generate",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+    grossPay: detail.grossPay,
+    netPay: detail.netPay,
+  });
   return teacherPayrollDetail(db, teacherId, month);
 }
 
 export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertWorkloadSchoolApproved(db, teacherId, month);
   const existing = findTeacherPayrollDetail(db, teacherId, month);
   const detail = existing || generateTeacherPayrollDetail(db, teacherId, month, actorAccount).generated;
   const target = findTeacherPayrollDetail(db, teacherId, month) || detail;
@@ -975,10 +1633,18 @@ export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", act
   target.reviewedByName = actorAccount?.name || "";
   target.updatedAt = now;
   db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_review",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+  });
   return teacherPayrollDetail(db, teacherId, month);
 }
 
 export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertWorkloadSchoolApproved(db, teacherId, month);
   let target = findTeacherPayrollDetail(db, teacherId, month);
   if (!target) {
     generateTeacherPayrollDetail(db, teacherId, month, actorAccount);
@@ -1017,6 +1683,13 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
   }
 
   db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_lock",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+  });
   return teacherPayrollDetail(db, teacherId, month);
 }
 
@@ -1135,6 +1808,11 @@ function publicWorkloadConfirmation(confirmation) {
     stage: confirmation.stage,
     confirmedAt: confirmation.confirmedAt,
     confirmedByName: confirmation.confirmedByName,
+    academicApprovedAt: confirmation.academicApprovedAt || "",
+    academicApprovedByName: confirmation.academicApprovedByName || "",
+    schoolApprovedAt: confirmation.schoolApprovedAt || "",
+    schoolApprovedByName: confirmation.schoolApprovedByName || "",
+    lockedAt: confirmation.lockedAt || "",
     summarySnapshot: confirmation.summarySnapshot,
   };
 }
@@ -1257,6 +1935,12 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
     confirmedAt: now,
     confirmedByAccountId: actorAccount?.id || "",
     confirmedByName: actorAccount?.name || workload.teacher.name,
+    academicApprovedAt: "",
+    academicApprovedByAccountId: "",
+    academicApprovedByName: "",
+    schoolApprovedAt: "",
+    schoolApprovedByAccountId: "",
+    schoolApprovedByName: "",
     summarySnapshot: workload.summary,
     payableLessonIds: workload.payableLines.map((line) => line.lessonId),
     pendingLessonIds: workload.pendingLines.map((line) => line.lessonId),
@@ -1272,6 +1956,67 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
   }
 
   db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "workload_teacher_confirm",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || workload.teacher.name,
+    teacherId,
+    month,
+  });
+  return teacherMonthlyWorkload(db, teacherId, month);
+}
+
+export function approveMonthlyWorkload(db, teacherId, month = "2026-06", step = "academic", actorAccount = null) {
+  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  if (!confirmation) {
+    const error = new Error("老师尚未确认本月工作量");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (confirmation.status === "locked") {
+    const error = new Error("本月工作量已锁定，不能重复审批");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  if (step === "academic") {
+    if (confirmation.status !== "teacher_confirmed") {
+      const error = new Error("请先由老师确认工作量，再进行教务审批");
+      error.statusCode = 409;
+      throw error;
+    }
+    confirmation.status = "academic_approved";
+    confirmation.stage = 2;
+    confirmation.academicApprovedAt = now;
+    confirmation.academicApprovedByAccountId = actorAccount?.id || "";
+    confirmation.academicApprovedByName = actorAccount?.name || "";
+  } else if (step === "school") {
+    if (confirmation.status !== "academic_approved") {
+      const error = new Error("请先完成教务审批，再进行总校审批");
+      error.statusCode = 409;
+      throw error;
+    }
+    confirmation.status = "school_approved";
+    confirmation.stage = 3;
+    confirmation.schoolApprovedAt = now;
+    confirmation.schoolApprovedByAccountId = actorAccount?.id || "";
+    confirmation.schoolApprovedByName = actorAccount?.name || "";
+  } else {
+    const error = new Error("审批节点只能是 academic 或 school");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  confirmation.updatedAt = now;
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: step === "academic" ? "workload_academic_approve" : "workload_school_approve",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+  });
   return teacherMonthlyWorkload(db, teacherId, month);
 }
 

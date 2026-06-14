@@ -6,34 +6,51 @@ import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAtte
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
+  approveScheduleChangeRequest,
   adjustScheduleAssignment,
   buildSchedulingConfig,
+  createScheduleChangeRequest,
+  createScheduleConstraint,
+  createGradeCourse,
+  deleteScheduleConstraint,
+  deleteGradeCourse,
   findScheduleDraft,
   generateScheduleDraft,
   publishScheduleDraft,
   regenerateUnlockedScheduleAssignments,
   setScheduleAssignmentLock,
+  updateGradeCourseRules,
+  updateTeacherScheduleRule,
 } from "./scheduling.js";
 import {
   confirmMonthlyWorkload,
+  approveMonthlyWorkload,
   changeOwnPassword,
+  createNotification,
+  createSession,
   ensureDatabase,
   exportPayrollDetails,
+  findActiveSession,
   findAccountByUsername,
   findTeacher,
   generatePayrollBatch,
   generateTeacherPayrollDetail,
   lockTeacherPayrollDetail,
+  markNotificationRead,
   publicAccount,
+  queryNotifications,
+  queryPersonnel,
   queryTeacherAttendanceRecords,
   queryTeacherAssignments,
   queryTeachers,
   referenceCatalog,
   resetAccountPassword,
+  revokeSession,
   reviewTeacherPayrollDetail,
   saveDatabase,
   setAccountStatus,
   teacherLessonsForWeek,
+  teacherScheduleWeeks,
   teacherMonthlyWorkload,
   teacherPayrollDetail,
   teacherPayrollPreview,
@@ -44,7 +61,6 @@ import {
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const PUBLIC_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const sessions = new Map();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -91,7 +107,7 @@ function bearerToken(req) {
 
 function requireAuth(req, res, db, allowedRoles = []) {
   const token = bearerToken(req);
-  const session = sessions.get(token);
+  const session = token ? findActiveSession(db, token) : null;
   if (!session) {
     sendError(res, 401, "请先登录");
     return null;
@@ -99,7 +115,7 @@ function requireAuth(req, res, db, allowedRoles = []) {
 
   const account = db.accounts.find((item) => item.id === session.accountId);
   if (!account || account.status !== "active") {
-    sessions.delete(token);
+    if (token) revokeSession(db, token, account || null);
     sendError(res, 401, "账号不可用，请重新登录");
     return null;
   }
@@ -153,10 +169,10 @@ async function handleApi(req, res, db, url) {
       }
 
       const token = createToken();
-      sessions.set(token, {
-        accountId: account.id,
-        createdAt: new Date().toISOString(),
+      createSession(db, account, token, {
+        userAgent: req.headers["user-agent"] || "",
       });
+      await saveDatabase(db);
 
       sendJson(res, 200, {
         token,
@@ -167,7 +183,7 @@ async function handleApi(req, res, db, url) {
 
     if (req.method === "POST" && url.pathname === "/api/auth/logout") {
       const token = bearerToken(req);
-      if (token) sessions.delete(token);
+      if (token && revokeSession(db, token)) await saveDatabase(db);
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -193,6 +209,38 @@ async function handleApi(req, res, db, url) {
       sendJson(res, 200, {
         account: publicAccount(auth.account, db),
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/notifications") {
+      const auth = requireAuth(req, res, db);
+      if (!auth) return;
+      sendJson(res, 200, queryNotifications(db, auth.account, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/notifications") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const notification = createNotification(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, { notification });
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      parts[0] === "api" &&
+      parts[1] === "notifications" &&
+      parts[2] &&
+      parts[3] === "read"
+    ) {
+      const auth = requireAuth(req, res, db);
+      if (!auth) return;
+      const notification = markNotificationRead(db, decodeURIComponent(parts[2]), auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, { notification });
       return;
     }
 
@@ -304,6 +352,72 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/scheduling/course-rules") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = updateGradeCourseRules(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/courses") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = createGradeCourse(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "scheduling" && parts[2] === "courses" && parts[3]) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = deleteGradeCourse(
+        db,
+        {
+          subjectId: decodeURIComponent(parts[3]),
+          stageId: url.searchParams.get("stageId"),
+          grade: url.searchParams.get("grade"),
+        },
+        auth.account,
+      );
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/constraints") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = createScheduleConstraint(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "scheduling" && parts[2] === "constraints" && parts[3]) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = deleteScheduleConstraint(db, { constraintId: decodeURIComponent(parts[3]) }, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/teacher-rules") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = updateTeacherScheduleRule(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/scheduling/config") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
@@ -345,6 +459,32 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/scheduling/change-requests") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = createScheduleChangeRequest(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      parts[0] === "api" &&
+      parts[1] === "scheduling" &&
+      parts[2] === "change-requests" &&
+      parts[3] &&
+      parts[4] === "approve"
+    ) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = approveScheduleChangeRequest(db, { requestId: decodeURIComponent(parts[3]) }, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/scheduling/lock") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
@@ -369,6 +509,13 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/personnel") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, queryPersonnel(db, Object.fromEntries(url.searchParams)));
       return;
     }
 
@@ -422,10 +569,16 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts[3] === "schedule") {
-        const weekStart = url.searchParams.get("weekStart") || "2026-06-15";
+        const availableWeeks = teacherScheduleWeeks(db, teacherId);
+        const requestedWeekStart = url.searchParams.get("weekStart");
+        const weekStart =
+          requestedWeekStart && requestedWeekStart !== "auto"
+            ? requestedWeekStart
+            : availableWeeks[0]?.weekStart || "2026-06-15";
         sendJson(res, 200, {
           teacher,
           weekStart,
+          availableWeeks,
           lessons: teacherLessonsForWeek(db, teacherId, weekStart),
         });
         return;
@@ -457,6 +610,20 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const month = String(body.month || url.searchParams.get("month") || "2026-06");
         const result = confirmMonthlyWorkload(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "workload" && parts[4] === "approve") {
+        if (!["admin", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有教务或总校管理账号可以审批月度工作量");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const step = String(body.step || "academic");
+        const result = approveMonthlyWorkload(db, teacherId, month, step, auth.account);
         await saveDatabase(db);
         sendJson(res, 200, result);
         return;

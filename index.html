@@ -22,7 +22,7 @@
         </div>
         <form class="login-form" id="loginForm">
           <label for="loginUsername">用户名</label>
-          <input id="loginUsername" name="username" autocomplete="username" value="teacher" />
+          <input id="loginUsername" name="username" autocomplete="username" value="teacher0003" />
           <label for="loginPassword">密码</label>
           <input id="loginPassword" name="password" type="password" autocomplete="current-password" value="123456" />
           <p class="login-error" id="loginError"></p>
@@ -32,7 +32,7 @@
           </button>
         </form>
         <div class="demo-login-grid" aria-label="演示账号">
-          <button class="ghost-button" data-demo-login="teacher" type="button">老师账号</button>
+          <button class="ghost-button" data-demo-login="teacher0003" type="button">老师账号</button>
           <button class="ghost-button" data-demo-login="finance" type="button">财务账号</button>
           <button class="ghost-button" data-demo-login="admin" type="button">行政账号</button>
         </div>
@@ -77,11 +77,15 @@
             <span aria-hidden="true">▦</span>
             行政排课
           </button>
+          <button class="nav-item" data-view="personnel" data-role="admin" type="button">
+            <span aria-hidden="true">☷</span>
+            人员列表
+          </button>
           <button class="nav-item" data-view="teacherImport" data-role="admin" type="button">
             <span aria-hidden="true">⇧</span>
             教师导入
           </button>
-          <button class="nav-item" data-view="notifications" data-role="teacher,finance" type="button">
+          <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin" type="button">
             <span aria-hidden="true">✉</span>
             通知中心
           </button>
@@ -105,15 +109,15 @@
             <span aria-hidden="true">□</span>
             财务首页
           </button>
-          <button class="nav-item" data-view="financeRecords" data-role="finance" type="button">
+          <button class="nav-item" data-view="financeRecords" data-role="finance,admin" type="button">
             <span aria-hidden="true">≡</span>
             老师记录
           </button>
-          <button class="nav-item" data-view="settlement" data-role="finance" type="button">
+          <button class="nav-item" data-view="settlement" data-role="finance,admin" type="button">
             <span aria-hidden="true">¥</span>
             薪资结算
           </button>
-          <button class="nav-item" data-view="warnings" data-role="teacher,finance" type="button">
+          <button class="nav-item" data-view="warnings" data-role="teacher,finance,admin" type="button">
             <span aria-hidden="true">!</span>
             异常提醒
           </button>
@@ -332,88 +336,232 @@
         </section>
 
         <section class="view" id="adminSchedulingView" aria-labelledby="adminSchedulingTitle">
-          <div class="summary-grid">
-            <article class="metric">
-              <span>排课学部</span>
-              <strong id="adminDivisionName">小学部</strong>
-              <small>选择后联动年级</small>
-            </article>
-            <article class="metric">
-              <span>排课年级</span>
-              <strong id="adminGradeName">一年级</strong>
-              <small id="adminClassCount">10 个班</small>
-            </article>
-            <article class="metric">
-              <span>周课时任务</span>
-              <strong id="adminRequiredLessons">0</strong>
-              <small>按科目课时规则</small>
-            </article>
-            <article class="metric">
-              <span>教师冲突</span>
-              <strong id="adminConflictCount">0</strong>
-              <small>同一时间重复上课</small>
-            </article>
-            <article class="metric">
-              <span>发布状态</span>
-              <strong id="adminPublishStatus">未生成</strong>
-              <small id="adminPublishTime">等待生成</small>
-            </article>
-          </div>
+          <section class="panel admin-schedule-scope-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="adminSchedulingTitle">多学部自动排课</h2>
+                <p id="adminSchedulingIntro">先选择小学、初中或高中，再选择对应年级生成自然周课表。</p>
+              </div>
+              <span class="status-pill" id="adminScheduleStatus">未生成</span>
+            </div>
+            <div class="admin-schedule-selectors">
+              <label class="field-label" for="adminDivisionSelect">
+                <span>选择学部</span>
+                <select class="lesson-select" id="adminDivisionSelect"></select>
+              </label>
+              <label class="field-label" for="adminGradeSelect">
+                <span>选择年级</span>
+                <select class="lesson-select" id="adminGradeSelect"></select>
+              </label>
+            </div>
+            <div class="summary-grid admin-scope-summary">
+              <article class="metric">
+                <span>排课学部</span>
+                <strong id="adminDivisionName">小学部</strong>
+                <small>选择后联动年级</small>
+              </article>
+              <article class="metric">
+                <span>排课年级</span>
+                <strong id="adminGradeName">一年级</strong>
+                <small id="adminClassCount">10 个班</small>
+              </article>
+              <article class="metric">
+                <span>周课时任务</span>
+                <strong id="adminRequiredLessons">0</strong>
+                <small>按科目课时规则</small>
+              </article>
+              <article class="metric">
+                <span>教师冲突</span>
+                <strong id="adminConflictCount">0</strong>
+                <small>同一时间重复上课</small>
+              </article>
+              <article class="metric">
+                <span>发布状态</span>
+                <strong id="adminPublishStatus">未生成</strong>
+                <small id="adminPublishTime">等待生成</small>
+              </article>
+            </div>
+          </section>
 
-          <div class="admin-schedule-layout">
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <h2 id="adminSchedulingTitle">多学部自动排课</h2>
-                  <p id="adminSchedulingIntro">先选择小学、初中或高中，再选择对应年级生成自然周课表。</p>
-                </div>
-                <span class="status-pill" id="adminScheduleStatus">未生成</span>
+          <section class="panel course-rules-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>编辑课程</h2>
+                <p id="courseRulesHelp">配置本年级开设课程、周课时和每节时长。</p>
               </div>
-              <div class="admin-schedule-selectors">
-                <label class="field-label" for="adminDivisionSelect">
-                  <span>选择学部</span>
-                  <select class="lesson-select" id="adminDivisionSelect"></select>
-                </label>
-                <label class="field-label" for="adminGradeSelect">
-                  <span>选择年级</span>
-                  <select class="lesson-select" id="adminGradeSelect"></select>
-                </label>
+              <div class="panel-heading-actions">
+                <button class="mini-button" id="toggleCourseEditMode" type="button">编辑</button>
               </div>
-              <div class="admin-schedule-actions">
-                <button class="primary-button" id="generateSchedule" type="button">
-                  <span aria-hidden="true">✓</span>
-                  一键生成排课
-                </button>
-                <button class="ghost-button" id="confirmSchedule" type="button">
-                  确认并发布到老师端
-                </button>
-              </div>
-              <div class="rule-list">
-                <div>
-                  <strong>硬性约束</strong>
-                  <p>老师、班级、教室在同一时间只能有一节课；冲突为 0 才能确认发布。</p>
+            </div>
+            <div class="course-builder" aria-label="新增年级课程">
+              <label class="field-label" for="newCourseName">
+                <span>课程名称</span>
+                <input id="newCourseName" type="text" placeholder="例如信息技术" />
+              </label>
+              <label class="field-label" for="newCourseWeekly">
+                <span>每周节数</span>
+                <input id="newCourseWeekly" type="number" min="1" max="12" value="2" />
+              </label>
+              <label class="field-label" for="newCourseDuration">
+                <span>每节时长</span>
+                <div class="input-with-unit">
+                  <input id="newCourseDuration" type="number" min="20" max="120" step="5" value="40" />
+                  <em>分钟</em>
                 </div>
-                <div>
-                  <strong>排课范围</strong>
-                  <p id="adminScopeText">小学部一年级 10 个班，按本年级科目规则自动生成。</p>
-                </div>
-                <div>
-                  <strong>发布结果</strong>
-                  <p>确认后生成老师端课时任务，老师可在“我的课表”按自然周查看。</p>
-                </div>
-              </div>
-            </section>
+              </label>
+              <button class="ghost-button" id="addGradeCourse" type="button">新增课程</button>
+            </div>
+            <div class="course-rule-list" id="courseRuleList"></div>
+            <div class="admin-schedule-actions compact-actions">
+              <button class="primary-button" id="saveCourseRules" type="button">
+                <span aria-hidden="true">✓</span>
+                保存课程规则
+              </button>
+            </div>
+          </section>
 
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <h2>科目与老师配置</h2>
-                  <p id="subjectConfigHelp">每门课配置多位老师，系统自动均衡老师课量。</p>
-                </div>
+          <section class="panel constraint-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>添加硬约束</h2>
+                <p>为当前年级配置课程禁排时段，系统生成和手动调整时都会执行这些规则。</p>
               </div>
-              <div class="subject-config-list" id="subjectConfigList"></div>
-            </section>
-          </div>
+              <span class="status-pill" id="courseRulesStatus">读取中</span>
+            </div>
+            <div class="constraint-builder" aria-label="新增自定义硬约束">
+              <label class="field-label" for="constraintSubjectSelect">
+                <span>课程</span>
+                <select class="lesson-select" id="constraintSubjectSelect"></select>
+              </label>
+              <label class="field-label" for="constraintDaySelect">
+                <span>禁排星期</span>
+                <select class="lesson-select" id="constraintDaySelect">
+                  <option value="all">任意工作日</option>
+                  <option value="0">周一</option>
+                  <option value="1">周二</option>
+                  <option value="2">周三</option>
+                  <option value="3">周四</option>
+                  <option value="4">周五</option>
+                </select>
+              </label>
+              <label class="field-label" for="constraintPeriodSelect">
+                <span>禁排节次</span>
+                <select class="lesson-select" id="constraintPeriodSelect"></select>
+              </label>
+              <label class="field-label" for="constraintReasonInput">
+                <span>原因</span>
+                <input id="constraintReasonInput" type="text" placeholder="例如操场不可用、实验室准备" />
+              </label>
+              <button class="ghost-button" id="addScheduleConstraint" type="button">添加硬约束</button>
+            </div>
+            <div class="subsection-heading">
+              <strong>确认硬约束</strong>
+              <span>已添加的规则会直接参与排课冲突校验。</span>
+            </div>
+            <div class="constraint-list" id="scheduleConstraintList"></div>
+          </section>
+
+          <section class="panel teacher-pool-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>确认教师池</h2>
+                <p id="subjectConfigHelp">每门课配置多位老师，系统自动均衡老师课量。</p>
+              </div>
+            </div>
+            <div class="selected-teacher-pool" id="selectedTeacherPoolSummary" aria-label="当前任课老师池"></div>
+            <div class="subject-config-list" id="subjectConfigList"></div>
+          </section>
+
+          <section class="panel teacher-rule-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>老师时间规则</h2>
+                <p>配置老师不可用时间、偏好节次、每日课量和连续上课上限，生成和手动调整都会执行。</p>
+              </div>
+              <span class="status-pill" id="teacherRuleStatus">未配置</span>
+            </div>
+            <div class="teacher-rule-builder" aria-label="新增老师时间规则">
+              <label class="field-label" for="teacherRuleTeacherSelect">
+                <span>老师</span>
+                <select class="lesson-select" id="teacherRuleTeacherSelect"></select>
+              </label>
+              <label class="field-label" for="teacherRuleUnavailableDay">
+                <span>不可用星期</span>
+                <select class="lesson-select" id="teacherRuleUnavailableDay">
+                  <option value="">不新增</option>
+                  <option value="0">周一</option>
+                  <option value="1">周二</option>
+                  <option value="2">周三</option>
+                  <option value="3">周四</option>
+                  <option value="4">周五</option>
+                </select>
+              </label>
+              <label class="field-label" for="teacherRuleUnavailablePeriod">
+                <span>不可用节次</span>
+                <select class="lesson-select" id="teacherRuleUnavailablePeriod"></select>
+              </label>
+              <label class="field-label" for="teacherRuleAvoidPeriod">
+                <span>尽量避开</span>
+                <select class="lesson-select" id="teacherRuleAvoidPeriod"></select>
+              </label>
+              <label class="field-label" for="teacherRulePreferPeriod">
+                <span>优先安排</span>
+                <select class="lesson-select" id="teacherRulePreferPeriod"></select>
+              </label>
+              <label class="field-label" for="teacherRuleMaxDaily">
+                <span>每日最多</span>
+                <div class="input-with-unit">
+                  <input id="teacherRuleMaxDaily" type="number" min="1" max="6" value="4" />
+                  <em>节</em>
+                </div>
+              </label>
+              <label class="field-label" for="teacherRuleMaxConsecutive">
+                <span>最多连续</span>
+                <div class="input-with-unit">
+                  <input id="teacherRuleMaxConsecutive" type="number" min="1" max="6" value="3" />
+                  <em>节</em>
+                </div>
+              </label>
+              <label class="field-label" for="teacherRuleReasonInput">
+                <span>原因</span>
+                <input id="teacherRuleReasonInput" type="text" placeholder="例如周三上午教研、下午不排第一节" />
+              </label>
+              <button class="ghost-button" id="saveTeacherRule" type="button">保存老师规则</button>
+            </div>
+            <div class="teacher-rule-list" id="teacherRuleList"></div>
+          </section>
+
+          <section class="panel schedule-generate-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>生成与发布</h2>
+                <p>确认课程、硬约束和教师池后，一键生成排课草稿，再发布到老师端。</p>
+              </div>
+            </div>
+            <div class="rule-list">
+              <div>
+                <strong>硬性约束</strong>
+                <p>老师、班级、教室在同一时间只能有一节课；冲突为 0 才能确认发布。</p>
+              </div>
+              <div>
+                <strong>排课范围</strong>
+                <p id="adminScopeText">小学部一年级 10 个班，按本年级科目规则自动生成。</p>
+              </div>
+              <div>
+                <strong>发布结果</strong>
+                <p>确认后生成老师端课时任务，老师可在“我的课表”按自然周查看。</p>
+              </div>
+            </div>
+            <div class="admin-schedule-actions">
+              <button class="primary-button" id="generateSchedule" type="button">
+                <span aria-hidden="true">✓</span>
+                一键生成排课
+              </button>
+              <button class="ghost-button" id="confirmSchedule" type="button">
+                确认并发布到老师端
+              </button>
+            </div>
+          </section>
 
           <section class="panel conflict-panel">
             <div class="panel-heading">
@@ -470,6 +618,49 @@
             </div>
           </section>
 
+          <section class="panel schedule-change-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>调课/代课审批</h2>
+                <p>课表发布后通过审批单变更课程实例，审批通过后同步老师端签到入口和薪资明细。</p>
+              </div>
+              <span class="status-pill" id="scheduleChangeStatus">等待发布</span>
+            </div>
+            <div class="schedule-adjust-grid">
+              <label class="field-label" for="changeAssignmentSelect">
+                <span>已发布课节</span>
+                <select class="lesson-select" id="changeAssignmentSelect"></select>
+              </label>
+              <label class="field-label" for="changeTeacherSelect">
+                <span>目标老师</span>
+                <select class="lesson-select" id="changeTeacherSelect"></select>
+              </label>
+              <label class="field-label" for="changeDateSelect">
+                <span>目标日期</span>
+                <select class="lesson-select" id="changeDateSelect"></select>
+              </label>
+              <label class="field-label" for="changePeriodSelect">
+                <span>目标节次</span>
+                <select class="lesson-select" id="changePeriodSelect"></select>
+              </label>
+              <label class="field-label" for="changeRoomSelect">
+                <span>目标教室</span>
+                <select class="lesson-select" id="changeRoomSelect"></select>
+              </label>
+              <label class="field-label" for="changeReasonInput">
+                <span>申请原因</span>
+                <input id="changeReasonInput" type="text" placeholder="例如老师请假，由同科老师代课" />
+              </label>
+            </div>
+            <div class="admin-schedule-actions">
+              <button class="primary-button" id="submitScheduleChangeRequest" type="button">
+                <span aria-hidden="true">✓</span>
+                提交调课申请
+              </button>
+            </div>
+            <div class="change-request-list" id="scheduleChangeRequestList"></div>
+          </section>
+
           <section class="panel schedule-panel">
             <div class="panel-heading">
               <div>
@@ -482,6 +673,104 @@
               </label>
             </div>
             <div class="schedule-week-grid" id="adminScheduleGrid"></div>
+          </section>
+        </section>
+
+        <section class="view" id="personnelView" aria-labelledby="personnelTitle">
+          <div class="summary-grid">
+            <article class="metric">
+              <span>全校人员</span>
+              <strong id="personnelTotalCount">0</strong>
+              <small>老师、行政、财务账号</small>
+            </article>
+            <article class="metric">
+              <span>任课教师</span>
+              <strong id="personnelTeacherCount">0</strong>
+              <small>当前教师档案数</small>
+            </article>
+            <article class="metric">
+              <span>行政财务</span>
+              <strong id="personnelAdminFinanceCount">0</strong>
+              <small>非教师账号</small>
+            </article>
+            <article class="metric">
+              <span>当前筛选</span>
+              <strong id="personnelFilteredCount">0</strong>
+              <small>符合查询条件</small>
+            </article>
+          </div>
+
+          <section class="panel table-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="personnelTitle">全校人员列表</h2>
+                <p>行政可按姓名、账号、工号、学部、年级和学科检索全校人员，先满足阶段一的名册查看需求。</p>
+              </div>
+              <span class="status-pill" id="personnelApiStatus">等待连接</span>
+            </div>
+            <div class="personnel-list-toolbar" aria-label="人员列表筛选">
+              <label class="field-label" for="personnelSearch">
+                搜索人员
+                <input id="personnelSearch" type="search" placeholder="姓名、账号、工号、学部、年级、学科" />
+              </label>
+              <label class="field-label" for="personnelStageFilter">
+                学部
+                <select class="lesson-select" id="personnelStageFilter">
+                  <option value="">全部学部</option>
+                  <option value="primary">小学部</option>
+                  <option value="middle">初中部</option>
+                  <option value="high">高中部</option>
+                </select>
+              </label>
+              <label class="field-label" for="personnelRoleFilter">
+                角色
+                <select class="lesson-select" id="personnelRoleFilter">
+                  <option value="all">全部角色</option>
+                  <option value="teacher">任课教师</option>
+                  <option value="admin">行政</option>
+                  <option value="finance">财务</option>
+                </select>
+              </label>
+              <label class="field-label" for="personnelStatusFilter">
+                状态
+                <select class="lesson-select" id="personnelStatusFilter">
+                  <option value="active">在职/启用</option>
+                  <option value="disabled">停用</option>
+                  <option value="all">全部状态</option>
+                </select>
+              </label>
+              <label class="field-label compact-field" for="personnelPageSize">
+                每页
+                <select class="lesson-select" id="personnelPageSize">
+                  <option value="10">10 人</option>
+                  <option value="20" selected>20 人</option>
+                  <option value="50">50 人</option>
+                </select>
+              </label>
+              <button class="ghost-button" id="personnelSearchButton" type="button">查询</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>人员</th>
+                    <th>账号/工号</th>
+                    <th>角色</th>
+                    <th>学部/部门</th>
+                    <th>年级</th>
+                    <th>学科/岗位</th>
+                    <th>状态</th>
+                    <th>联系方式</th>
+                  </tr>
+                </thead>
+                <tbody id="personnelTable"></tbody>
+              </table>
+            </div>
+            <div class="table-pagination" aria-label="人员列表分页">
+              <button class="mini-button" id="personnelPrevPage" type="button">上一页</button>
+              <span id="personnelPageInfo">第 1 / 1 页 · 共 0 人</span>
+              <button class="mini-button" id="personnelNextPage" type="button">下一页</button>
+            </div>
           </section>
         </section>
 
@@ -947,6 +1236,12 @@
               <span class="status-pill" id="settlementStatus">未结算</span>
               <button class="ghost-button" id="batchGeneratePayroll" type="button">
                 批量生成本月薪资
+              </button>
+              <button class="ghost-button" id="approveAcademicWorkload" type="button">
+                教务审批通过
+              </button>
+              <button class="ghost-button" id="approveSchoolWorkload" type="button">
+                总校审批通过
               </button>
               <button class="ghost-button" id="reviewTeacherPayroll" type="button">
                 财务复核通过

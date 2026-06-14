@@ -134,7 +134,24 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
   const grade =
     division.grades.find((item) => item.id === gradeId) ||
     division.grades[0];
-  const subjects = division.subjectIds.map((subjectId) => ({ ...schedulingCatalog.subjects[subjectId] }));
+  const subjects = division.subjectIds.map((subjectId) => {
+    const subject = schedulingCatalog.subjects[subjectId];
+    const availableTeachers = schedulingCatalog.teachers
+      .filter((teacher) => subject.teacherIds.includes(teacher.id))
+      .map((teacher) => ({ ...teacher, title: "任课教师", department: division.name }));
+    return { ...subject, durationMinutes: subject.durationMinutes || 40, availableTeachers };
+  });
+  const enabledSubjectIds = new Set(division.subjectIds);
+  const courseRules = Object.values(schedulingCatalog.subjects).map((subject) => ({
+    id: `CR-${division.id}-${grade.id}-${subject.id}`,
+    stageId: division.id,
+    grade: grade.id,
+    subjectId: subject.id,
+    subjectName: subject.name,
+    enabled: enabledSubjectIds.has(subject.id),
+    weeklyLessons: subject.weeklyLessons || 1,
+    durationMinutes: subject.durationMinutes || 40,
+  }));
   const classes = Array.from({ length: division.classCount }, (_, index) => {
     const roomNumber = String(index + 1).padStart(2, "0");
     const roomName = `${division.roomPrefix}${grade.code.slice(1)}-${roomNumber}`;
@@ -160,6 +177,8 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
       sourceClassId: schoolClass.id,
     })),
     periods: schedulingCatalog.periods.map((period) => ({ ...period })),
+    courseRules,
+    constraints: [],
     subjects,
     teachers: schedulingCatalog.teachers.map((teacher) => ({ ...teacher })),
     divisions: schedulingCatalog.divisions.map((item) => ({
@@ -234,6 +253,7 @@ const initialState = {
       level: "warning",
     },
   ],
+  backendNotices: [],
   accounts: [
     {
       id: "teacher-li",
@@ -575,7 +595,7 @@ const SESSION_KEY = "schoolPayrollDemoSessionV1";
 const API_SESSION_KEY = "schoolPayrollApiSessionV1";
 const SECURITY_SECRET = "school-demo-signing-key";
 const loginUsers = [
-  { username: "teacher", password: "123456", accountId: "teacher-li" },
+  { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
   { username: "admin", password: "123456", accountId: "admin-zhou" },
 ];
@@ -584,6 +604,7 @@ let state = loadSavedState();
 let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
 let qrScanner = null;
+let courseRulesEditMode = false;
 let teacherWorkloadState = {
   teacherId: "",
   month: "2026-06",
@@ -626,6 +647,20 @@ let financeTeacherPage = {
   loading: false,
   error: "",
 };
+let personnelPage = {
+  items: [],
+  summary: { total: 0, active: 0, teachers: 0, adminFinance: 0, filtered: 0 },
+  meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
+  page: 1,
+  pageSize: 20,
+  search: "",
+  stageId: "",
+  role: "all",
+  status: "active",
+  loaded: false,
+  loading: false,
+  error: "",
+};
 let financeTeacherDetailState = {
   teacherId: "",
   month: "2026-06",
@@ -650,6 +685,7 @@ let schedulingBackendState = {
   loading: false,
   error: "",
 };
+let draggedScheduleAssignmentId = "";
 
 if (backendSession?.account) {
   sessionAccountId = upsertBackendAccount(backendSession.account);
@@ -681,13 +717,18 @@ const views = {
     title: "行政排课",
     el: document.querySelector("#adminSchedulingView"),
   },
+  personnel: {
+    role: "admin",
+    title: "人员列表",
+    el: document.querySelector("#personnelView"),
+  },
   teacherImport: {
     role: "admin",
     title: "教师导入",
     el: document.querySelector("#teacherImportView"),
   },
   notifications: {
-    role: "teacher,finance",
+    role: "teacher,finance,admin",
     title: "通知中心",
     el: document.querySelector("#notificationsView"),
   },
@@ -717,17 +758,17 @@ const views = {
     el: document.querySelector("#financeView"),
   },
   financeRecords: {
-    role: "finance",
+    role: "finance,admin",
     title: "老师考勤记录",
     el: document.querySelector("#financeRecordsView"),
   },
   settlement: {
-    role: "finance",
+    role: "finance,admin",
     title: "薪资结算",
     el: document.querySelector("#settlementView"),
   },
   warnings: {
-    role: "teacher,finance",
+    role: "teacher,finance,admin",
     title: "异常提醒",
     el: document.querySelector("#warningsView"),
   },
@@ -922,6 +963,19 @@ function resetFinanceTeacherDetailState() {
     workload: null,
     payroll: null,
     payrollGenerated: false,
+  };
+}
+
+function resetPersonnelPage() {
+  personnelPage = {
+    ...personnelPage,
+    items: [],
+    summary: { total: 0, active: 0, teachers: 0, adminFinance: 0, filtered: 0 },
+    meta: { page: 1, pageSize: personnelPage.pageSize, total: 0, totalPages: 1 },
+    page: 1,
+    loaded: false,
+    loading: false,
+    error: "",
   };
 }
 
@@ -1143,9 +1197,46 @@ function formatWeekRange(weekStartKey) {
 }
 
 function roleNotices(role = currentRole()) {
-  return (state.notices || [])
+  const source = state.backendNotices?.length ? state.backendNotices : state.notices || [];
+  return source
     .filter((notice) => notice.audience === role || notice.audience === "all")
     .sort((a, b) => b.time.localeCompare(a.time));
+}
+
+function backendNotificationToNotice(notification) {
+  return {
+    id: notification.id,
+    audience: notification.audience,
+    source: notification.source || "系统",
+    title: notification.title,
+    text: notification.text,
+    time: String(notification.createdAt || "").replace("T", " ").slice(0, 16),
+    level: notification.level || "info",
+    read: Boolean(notification.read),
+  };
+}
+
+async function loadBackendNotifications() {
+  if (!backendMode()) return;
+  try {
+    const result = await apiRequest("/api/notifications");
+    state.backendNotices = (result.items || []).map(backendNotificationToNotice);
+  } catch (error) {
+    console.warn("通知读取失败", error);
+  }
+}
+
+async function markBackendNoticeRead(noticeId) {
+  if (!backendMode() || !noticeId) return;
+  try {
+    const result = await apiRequest(`/api/notifications/${encodeURIComponent(noticeId)}/read`, {
+      method: "POST",
+    });
+    const next = backendNotificationToNotice(result.notification);
+    state.backendNotices = state.backendNotices.map((notice) => (notice.id === noticeId ? next : notice));
+  } catch (error) {
+    console.warn("通知已读失败", error);
+  }
 }
 
 function schedulingDivisionOptions(selectedId) {
@@ -1230,6 +1321,17 @@ function scheduleStatusText(status = state.schedulingDraft.status) {
   if (status === "draft") return "待确认";
   if (status === "published") return "已发布";
   return "未生成";
+}
+
+function scheduleSolverSummaryText(draft) {
+  const solver = draft.solver || null;
+  if (!solver?.algorithm) {
+    return `已通过：当前课表无内部冲突，并已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+  }
+  if (solver.algorithm === "ortools-cp-sat") {
+    return `OR-Tools CP-SAT：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，状态 ${solver.status || "UNKNOWN"}，目标值 ${solver.objectiveValue || 0}，求解 ${Number(solver.solveTimeSeconds || 0).toFixed(2)} 秒；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+  }
+  return `高级约束搜索：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，搜索 ${solver.attemptsRun || 0} 轮/${solver.totalNodes || 0} 个节点，评分 ${solver.score || 0}；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
 }
 
 function buildSubjectQueueFromCounters(classIndex, counters) {
@@ -1350,6 +1452,7 @@ function generateScheduleAssignments(options = {}) {
         if (classBusy.get(schoolClass.id).has(slot.slotKey)) return;
         const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
         if (busyRooms.has(slot.slotKey)) return;
+        if (localScheduleConstraintViolation(subject.id, slot)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
         if (sameSubjectDayCount >= 2) return;
 
@@ -1378,6 +1481,7 @@ function generateScheduleAssignments(options = {}) {
         className: schoolClass.name,
         subjectId: subject.id,
         subjectName: subject.name,
+        durationMinutes: subject.durationMinutes || 40,
         teacherId: best.teacherId,
         teacherName: teacherNameText,
         date: best.slot.date,
@@ -1420,6 +1524,21 @@ function validateScheduleConflicts(assignments) {
     const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
     if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
     roomSlots.get(roomKey).push(assignment);
+
+    const dayIndex = Number.isFinite(Number(assignment.dayIndex))
+      ? Number(assignment.dayIndex)
+      : weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5).indexOf(assignment.date);
+    const violation = localScheduleConstraintViolation(assignment.subjectId, {
+      ...assignment,
+      dayIndex,
+    });
+    if (violation) {
+      conflicts.push({
+        type: "constraint",
+        title: `${assignment.subjectName} 命中自定义硬约束`,
+        text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${violation.subjectName || assignment.subjectName} 不能出现在 ${scheduleConstraintDayText(violation.dayIndexes)} ${scheduleConstraintPeriodText(violation.periods)}`,
+      });
+    }
   });
 
   teacherSlots.forEach((items) => {
@@ -1658,8 +1777,8 @@ function financePageTotals() {
 async function loadBackendTeacherContext(teacherId, weekStart = state.selectedScheduleWeekStart || "2026-06-15") {
   if (!backendMode() || !teacherId) return;
   try {
-    state.selectedScheduleWeekStart = weekStart;
     const schedule = await apiRequest(`/api/teachers/${teacherId}/schedule?weekStart=${weekStart}`);
+    state.selectedScheduleWeekStart = schedule.weekStart || weekStart;
     if (schedule.teacher) upsertTeacher(schedule.teacher);
     mergeBackendLessons(teacherId, schedule.lessons || []);
   } catch (error) {
@@ -1798,7 +1917,7 @@ function ensureBackendTeacherPayroll(teacherId, month = "2026-06") {
 }
 
 async function loadPayrollRules() {
-  if (!backendMode() || currentRole() !== "finance") return;
+  if (!backendMode() || !["finance", "admin"].includes(currentRole())) return;
   payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
   try {
     const data = await apiRequest("/api/payroll-rules");
@@ -2008,6 +2127,46 @@ async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2
   render();
 }
 
+async function approveBackendWorkload(step) {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "admin" || !teacherId) {
+    showToast("请使用行政账号审批工作量");
+    return;
+  }
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    const workload = await apiRequest(`/api/teachers/${teacherId}/workload/approve`, {
+      method: "POST",
+      body: { month: "2026-06", step },
+    });
+    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll?month=2026-06`);
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      teacherId,
+      month: "2026-06",
+      loading: false,
+      loaded: true,
+      error: "",
+      workload,
+      payroll,
+      payrollGenerated: Boolean(payroll.generated),
+    };
+    state.confirmationStages[teacherId] = backendWorkloadStage(workload);
+    financeTeacherPage.loaded = false;
+    showToast(step === "academic" ? "教务审批已通过" : "总校审批已通过");
+  } catch (error) {
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      loaded: true,
+      error: error.message || "工作量审批失败",
+    };
+    showToast(financeTeacherDetailState.error);
+  }
+  render();
+}
+
 async function loadFinanceTeacherPage(overrides = {}) {
   if (!backendMode()) return;
   financeTeacherPage = {
@@ -2054,11 +2213,55 @@ async function loadFinanceTeacherPage(overrides = {}) {
   }
 }
 
+async function loadPersonnelPage(overrides = {}) {
+  if (!backendMode()) return;
+  personnelPage = {
+    ...personnelPage,
+    ...overrides,
+    loading: true,
+    error: "",
+  };
+  const params = new URLSearchParams({
+    page: String(personnelPage.page),
+    pageSize: String(personnelPage.pageSize),
+    status: personnelPage.status,
+    role: personnelPage.role,
+  });
+  if (personnelPage.search) params.set("search", personnelPage.search);
+  if (personnelPage.stageId) params.set("stageId", personnelPage.stageId);
+
+  try {
+    const result = await apiRequest(`/api/personnel?${params.toString()}`);
+    personnelPage = {
+      ...personnelPage,
+      items: result.items || [],
+      summary: result.summary || personnelPage.summary,
+      meta: result.meta || personnelPage.meta,
+      page: result.meta?.page || personnelPage.page,
+      pageSize: result.meta?.pageSize || personnelPage.pageSize,
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    personnelPage = {
+      ...personnelPage,
+      loaded: true,
+      loading: false,
+      error: error.message || "人员列表加载失败",
+    };
+  }
+
+  if (state.activeView === "personnel") {
+    render();
+  }
+}
+
 async function loadFinanceTeacherDetail(
   teacherId = state.selectedFinanceTeacherId,
   { month = "2026-06", generatePayroll = false } = {},
 ) {
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  if (!backendMode() || !["finance", "admin"].includes(currentRole()) || !teacherId) return;
   financeTeacherDetailState = {
     ...financeTeacherDetailState,
     teacherId,
@@ -2085,6 +2288,7 @@ async function loadFinanceTeacherDetail(
       payroll,
       payrollGenerated: Boolean(payroll.generated),
     };
+    state.confirmationStages[teacherId] = backendWorkloadStage(workload);
   } catch (error) {
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
@@ -2185,7 +2389,7 @@ async function generateBackendSchedule() {
     showToast(
       conflicts
         ? `后端已生成草稿，发现 ${conflicts} 个冲突`
-        : `后端已生成 ${result.draft?.generatedLessonCount || 0} 节无冲突课表`,
+        : `${result.draft?.solver?.algorithm === "ortools-cp-sat" ? "CP-SAT" : "高级算法"}已生成 ${result.draft?.generatedLessonCount || 0} 节无冲突课表`,
     );
   } catch (error) {
     schedulingBackendState = {
@@ -2210,6 +2414,7 @@ async function publishBackendSchedule() {
     });
     applyBackendScheduleResult(result);
     schedulingBackendState = { loaded: true, loading: false, error: "" };
+    await loadBackendNotifications();
     showToast(`后端已发布 ${result.lessons?.length || 0} 节课到老师端`);
   } catch (error) {
     schedulingBackendState = {
@@ -2220,6 +2425,314 @@ async function publishBackendSchedule() {
     showToast(schedulingBackendState.error);
   }
 
+  render();
+}
+
+function collectCourseRulesFromForm() {
+  return Array.from(document.querySelectorAll("[data-course-rule-id]")).map((row) => {
+    const subjectId = row.dataset.courseRuleId;
+    return {
+      subjectId,
+      enabled: true,
+      weeklyLessons: Number.parseInt(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0", 10),
+      durationMinutes: Number.parseInt(document.querySelector(`[data-course-rule-duration="${subjectId}"]`)?.value || "40", 10),
+    };
+  });
+}
+
+function localSubjectFromCourseRule(rule) {
+  const subject = schedulingCatalog.subjects[rule.subjectId];
+  if (!subject || !rule.enabled || rule.weeklyLessons <= 0) return null;
+  const availableTeachers = schedulingCatalog.teachers
+    .filter((teacher) => subject.teacherIds.includes(teacher.id))
+    .map((teacher) => ({ ...teacher, title: "任课教师", department: state.schedulingConfig.divisionName }));
+  return {
+    ...subject,
+    weeklyLessons: rule.weeklyLessons,
+    durationMinutes: rule.durationMinutes,
+    availableTeachers,
+  };
+}
+
+function applyLocalCourseRules(rules) {
+  state.schedulingConfig.courseRules = state.schedulingConfig.courseRules.map((rule) => ({
+    ...rule,
+    ...(rules.find((item) => item.subjectId === rule.subjectId) || {}),
+  }));
+  state.schedulingConfig.subjects = state.schedulingConfig.courseRules
+    .map(localSubjectFromCourseRule)
+    .filter(Boolean);
+  state.schedulingDraft = {
+    ...clone(initialState.schedulingDraft),
+    divisionId: state.schedulingConfig.divisionId,
+    gradeId: state.schedulingConfig.gradeId,
+  };
+}
+
+function resetCourseDraftAfterConfigChange() {
+  state.schedulingDraft = {
+    ...clone(initialState.schedulingDraft),
+    divisionId: state.schedulingConfig.divisionId,
+    gradeId: state.schedulingConfig.gradeId,
+  };
+}
+
+async function saveAdminCourseRules() {
+  const rules = collectCourseRulesFromForm();
+  if (!rules.some((rule) => rule.enabled && rule.weeklyLessons > 0)) {
+    showToast("请至少启用 1 门课程并设置周课时");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/course-rules", {
+        method: "POST",
+        body: {
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          rules,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      showToast("课程规则已保存，重新生成排课时生效");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "课程规则保存失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  applyLocalCourseRules(rules);
+  showToast("课程规则已保存到本地演示");
+  render();
+}
+
+function createLocalSubjectId() {
+  let id = `custom-${Date.now().toString(36)}`;
+  let index = 1;
+  while (schedulingCatalog.subjects[id]) {
+    id = `custom-${Date.now().toString(36)}-${index}`;
+    index += 1;
+  }
+  return id;
+}
+
+function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
+  const normalizedName = subjectName.trim().replace(/\s+/g, "");
+  const existingSubject =
+    Object.values(schedulingCatalog.subjects).find((subject) => subject.name === normalizedName) || null;
+  const subject =
+    existingSubject ||
+    {
+      id: createLocalSubjectId(),
+      name: normalizedName,
+      weeklyLessons,
+      durationMinutes,
+      teacherIds: [],
+      custom: true,
+    };
+  if (!existingSubject) schedulingCatalog.subjects[subject.id] = subject;
+  const existingRule = state.schedulingConfig.courseRules.find((rule) => rule.subjectId === subject.id);
+  const nextRule = {
+    id: `LOCAL-CR-${state.schedulingConfig.divisionId}-${state.schedulingConfig.gradeId}-${subject.id}`,
+    stageId: state.schedulingConfig.divisionId,
+    grade: state.schedulingConfig.gradeId,
+    subjectId: subject.id,
+    subjectName: subject.name,
+    enabled: true,
+    weeklyLessons,
+    durationMinutes,
+  };
+  if (existingRule) {
+    Object.assign(existingRule, nextRule);
+  } else {
+    state.schedulingConfig.courseRules.push(nextRule);
+  }
+  applyLocalCourseRules([nextRule]);
+}
+
+async function addAdminGradeCourse() {
+  const subjectName = document.querySelector("#newCourseName").value.trim();
+  const weeklyLessons = Number.parseInt(document.querySelector("#newCourseWeekly").value || "0", 10);
+  const durationMinutes = Number.parseInt(document.querySelector("#newCourseDuration").value || "40", 10);
+  if (!subjectName) {
+    showToast("请输入课程名称");
+    return;
+  }
+  if (!Number.isFinite(weeklyLessons) || weeklyLessons <= 0) {
+    showToast("每周节数必须大于 0");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/courses", {
+        method: "POST",
+        body: {
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          subjectName,
+          weeklyLessons,
+          durationMinutes,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      document.querySelector("#newCourseName").value = "";
+      document.querySelector("#newCourseWeekly").value = "2";
+      document.querySelector("#newCourseDuration").value = "40";
+      showToast("课程已添加到当前年级");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "课程添加失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes);
+  document.querySelector("#newCourseName").value = "";
+  showToast("课程已添加到本地演示");
+  render();
+}
+
+async function deleteAdminGradeCourse(subjectId) {
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const params = new URLSearchParams({
+        stageId: state.schedulingConfig.stageId,
+        grade: String(state.schedulingConfig.grade),
+      });
+      const result = await apiRequest(`/api/scheduling/courses/${encodeURIComponent(subjectId)}?${params.toString()}`, {
+        method: "DELETE",
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      showToast("课程已从当前年级删除");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "课程删除失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  const rule = state.schedulingConfig.courseRules.find((item) => item.subjectId === subjectId);
+  if (rule) rule.enabled = false;
+  state.schedulingConfig.constraints = (state.schedulingConfig.constraints || []).filter(
+    (constraint) => constraint.subjectId !== subjectId,
+  );
+  applyLocalCourseRules([]);
+  resetCourseDraftAfterConfigChange();
+  showToast("课程已从当前年级删除");
+  render();
+}
+
+async function addAdminScheduleConstraint() {
+  const subjectId = document.querySelector("#constraintSubjectSelect").value;
+  const dayValue = document.querySelector("#constraintDaySelect").value;
+  const periodValue = document.querySelector("#constraintPeriodSelect").value;
+  const reason = document.querySelector("#constraintReasonInput").value.trim();
+  const dayIndexes = dayValue === "all" ? [] : [Number.parseInt(dayValue, 10)];
+  const periods = periodValue === "all" ? [] : [Number.parseInt(periodValue, 10)];
+  if (!subjectId || (!dayIndexes.length && !periods.length)) {
+    showToast("请选择课程，并至少选择禁排星期或禁排节次");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/constraints", {
+        method: "POST",
+        body: {
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          subjectId,
+          dayIndexes,
+          periods,
+          reason,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      document.querySelector("#constraintReasonInput").value = "";
+      showToast("硬约束已添加，重新生成排课时生效");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "硬约束添加失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  const rule = state.schedulingConfig.courseRules.find((item) => item.subjectId === subjectId);
+  state.schedulingConfig.constraints.push({
+    id: `LOCAL-SC-${Date.now()}`,
+    subjectId,
+    subjectName: rule?.subjectName || subjectId,
+    dayIndexes,
+    periods,
+    reason,
+    active: true,
+  });
+  showToast("硬约束已添加到本地演示");
+  render();
+}
+
+async function deleteAdminScheduleConstraint(constraintId) {
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest(`/api/scheduling/constraints/${encodeURIComponent(constraintId)}`, {
+        method: "DELETE",
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      showToast("硬约束已删除");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "硬约束删除失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  state.schedulingConfig.constraints = (state.schedulingConfig.constraints || []).filter(
+    (constraint) => constraint.id !== constraintId,
+  );
+  showToast("硬约束已删除");
   render();
 }
 
@@ -2306,6 +2819,19 @@ function adjustLocalSchedule() {
 
   if (!period || !room) {
     showToast("请选择有效的节次和教室");
+    return;
+  }
+
+  const violation = localScheduleConstraintViolation(assignment.subjectId, {
+    date,
+    dayIndex,
+    period: period.period,
+    time: period.time,
+  });
+  if (violation) {
+    showToast(
+      `该调整违反硬约束：${violation.subjectName || assignment.subjectName} 不能出现在 ${scheduleConstraintDayText(violation.dayIndexes)} ${scheduleConstraintPeriodText(violation.periods)}`,
+    );
     return;
   }
 
@@ -2465,6 +2991,167 @@ async function regenerateUnlockedSchedule() {
   regenerateLocalUnlockedSchedule();
 }
 
+async function saveTeacherScheduleRule() {
+  if (!backendMode() || currentRole() !== "admin") {
+    showToast("请使用后端行政账号保存老师时间规则");
+    return;
+  }
+  const teacherId = document.querySelector("#teacherRuleTeacherSelect").value;
+  if (!teacherId) {
+    showToast("请先选择老师");
+    return;
+  }
+  const existing = (state.schedulingConfig.teacherRules || []).find((rule) => rule.teacherId === teacherId);
+  const unavailableSlots = existing?.unavailableSlots ? clone(existing.unavailableSlots) : [];
+  const dayValue = document.querySelector("#teacherRuleUnavailableDay").value;
+  const periodValue = document.querySelector("#teacherRuleUnavailablePeriod").value;
+  const reason = document.querySelector("#teacherRuleReasonInput").value.trim();
+  if (dayValue !== "" && periodValue !== "") {
+    const nextSlot = {
+      dayIndex: Number.parseInt(dayValue, 10),
+      periods: [Number.parseInt(periodValue, 10)],
+      reason,
+    };
+    const duplicate = unavailableSlots.some(
+      (slot) => Number(slot.dayIndex) === nextSlot.dayIndex && (slot.periods || []).map(Number).includes(nextSlot.periods[0]),
+    );
+    if (!duplicate) unavailableSlots.push(nextSlot);
+  }
+  const avoidPeriod = document.querySelector("#teacherRuleAvoidPeriod").value;
+  const preferPeriod = document.querySelector("#teacherRulePreferPeriod").value;
+  const maxDailyLessons = Number.parseInt(document.querySelector("#teacherRuleMaxDaily").value || "4", 10);
+  const maxConsecutiveLessons = Number.parseInt(document.querySelector("#teacherRuleMaxConsecutive").value || "3", 10);
+
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest("/api/scheduling/teacher-rules", {
+      method: "POST",
+      body: {
+        stageId: state.schedulingConfig.stageId,
+        gradeId: state.schedulingConfig.gradeId,
+        grade: state.schedulingConfig.grade,
+        teacherId,
+        unavailableSlots,
+        avoidPeriods: avoidPeriod ? [Number.parseInt(avoidPeriod, 10)] : existing?.avoidPeriods || [],
+        preferPeriods: preferPeriod ? [Number.parseInt(preferPeriod, 10)] : existing?.preferPeriods || [],
+        maxDailyLessons,
+        maxConsecutiveLessons,
+      },
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    showToast("老师时间规则已保存，重新生成排课时生效");
+  } catch (error) {
+    schedulingBackendState = { loaded: true, loading: false, error: error.message || "老师规则保存失败" };
+    showToast(schedulingBackendState.error);
+  }
+  render();
+}
+
+async function submitScheduleChangeRequest() {
+  if (!backendMode() || currentRole() !== "admin") {
+    showToast("请使用后端行政账号发起调课申请");
+    return;
+  }
+  const assignmentId = document.querySelector("#changeAssignmentSelect").value;
+  if (!assignmentId) {
+    showToast("请先选择已发布课节");
+    return;
+  }
+  const teacherId = document.querySelector("#changeTeacherSelect").value;
+  const date = document.querySelector("#changeDateSelect").value;
+  const period = Number.parseInt(document.querySelector("#changePeriodSelect").value, 10);
+  const roomId = document.querySelector("#changeRoomSelect").value;
+  const reason = document.querySelector("#changeReasonInput").value.trim();
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest("/api/scheduling/change-requests", {
+      method: "POST",
+      body: {
+        ...backendSchedulingOptions(),
+        assignmentId,
+        teacherId,
+        date,
+        period,
+        roomId,
+        reason,
+      },
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    showToast("调课/代课申请已提交，等待审批");
+  } catch (error) {
+    schedulingBackendState = { loaded: true, loading: false, error: error.message || "调课申请提交失败" };
+    showToast(schedulingBackendState.error);
+  }
+  render();
+}
+
+async function approveScheduleChangeRequest(requestId) {
+  if (!backendMode() || currentRole() !== "admin") return;
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest(`/api/scheduling/change-requests/${encodeURIComponent(requestId)}/approve`, {
+      method: "POST",
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    showToast("调课/代课已审批通过，并同步到老师端");
+    await loadBackendSchedulingContext();
+    await loadBackendNotifications();
+  } catch (error) {
+    schedulingBackendState = { loaded: true, loading: false, error: error.message || "调课审批失败" };
+    showToast(schedulingBackendState.error);
+  }
+  render();
+}
+
+async function moveScheduleAssignmentToSlot(assignmentId, date, period) {
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment) return;
+  if (state.schedulingDraft.status === "published") {
+    showToast("已发布课表请走调课/代课审批");
+    return;
+  }
+  if (assignment.locked) {
+    showToast("该课节已锁定，先解锁再拖拽调整");
+    return;
+  }
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/adjust", {
+        method: "POST",
+        body: {
+          ...backendSchedulingOptions(),
+          assignmentId,
+          teacherId: assignment.teacherId,
+          date,
+          period: Number.parseInt(period, 10),
+          roomId: assignment.roomId,
+        },
+      });
+      applyBackendScheduleResult(result);
+      state.selectedScheduleAssignmentId = assignmentId;
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      showToast("拖拽调整已保存并重新校验");
+    } catch (error) {
+      schedulingBackendState = { loaded: true, loading: false, error: error.message || "拖拽调整失败" };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+  document.querySelector("#adminAssignmentSelect").value = assignmentId;
+  document.querySelector("#adminAssignmentDateSelect").value = date;
+  document.querySelector("#adminAssignmentPeriodSelect").value = String(period);
+  adjustLocalSchedule();
+}
+
 function syncTeacherImportText() {
   const textarea = document.querySelector("#teacherImportCsv");
   if (!textarea) return;
@@ -2557,6 +3244,7 @@ async function commitTeacherImportCsv() {
       error: "",
     };
     financeTeacherPage.loaded = false;
+    personnelPage.loaded = false;
     showToast(`已导入 ${result.importedCount} 位老师账号`);
   } catch (error) {
     teacherImportState = {
@@ -2654,6 +3342,7 @@ function render() {
   renderTasks();
   renderSchedule();
   renderAdminScheduling();
+  renderPersonnelList();
   renderTeacherImport();
   renderScanner();
   renderRecords();
@@ -2722,7 +3411,7 @@ function renderNotices() {
 
   const role = currentRole();
   const notices = roleNotices(role);
-  title.textContent = role === "teacher" ? "老师通知栏" : "财务通知栏";
+  title.textContent = role === "teacher" ? "老师通知栏" : role === "admin" ? "行政通知栏" : "财务通知栏";
   count.textContent = `${notices.length} 条`;
   list.innerHTML = notices.length
     ? notices
@@ -2751,7 +3440,7 @@ function renderNotificationCenter() {
   const notices = roleNotices(role);
   const candidateId = state.selectedNoticeId || notices[0]?.id || "";
   const selectedId = notices.some((notice) => notice.id === candidateId) ? candidateId : notices[0]?.id || "";
-  title.textContent = role === "teacher" ? "老师通知中心" : "财务通知中心";
+  title.textContent = role === "teacher" ? "老师通知中心" : role === "admin" ? "行政通知中心" : "财务通知中心";
   count.textContent = `${notices.length} 条`;
   list.innerHTML = notices.length
     ? notices
@@ -3019,18 +3708,35 @@ function renderAdminScheduling() {
       .map((subject) => subject.name)
       .join("、")} ${config.subjects.length} 门课。`;
   document.querySelector("#subjectConfigHelp").textContent =
-    `${config.divisionName}${config.gradeName}每门课配置多位老师，系统按老师空闲时段和课量自动均衡。`;
+    `${config.divisionName}${config.gradeName}每门课配置多位老师，系统按老师空闲时段、课量和全校时间线自动均衡。`;
+  document.querySelector("#courseRulesHelp").textContent =
+    `${config.divisionName}${config.gradeName}可配置开设课程、周课时和每节时长，保存后重新生成排课时生效。`;
+  document.querySelector("#courseRulesStatus").textContent =
+    `${(config.courseRules || []).filter((rule) => rule.enabled).length} 门课 · ${(config.constraints || []).length} 条硬约束`;
+  document.querySelector("#courseRulesStatus").className = (config.constraints || []).length
+    ? "status-pill warning"
+    : "status-pill done";
+  document.querySelector("#toggleCourseEditMode").textContent = courseRulesEditMode ? "完成编辑" : "编辑";
   document.querySelector("#adminSchedulePreviewHelp").textContent =
     `按${config.gradeName}班级查看生成结果，确认前为草稿，确认后同步到老师端 ${formatWeekRange(config.weekStart)} 课表。`;
+  const enabledCourseRules = (config.courseRules || []).filter((rule) => rule.enabled);
+  document.querySelector("#courseRuleList").innerHTML = enabledCourseRules.length
+    ? enabledCourseRules.map(adminCourseRuleItem).join("")
+    : `<div class="empty-state">当前年级还没有课程，请先新增课程</div>`;
+  document.querySelector("#constraintSubjectSelect").innerHTML = scheduleConstraintSubjectOptions(config);
+  document.querySelector("#constraintPeriodSelect").innerHTML = scheduleConstraintPeriodOptions(config);
+  document.querySelector("#scheduleConstraintList").innerHTML = adminScheduleConstraintList(config);
+  document.querySelector("#selectedTeacherPoolSummary").innerHTML = adminSelectedTeacherPoolSummary(config);
   document.querySelector("#subjectConfigList").innerHTML = config.subjects
     .map(adminSubjectConfigItem)
     .join("");
+  renderTeacherRulePanel(config);
   document.querySelector("#conflictList").innerHTML =
     assignments.length === 0
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
       : conflicts.length
         ? conflicts.map(conflictItem).join("")
-        : `<div class="check-success"><strong>冲突 0</strong><span>已通过：老师、班级和教室同一时间均无重复占用。</span></div>`;
+        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${scheduleDiagnosticsHtml(draft)}`;
   document.querySelector("#adminClassSelect").innerHTML = config.classes
     .map(
       (schoolClass) => `
@@ -3041,11 +3747,18 @@ function renderAdminScheduling() {
     )
     .join("");
   renderScheduleAdjustmentPanel(selectedClassAssignments, selectedAssignment, draft);
+  renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
   document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading;
   document.querySelector("#confirmSchedule").disabled =
     schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
+  document.querySelector("#saveCourseRules").disabled = schedulingBackendState.loading;
+  document.querySelector("#addGradeCourse").disabled = schedulingBackendState.loading;
+  document.querySelector("#toggleCourseEditMode").disabled = schedulingBackendState.loading;
+  document.querySelector("#addScheduleConstraint").disabled =
+    schedulingBackendState.loading || !(config.courseRules || []).some((rule) => rule.enabled);
+  document.querySelector("#saveTeacherRule").disabled = schedulingBackendState.loading || !(config.teachers || []).length;
 }
 
 function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
@@ -3165,6 +3878,122 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   lockButton.disabled = !canAdjust || !selectedAssignment;
   lockButton.textContent = selectedAssignment?.locked ? "解锁该课节" : "锁定该课节";
   regenerateButton.disabled = !canAdjust || !hasDraft;
+}
+
+function renderTeacherRulePanel(config) {
+  const teacherSelect = document.querySelector("#teacherRuleTeacherSelect");
+  const unavailablePeriodSelect = document.querySelector("#teacherRuleUnavailablePeriod");
+  const avoidPeriodSelect = document.querySelector("#teacherRuleAvoidPeriod");
+  const preferPeriodSelect = document.querySelector("#teacherRulePreferPeriod");
+  const list = document.querySelector("#teacherRuleList");
+  const status = document.querySelector("#teacherRuleStatus");
+  if (!teacherSelect || !unavailablePeriodSelect || !avoidPeriodSelect || !preferPeriodSelect || !list || !status) return;
+
+  const teachers = config.teachers || [];
+  const selectedTeacherId = teacherSelect.value && teachers.some((teacher) => teacher.id === teacherSelect.value)
+    ? teacherSelect.value
+    : teachers[0]?.id || "";
+  teacherSelect.innerHTML = teachers.length
+    ? teachers
+        .map(
+          (teacher) => `
+            <option value="${teacher.id}" ${teacher.id === selectedTeacherId ? "selected" : ""}>
+              ${escapeHtml(teacher.name)} · ${escapeHtml(teacher.subject || teacher.subjectId || "")}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">请先配置教师池</option>`;
+  unavailablePeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不新增" });
+  avoidPeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不设置" });
+  preferPeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不设置" });
+  list.innerHTML = adminTeacherRuleList(config);
+  status.textContent = `${(config.teacherRules || []).length} 条规则`;
+  status.className = (config.teacherRules || []).length ? "status-pill warning" : "status-pill";
+}
+
+function renderScheduleChangePanel(assignments, selectedAssignment, draft) {
+  const assignmentSelect = document.querySelector("#changeAssignmentSelect");
+  const teacherSelect = document.querySelector("#changeTeacherSelect");
+  const dateSelect = document.querySelector("#changeDateSelect");
+  const periodSelect = document.querySelector("#changePeriodSelect");
+  const roomSelect = document.querySelector("#changeRoomSelect");
+  const submitButton = document.querySelector("#submitScheduleChangeRequest");
+  const list = document.querySelector("#scheduleChangeRequestList");
+  const status = document.querySelector("#scheduleChangeStatus");
+  if (!assignmentSelect || !teacherSelect || !dateSelect || !periodSelect || !roomSelect || !submitButton || !list || !status) {
+    return;
+  }
+
+  const isPublished = draft.status === "published";
+  const hasAssignments = assignments.length > 0;
+  const selected = isPublished ? selectedAssignment : null;
+  assignmentSelect.innerHTML = isPublished && hasAssignments
+    ? assignments
+        .map(
+          (assignment) => `
+            <option value="${assignment.id}" ${assignment.id === selected?.id ? "selected" : ""}>
+              ${scheduleWeekdayLabel(assignment.date)} 第 ${assignment.period} 节 · ${assignment.subjectName} · ${assignment.teacherName}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">课表发布后可申请调课</option>`;
+  teacherSelect.innerHTML = selected
+    ? teacherOptionsForAssignment(selected)
+        .map(
+          (teacher) => `
+            <option value="${teacher.id}" ${teacher.id === selected.teacherId ? "selected" : ""}>
+              ${teacher.name}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无老师</option>`;
+  const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  dateSelect.innerHTML = selected
+    ? weekDates
+        .map(
+          (date) => `
+            <option value="${date}" ${date === selected.date ? "selected" : ""}>
+              ${scheduleWeekdayLabel(date)} · ${formatDate(date)}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无日期</option>`;
+  periodSelect.innerHTML = selected
+    ? state.schedulingConfig.periods
+        .map(
+          (period) => `
+            <option value="${period.period}" ${period.period === selected.period ? "selected" : ""}>
+              第 ${period.period} 节 · ${period.time}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无节次</option>`;
+  roomSelect.innerHTML = selected
+    ? (state.schedulingConfig.rooms || [])
+        .map(
+          (room) => `
+            <option value="${room.id}" ${room.id === selected.roomId || room.name === selected.room ? "selected" : ""}>
+              ${room.name}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无教室</option>`;
+
+  assignmentSelect.disabled = !isPublished || schedulingBackendState.loading;
+  teacherSelect.disabled = !isPublished || schedulingBackendState.loading;
+  dateSelect.disabled = !isPublished || schedulingBackendState.loading;
+  periodSelect.disabled = !isPublished || schedulingBackendState.loading;
+  roomSelect.disabled = !isPublished || schedulingBackendState.loading;
+  submitButton.disabled = !isPublished || !selected || schedulingBackendState.loading;
+  status.textContent = !isPublished ? "等待发布" : `${(state.schedulingConfig.changeRequests || []).filter((item) => item.status === "pending").length} 个待审批`;
+  status.className = !isPublished ? "status-pill" : "status-pill warning";
+  list.innerHTML = adminChangeRequestList(state.schedulingConfig);
 }
 
 function renderTeacherImport() {
@@ -3335,22 +4164,563 @@ function renderTeacherImportRows(preview) {
     .join("");
 }
 
-function adminSubjectConfigItem(subject) {
-  const teachers = subject.teacherIds.map(schedulingTeacherName).join("、");
+function personnelRoleLabel(role) {
+  if (role === "teacher") return "任课教师";
+  if (role === "admin") return "行政";
+  if (role === "finance") return "财务";
+  if (role === "system_admin") return "系统管理员";
+  return "账号";
+}
+
+function personnelRoleTag(role) {
+  const className = role === "teacher" ? "completed" : role === "finance" ? "locked" : "pending";
+  return `<span class="tag ${className}">${personnelRoleLabel(role)}</span>`;
+}
+
+function personnelStatusTag(status = "active") {
+  const active = status === "active";
+  return `<span class="tag ${active ? "completed" : "exception"}">${active ? "启用" : "停用"}</span>`;
+}
+
+function localPersonnelRows() {
+  const teacherRows = state.teachers.map((teacher) => ({
+    id: `local-teacher:${teacher.id}`,
+    role: "teacher",
+    roleName: "任课教师",
+    name: teacher.name,
+    username: "",
+    usernames: [],
+    employeeNo: teacher.id,
+    teacherId: teacher.id,
+    department: teacher.department,
+    stageId: "",
+    stageName: teacher.department,
+    gradeText: teacher.grade || "未设置年级",
+    subjectName: teacher.subject,
+    title: teacher.position || "任课教师",
+    phone: "",
+    hiredAt: "",
+    status: "active",
+  }));
+  const accountRows = state.accounts
+    .filter((account) => account.role !== "teacher")
+    .map((account) => ({
+      id: `local-account:${account.id}`,
+      role: account.role,
+      roleName: personnelRoleLabel(account.role),
+      name: account.name,
+      username: account.id,
+      usernames: [account.id],
+      employeeNo: "",
+      teacherId: "",
+      department: account.department || "未设置部门",
+      stageId: "",
+      stageName: account.department || "未设置学部",
+      gradeText: "不适用",
+      subjectName: "不适用",
+      title: account.title || personnelRoleLabel(account.role),
+      phone: "",
+      hiredAt: "",
+      status: "active",
+    }));
+  return [...accountRows, ...teacherRows];
+}
+
+function filteredLocalPersonnelRows() {
+  const search = personnelPage.search.trim().toLowerCase();
+  return localPersonnelRows().filter((row) => {
+    if (personnelPage.role !== "all" && row.role !== personnelPage.role) return false;
+    if (personnelPage.status !== "all" && row.status !== personnelPage.status) return false;
+    if (personnelPage.stageId && row.stageId !== personnelPage.stageId) return false;
+    if (!search) return true;
+    return [
+      row.name,
+      row.username,
+      row.employeeNo,
+      row.teacherId,
+      row.department,
+      row.stageName,
+      row.gradeText,
+      row.subjectName,
+      row.title,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(search);
+  });
+}
+
+function personnelRow(row) {
+  const usernames = row.usernames?.length ? row.usernames.join(" / ") : row.username || "未开通";
+  const identifier = [row.employeeNo, row.teacherId].filter(Boolean).join(" · ") || row.accountId || row.id;
+  const subjectAndTitle =
+    row.subjectName && row.subjectName !== "不适用"
+      ? `${escapeHtml(row.subjectName)}<span class="cell-subline">${escapeHtml(row.title || "")}</span>`
+      : escapeHtml(row.title || row.subjectName || "未设置");
   return `
-    <article class="subject-config-item">
-      <div>
-        <strong>${subject.name}</strong>
-        <span>每班每周 ${subject.weeklyLessons} 节</span>
+    <tr>
+      <td class="row-title" data-label="人员">
+        ${escapeHtml(row.name)}
+        <span class="cell-subline">${escapeHtml(row.roleName || personnelRoleLabel(row.role))}</span>
+      </td>
+      <td data-label="账号/工号">
+        ${escapeHtml(usernames)}
+        <span class="cell-subline">${escapeHtml(identifier)}</span>
+      </td>
+      <td data-label="角色">${personnelRoleTag(row.role)}</td>
+      <td data-label="学部/部门">${escapeHtml(row.stageName || row.department || "未设置")}</td>
+      <td data-label="年级">${escapeHtml(row.gradeText || "未设置年级")}</td>
+      <td data-label="学科/岗位">${subjectAndTitle}</td>
+      <td data-label="状态">${personnelStatusTag(row.status)}</td>
+      <td data-label="联系方式">${escapeHtml(row.phone || row.hiredAt || "-")}</td>
+    </tr>
+  `;
+}
+
+function renderPersonnelList() {
+  if (backendMode() && currentRole() === "admin" && !personnelPage.loaded && !personnelPage.loading) {
+    loadPersonnelPage();
+  }
+
+  const table = document.querySelector("#personnelTable");
+  if (!table) return;
+
+  const searchInput = document.querySelector("#personnelSearch");
+  const stageFilter = document.querySelector("#personnelStageFilter");
+  const roleFilter = document.querySelector("#personnelRoleFilter");
+  const statusFilter = document.querySelector("#personnelStatusFilter");
+  const pageSizeSelect = document.querySelector("#personnelPageSize");
+  const status = document.querySelector("#personnelApiStatus");
+  const pageInfo = document.querySelector("#personnelPageInfo");
+
+  if (searchInput) searchInput.value = personnelPage.search;
+  if (stageFilter) stageFilter.value = personnelPage.stageId;
+  if (roleFilter) roleFilter.value = personnelPage.role;
+  if (statusFilter) statusFilter.value = personnelPage.status;
+  if (pageSizeSelect) pageSizeSelect.value = String(personnelPage.pageSize);
+
+  if (backendMode()) {
+    const summary = personnelPage.summary || {};
+    const meta = personnelPage.meta || { page: 1, pageSize: 20, total: 0, totalPages: 1 };
+    document.querySelector("#personnelTotalCount").textContent = summary.total || 0;
+    document.querySelector("#personnelTeacherCount").textContent = summary.teachers || 0;
+    document.querySelector("#personnelAdminFinanceCount").textContent = summary.adminFinance || 0;
+    document.querySelector("#personnelFilteredCount").textContent = summary.filtered ?? meta.total ?? 0;
+    if (status) {
+      status.textContent = personnelPage.loading
+        ? "正在加载人员名册"
+        : personnelPage.error || "已连接后端人员接口";
+      status.className = personnelPage.error ? "status-pill warning" : "status-pill done";
+    }
+    table.innerHTML = personnelPage.loading
+      ? `<tr><td colspan="8"><div class="empty-state">正在加载全校人员列表...</div></td></tr>`
+      : personnelPage.error
+        ? `<tr><td colspan="8"><div class="empty-state">${escapeHtml(personnelPage.error)}</div></td></tr>`
+        : personnelPage.items.length
+          ? personnelPage.items.map(personnelRow).join("")
+          : `<tr><td colspan="8"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
+    if (pageInfo) {
+      pageInfo.textContent = `第 ${meta.page || 1} / ${meta.totalPages || 1} 页 · 共 ${meta.total || 0} 人`;
+    }
+    document.querySelector("#personnelPrevPage").disabled = personnelPage.loading || (meta.page || 1) <= 1;
+    document.querySelector("#personnelNextPage").disabled =
+      personnelPage.loading || (meta.page || 1) >= (meta.totalPages || 1);
+    return;
+  }
+
+  const rows = filteredLocalPersonnelRows();
+  const totalPages = Math.max(Math.ceil(rows.length / personnelPage.pageSize), 1);
+  const currentPage = Math.min(Math.max(personnelPage.page, 1), totalPages);
+  const pageRows = rows.slice((currentPage - 1) * personnelPage.pageSize, currentPage * personnelPage.pageSize);
+  document.querySelector("#personnelTotalCount").textContent = localPersonnelRows().length;
+  document.querySelector("#personnelTeacherCount").textContent = state.teachers.length;
+  document.querySelector("#personnelAdminFinanceCount").textContent = state.accounts.filter(
+    (account) => account.role !== "teacher",
+  ).length;
+  document.querySelector("#personnelFilteredCount").textContent = rows.length;
+  if (status) {
+    status.textContent = "文件模式演示数据";
+    status.className = "status-pill";
+  }
+  table.innerHTML = pageRows.length
+    ? pageRows.map(personnelRow).join("")
+    : `<tr><td colspan="8"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
+  if (pageInfo) {
+    pageInfo.textContent = `第 ${currentPage} / ${totalPages} 页 · 共 ${rows.length} 人`;
+  }
+  document.querySelector("#personnelPrevPage").disabled = currentPage <= 1;
+  document.querySelector("#personnelNextPage").disabled = currentPage >= totalPages;
+}
+
+function subjectTeacherPool(subject) {
+  const pool = subject.availableTeachers?.length
+    ? subject.availableTeachers
+    : subject.teacherIds.map((teacherId) => ({
+        id: teacherId,
+        name: schedulingTeacherName(teacherId),
+        title: "任课教师",
+        department: state.schedulingConfig.divisionName,
+      }));
+  const poolIds = new Set(pool.map((teacher) => teacher.id));
+  const missingSelected = subject.teacherIds
+    .filter((teacherId) => !poolIds.has(teacherId))
+    .map((teacherId) => ({
+      id: teacherId,
+      name: schedulingTeacherName(teacherId),
+      title: "已配置老师",
+      department: state.schedulingConfig.divisionName,
+    }));
+  return [...pool, ...missingSelected].sort((a, b) =>
+    String(a.employeeNo || a.id).localeCompare(String(b.employeeNo || b.id), "zh-CN"),
+  );
+}
+
+function selectedSubjectTeacherCount(subjectId) {
+  return document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]:checked`).length;
+}
+
+function updateSubjectTeacherSelectionCount(subjectId) {
+  const count = selectedSubjectTeacherCount(subjectId);
+  const countNode = document.querySelector(`[data-assignment-selected-count="${subjectId}"]`);
+  if (countNode) countNode.textContent = `${count} 位已选`;
+}
+
+function adminCourseRuleItem(rule) {
+  return `
+    <article class="course-rule-item ${courseRulesEditMode ? "editing" : ""}" data-course-rule-id="${escapeHtml(rule.subjectId)}">
+      <div class="course-rule-name">
+        <strong>${escapeHtml(rule.subjectName)}</strong>
+        <small>当前年级课程</small>
       </div>
-      <p>${teachers}</p>
-      <label class="field-label">
-        任课老师 ID
-        <textarea class="assignment-teacher-input" data-assignment-teachers="${subject.id}" rows="2">${subject.teacherIds.join(", ")}</textarea>
+      <label class="field-label compact-field" for="courseWeekly-${escapeHtml(rule.subjectId)}">
+        <span>每周节数</span>
+        <input
+          id="courseWeekly-${escapeHtml(rule.subjectId)}"
+          data-course-rule-weekly="${escapeHtml(rule.subjectId)}"
+          type="number"
+          min="0"
+          max="12"
+          value="${Number(rule.weeklyLessons || 0)}"
+        />
       </label>
-      <button class="mini-button" data-save-assignment="${subject.id}" type="button">保存任课关系</button>
+      <label class="field-label compact-field" for="courseDuration-${escapeHtml(rule.subjectId)}">
+        <span>每节时长</span>
+        <div class="input-with-unit">
+          <input
+            id="courseDuration-${escapeHtml(rule.subjectId)}"
+            data-course-rule-duration="${escapeHtml(rule.subjectId)}"
+            type="number"
+            min="20"
+            max="120"
+            step="5"
+            value="${Number(rule.durationMinutes || 40)}"
+          />
+          <em>分钟</em>
+        </div>
+      </label>
+      ${
+        courseRulesEditMode
+          ? `<button class="mini-button danger" data-delete-grade-course="${escapeHtml(rule.subjectId)}" type="button">删除</button>`
+          : ""
+      }
     </article>
   `;
+}
+
+function scheduleConstraintSubjectOptions(config) {
+  const enabledRules = (config.courseRules || []).filter((rule) => rule.enabled);
+  return enabledRules.length
+    ? enabledRules
+        .map(
+          (rule) => `
+            <option value="${escapeHtml(rule.subjectId)}">${escapeHtml(rule.subjectName)}</option>
+          `,
+        )
+        .join("")
+    : `<option value="">请先新增课程</option>`;
+}
+
+function scheduleConstraintPeriodOptions(config) {
+  return [
+    `<option value="all">任意节次</option>`,
+    ...config.periods.map(
+      (period) => `
+        <option value="${period.period}">第 ${period.period} 节 · ${escapeHtml(period.time)}</option>
+      `,
+    ),
+  ].join("");
+}
+
+function scheduleConstraintDayText(dayIndexes = []) {
+  const labels = ["周一", "周二", "周三", "周四", "周五"];
+  return dayIndexes.length ? dayIndexes.map((dayIndex) => labels[Number(dayIndex)] || `第 ${Number(dayIndex) + 1} 天`).join("、") : "任意工作日";
+}
+
+function scheduleConstraintPeriodText(periods = []) {
+  return periods.length ? periods.map((period) => `第 ${period} 节`).join("、") : "任意节次";
+}
+
+function scheduleConstraintPeriodDetailText(periods = [], config = {}) {
+  const periodList = config.periods || [];
+  if (!periods.length) {
+    const first = periodList[0]?.period || 1;
+    const last = periodList[periodList.length - 1]?.period || first;
+    return `当天所有节次（第 ${first}-${last} 节）`;
+  }
+  return periods
+    .map((period) => {
+      const matched = periodList.find((item) => Number(item.period) === Number(period));
+      return matched ? `第 ${matched.period} 节（${matched.time}）` : `第 ${period} 节`;
+    })
+    .join("、");
+}
+
+function scheduleConstraintEffectText(config, constraint) {
+  const subjectName = constraint.subjectName || constraint.subjectId;
+  const days = scheduleConstraintDayText(constraint.dayIndexes);
+  const periods = constraint.periods?.length
+    ? scheduleConstraintPeriodText(constraint.periods)
+    : "全天任意节次";
+  return `自动排课和手动调整时，系统会跳过 ${config.divisionName}${config.gradeName} ${subjectName} 在 ${days} ${periods} 的候选时段。`;
+}
+
+function localScheduleConstraintViolation(subjectId, slot) {
+  return (state.schedulingConfig.constraints || []).find((constraint) => {
+    if (constraint.active === false || constraint.subjectId !== subjectId) return false;
+    const dayIndexes = Array.isArray(constraint.dayIndexes) ? constraint.dayIndexes.map(Number) : [];
+    const periods = Array.isArray(constraint.periods) ? constraint.periods.map(Number) : [];
+    if (dayIndexes.length && !dayIndexes.includes(Number(slot.dayIndex))) return false;
+    if (periods.length && !periods.includes(Number(slot.period))) return false;
+    return true;
+  });
+}
+
+function adminScheduleConstraintList(config) {
+  const constraints = config.constraints || [];
+  return constraints.length
+    ? constraints
+        .map(
+          (constraint) => `
+            <article class="constraint-item ${courseRulesEditMode ? "editing" : ""}">
+              <div class="constraint-item-content">
+                <div class="constraint-item-head">
+                  <span class="constraint-rule-tag">硬约束</span>
+                  <strong>${escapeHtml(constraint.subjectName)}</strong>
+                </div>
+                <div class="constraint-detail-grid">
+                  <span class="constraint-detail-card">
+                    <em>禁排课程</em>
+                    <strong>${escapeHtml(constraint.subjectName)}</strong>
+                  </span>
+                  <span class="constraint-detail-card">
+                    <em>禁排日期</em>
+                    <strong>${scheduleConstraintDayText(constraint.dayIndexes)}</strong>
+                  </span>
+                  <span class="constraint-detail-card">
+                    <em>禁排节次</em>
+                    <strong>${scheduleConstraintPeriodDetailText(constraint.periods, config)}</strong>
+                  </span>
+                </div>
+                <p class="constraint-effect">${escapeHtml(scheduleConstraintEffectText(config, constraint))}</p>
+                ${
+                  constraint.reason
+                    ? `<p class="constraint-reason">原因：${escapeHtml(constraint.reason)}</p>`
+                    : ""
+                }
+              </div>
+              ${
+                courseRulesEditMode
+                  ? `<button class="mini-button danger" data-delete-schedule-constraint="${escapeHtml(constraint.id)}" type="button">删除</button>`
+                  : ""
+              }
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">暂无自定义硬约束</div>`;
+}
+
+function adminSelectedTeacherPoolSummary(config) {
+  const rows = config.subjects
+    .map((subject) => {
+      const selectedIds = new Set(subject.teacherIds || []);
+      const selectedTeachers = subjectTeacherPool(subject).filter((teacher) => selectedIds.has(teacher.id));
+      const teacherTags = selectedTeachers.length
+        ? selectedTeachers
+            .map(
+              (teacher) => `
+                <span class="teacher-pool-summary-tag">
+                  ${escapeHtml(teacher.name)}
+                  <small>${escapeHtml(teacher.id)}</small>
+                </span>
+              `,
+            )
+            .join("")
+        : `<span class="teacher-pool-summary-empty">未选择老师</span>`;
+
+      return `
+        <article class="teacher-pool-summary-row">
+          <div class="teacher-pool-summary-subject">
+            <strong>${escapeHtml(subject.name)}</strong>
+            <span>每班每周 ${subject.weeklyLessons} 节 · ${selectedTeachers.length} 位已确认</span>
+          </div>
+          <div class="teacher-pool-summary-tags">${teacherTags}</div>
+        </article>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="teacher-pool-summary-head">
+      <strong>当前任课老师池</strong>
+      <span>${escapeHtml(config.divisionName)}${escapeHtml(config.gradeName)} · 保存任课关系后同步更新</span>
+    </div>
+    <div class="teacher-pool-summary-list">${rows}</div>
+  `;
+}
+
+function adminSubjectConfigItem(subject) {
+  const teacherIds = new Set(subject.teacherIds || []);
+  const teacherPool = subjectTeacherPool(subject);
+  return `
+    <article class="subject-config-item">
+      <div class="subject-config-head">
+        <div>
+          <strong>${subject.name}</strong>
+          <span>每班每周 ${subject.weeklyLessons} 节</span>
+        </div>
+        <div class="subject-config-meta">
+          <span data-assignment-selected-count="${subject.id}">${teacherIds.size} 位已选</span>
+          <span>${teacherPool.length} 位可选</span>
+        </div>
+      </div>
+      <div class="teacher-pool-grid" data-assignment-teachers="${subject.id}">
+        ${
+          teacherPool.length
+            ? teacherPool
+                .map(
+                  (teacher) => `
+                    <label class="teacher-pool-card">
+                      <input
+                        type="checkbox"
+                        data-assignment-teacher-option="${subject.id}"
+                        value="${teacher.id}"
+                        ${teacherIds.has(teacher.id) ? "checked" : ""}
+                      />
+                      <span>
+                        <strong>${escapeHtml(teacher.name)}</strong>
+                        <small>${escapeHtml(teacher.id)} · ${escapeHtml(teacher.title || teacher.subject || "任课教师")}</small>
+                      </span>
+                    </label>
+                  `,
+                )
+                .join("")
+            : `<div class="empty-state">当前学部暂无${escapeHtml(subject.name)}老师，请先到人员导入或人员列表补充教师档案。</div>`
+        }
+      </div>
+      <div class="subject-config-actions">
+        <span>排课时只会从已选老师中自动均衡分配。</span>
+        <div class="subject-config-buttons">
+          <button class="mini-button" data-select-all-assignment="${subject.id}" type="button">全选</button>
+          <button class="mini-button" data-clear-assignment="${subject.id}" type="button">清空</button>
+          <button class="mini-button primary" data-save-assignment="${subject.id}" type="button">保存任课关系</button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function schedulePeriodOptions(config, options = {}) {
+  const empty = options.emptyLabel ? [`<option value="">${escapeHtml(options.emptyLabel)}</option>`] : [];
+  return [
+    ...empty,
+    ...config.periods.map(
+      (period) => `
+        <option value="${period.period}">第 ${period.period} 节 · ${escapeHtml(period.time)}</option>
+      `,
+    ),
+  ].join("");
+}
+
+function teacherRuleDayText(slot) {
+  return `${scheduleConstraintDayText([slot.dayIndex])} ${scheduleConstraintPeriodDetailText(slot.periods, state.schedulingConfig)}`;
+}
+
+function adminTeacherRuleList(config) {
+  const rules = config.teacherRules || [];
+  return rules.length
+    ? rules
+        .map((rule) => {
+          const unavailableText = rule.unavailableSlots?.length
+            ? rule.unavailableSlots.map(teacherRuleDayText).join("；")
+            : "未设置不可用时间";
+          const avoidText = rule.avoidPeriods?.length
+            ? scheduleConstraintPeriodDetailText(rule.avoidPeriods, config)
+            : "无";
+          const preferText = rule.preferPeriods?.length
+            ? scheduleConstraintPeriodDetailText(rule.preferPeriods, config)
+            : "无";
+          return `
+            <article class="teacher-rule-item">
+              <div>
+                <strong>${escapeHtml(rule.teacherName)}</strong>
+                <span>${escapeHtml(rule.teacherId)} · 每日最多 ${Number(rule.maxDailyLessons || 4)} 节 · 最多连续 ${Number(rule.maxConsecutiveLessons || 3)} 节</span>
+              </div>
+              <p>不可用：${escapeHtml(unavailableText)}</p>
+              <p>尽量避开：${escapeHtml(avoidText)} · 优先安排：${escapeHtml(preferText)}</p>
+            </article>
+          `;
+        })
+        .join("")
+    : `<div class="empty-state">暂无老师时间规则，默认每日最多 4 节、最多连续 3 节。</div>`;
+}
+
+function scheduleDiagnosticItem(diagnostic) {
+  const label = diagnostic.severity === "error" ? "需处理" : diagnostic.severity === "warning" ? "提醒" : "正常";
+  const tagClass = diagnostic.severity === "error" ? "exception" : diagnostic.severity === "warning" ? "scheduled" : "completed";
+  return `
+    <article class="warning-item diagnostic-item">
+      <header>
+        <strong>${escapeHtml(diagnostic.title)}</strong>
+        <span class="tag ${tagClass}">${label}</span>
+      </header>
+      <p>${escapeHtml(diagnostic.text)}</p>
+    </article>
+  `;
+}
+
+function scheduleDiagnosticsHtml(draft) {
+  const diagnostics = draft.solver?.diagnostics || [];
+  return diagnostics.length ? diagnostics.map(scheduleDiagnosticItem).join("") : "";
+}
+
+function adminChangeRequestList(config) {
+  const requests = config.changeRequests || [];
+  return requests.length
+    ? requests
+        .map(
+          (request) => `
+            <article class="change-request-item">
+              <div>
+                <strong>${escapeHtml(request.className)} · ${escapeHtml(request.subjectName)}</strong>
+                <span>${escapeHtml(request.from?.teacherName)} ${escapeHtml(request.from?.date)} 第 ${request.from?.period || "-"} 节 → ${escapeHtml(request.to?.teacherName)} ${escapeHtml(request.to?.date)} 第 ${request.to?.period || "-"} 节</span>
+                ${request.reason ? `<p>原因：${escapeHtml(request.reason)}</p>` : ""}
+              </div>
+              <div class="change-request-actions">
+                <span class="tag ${request.status === "approved" ? "completed" : "scheduled"}">
+                  ${request.status === "approved" ? "已通过" : "待审批"}
+                </span>
+                ${
+                  request.status === "pending"
+                    ? `<button class="mini-button primary" data-approve-change-request="${escapeHtml(request.id)}" type="button">审批通过</button>`
+                    : ""
+                }
+              </div>
+            </article>
+          `,
+        )
+        .join("")
+    : `<div class="empty-state">暂无调课/代课申请</div>`;
 }
 
 function conflictItem(conflict) {
@@ -3368,31 +4738,54 @@ function conflictItem(conflict) {
 function adminScheduleGrid(assignments) {
   const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
   const grouped = weekDates.reduce((map, date) => {
-    map.set(date, []);
+    map.set(date, new Map());
     return map;
   }, new Map());
   assignments.forEach((assignment) => {
     if (!grouped.has(assignment.date)) return;
-    grouped.get(assignment.date).push(assignment);
+    const dayMap = grouped.get(assignment.date);
+    const periodKey = Number(assignment.period);
+    if (!dayMap.has(periodKey)) dayMap.set(periodKey, []);
+    dayMap.get(periodKey).push(assignment);
   });
 
   const dayNames = ["周一", "周二", "周三", "周四", "周五"];
   return weekDates
     .map((date, index) => {
-      const dayAssignments = grouped.get(date).sort((a, b) => a.period - b.period);
+      const dayMap = grouped.get(date);
+      const dayCount = Array.from(dayMap.values()).reduce((sum, items) => sum + items.length, 0);
       return `
         <article class="schedule-column">
           <header>
             <span>${dayNames[index]}</span>
             <strong>${formatDate(date)}</strong>
-            <small>${dayAssignments.length ? `${dayAssignments.length} 节课` : "未排课"}</small>
+            <small>${dayCount ? `${dayCount} 节课` : "未排课"}</small>
           </header>
-          <div class="schedule-items">
-            ${
-              dayAssignments.length
-                ? dayAssignments.map(adminScheduleItem).join("")
-                : `<div class="schedule-empty">暂无课程</div>`
-            }
+          <div class="schedule-items admin-schedule-slots">
+            ${state.schedulingConfig.periods
+              .map((period) => {
+                const periodAssignments = dayMap.get(Number(period.period)) || [];
+                return `
+                  <div
+                    class="schedule-slot-drop"
+                    data-schedule-drop-date="${date}"
+                    data-schedule-drop-period="${period.period}"
+                  >
+                    <div class="schedule-slot-label">
+                      <strong>第 ${period.period} 节</strong>
+                      <span>${escapeHtml(period.time)}</span>
+                    </div>
+                    <div class="schedule-slot-content">
+                      ${
+                        periodAssignments.length
+                          ? periodAssignments.map(adminScheduleItem).join("")
+                          : `<span class="schedule-empty compact">空节</span>`
+                      }
+                    </div>
+                  </div>
+                `;
+              })
+              .join("")}
           </div>
         </article>
       `;
@@ -3401,12 +4794,14 @@ function adminScheduleGrid(assignments) {
 }
 
 function adminScheduleItem(assignment) {
+  const canDrag =
+    backendMode() &&
+    currentRole() === "admin" &&
+    state.schedulingDraft.status !== "published" &&
+    !schedulingBackendState.loading &&
+    !assignment.locked;
   return `
-    <div class="schedule-item">
-      <div class="schedule-time">
-        <strong>第 ${assignment.period} 节</strong>
-        <span>${assignment.time}</span>
-      </div>
+    <div class="schedule-item ${canDrag ? "draggable" : ""}" ${canDrag ? `draggable="true" data-drag-assignment="${escapeHtml(assignment.id)}"` : ""}>
       <div class="schedule-main">
         <strong>${assignment.subjectName} · ${assignment.teacherName}</strong>
         <span>${assignment.room}</span>
@@ -3884,7 +5279,7 @@ function renderBackendFinanceDashboard() {
 }
 
 function renderFinanceRecords() {
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     renderBackendFinanceRecords();
     return;
   }
@@ -3971,7 +5366,7 @@ function renderBackendFinanceRecords() {
 }
 
 function renderSettlement() {
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     renderBackendSettlement();
     return;
   }
@@ -3991,6 +5386,8 @@ function renderSettlement() {
   status.className = settled ? "status-pill locked" : "status-pill";
   document.querySelector("#settleTeacherPayroll").disabled = settled;
   document.querySelector("#reviewTeacherPayroll").disabled = true;
+  document.querySelector("#approveAcademicWorkload").disabled = true;
+  document.querySelector("#approveSchoolWorkload").disabled = true;
   document.querySelector("#batchGeneratePayroll").disabled = true;
   document.querySelector("#exportPayrollCsv").disabled = true;
   renderPayrollRulesPanel();
@@ -4025,6 +5422,8 @@ function renderBackendSettlement() {
   const status = document.querySelector("#settlementStatus");
   const button = document.querySelector("#settleTeacherPayroll");
   const reviewButton = document.querySelector("#reviewTeacherPayroll");
+  const academicButton = document.querySelector("#approveAcademicWorkload");
+  const schoolButton = document.querySelector("#approveSchoolWorkload");
   const batchButton = document.querySelector("#batchGeneratePayroll");
   const exportButton = document.querySelector("#exportPayrollCsv");
   const table = document.querySelector("#settlementSalaryTable");
@@ -4037,6 +5436,8 @@ function renderBackendSettlement() {
     status.className = "status-pill";
     button.disabled = true;
     reviewButton.disabled = true;
+    academicButton.disabled = true;
+    schoolButton.disabled = true;
     batchButton.disabled = true;
     exportButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端生成该老师薪资明细...</div></td></tr>`;
@@ -4051,6 +5452,8 @@ function renderBackendSettlement() {
     status.className = "status-pill warning";
     button.disabled = true;
     reviewButton.disabled = true;
+    academicButton.disabled = true;
+    schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
@@ -4065,6 +5468,8 @@ function renderBackendSettlement() {
     status.className = "status-pill";
     button.disabled = true;
     reviewButton.disabled = true;
+    academicButton.disabled = true;
+    schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">请选择老师生成薪资明细</div></td></tr>`;
@@ -4075,14 +5480,17 @@ function renderBackendSettlement() {
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
   const payrollStatus = payroll.generated?.status || "generated";
+  const confirmationStatus = financeTeacherDetailState.workload?.confirmation?.status || payroll.confirmation?.status || "unconfirmed";
   status.textContent = payroll.generated
-    ? `${payrollStatusLabel(payrollStatus)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
+    ? `${payrollStatusLabel(payrollStatus)} · 工作量${confirmationText(payroll.teacher?.id || state.selectedFinanceTeacherId)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
     : "后端试算";
   status.className = payrollStatus === "locked" ? "status-pill locked" : "status-pill done";
-  reviewButton.disabled = financeTeacherDetailState.loading || payrollStatus !== "generated";
-  button.disabled = financeTeacherDetailState.loading || payrollStatus !== "reviewed";
-  batchButton.disabled = financeTeacherDetailState.loading;
-  exportButton.disabled = financeTeacherDetailState.loading;
+  academicButton.disabled = financeTeacherDetailState.loading || currentRole() !== "admin" || confirmationStatus !== "teacher_confirmed";
+  schoolButton.disabled = financeTeacherDetailState.loading || currentRole() !== "admin" || confirmationStatus !== "academic_approved";
+  reviewButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "generated" || confirmationStatus !== "school_approved";
+  button.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "reviewed" || confirmationStatus !== "school_approved";
+  batchButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
+  exportButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   table.innerHTML = (payroll.rows || [])
     .map(
       (row) => `
@@ -4125,7 +5533,7 @@ function renderPayrollRulesPanel() {
   });
   const saveButton = document.querySelector("#savePayrollRules");
   if (saveButton) {
-    saveButton.disabled = payrollRuleState.loading || !backendMode();
+    saveButton.disabled = payrollRuleState.loading || !backendMode() || currentRole() !== "finance";
     saveButton.textContent = payrollRuleState.loading ? "保存中" : "保存规则";
   }
 }
@@ -4771,6 +6179,7 @@ async function confirmAndPublishSchedule() {
     time: assignment.time,
     className: assignment.className,
     course: assignment.subjectName,
+    durationMinutes: assignment.durationMinutes || 40,
     room: assignment.room,
     roomId: assignment.roomId,
     type: "regular",
@@ -4904,6 +6313,7 @@ function authenticateDemo(username, password, fallbackMessage = "用户名或密
   }
   document.querySelector("#loginError").textContent = "";
   clearBackendSession();
+  resetPersonnelPage();
   loginAccount(matched.accountId);
   return true;
 }
@@ -4930,7 +6340,7 @@ async function authenticate(username, password) {
       const accountId = upsertBackendAccount(payload.account);
       loginAccount(accountId);
       if (payload.account.role === "teacher") {
-        await loadBackendTeacherContext(payload.account.teacherId, "2026-06-15");
+        await loadBackendTeacherContext(payload.account.teacherId, "auto");
       }
       if (payload.account.role === "finance") {
         financeTeacherPage = {
@@ -4944,8 +6354,12 @@ async function authenticate(username, password) {
       }
       if (payload.account.role === "admin") {
         schedulingBackendState = { loaded: false, loading: false, error: "" };
+        resetPersonnelPage();
         await loadBackendSchedulingContext();
+        await loadFinanceTeacherPage({ page: 1 });
+        await loadPayrollRules();
       }
+      await loadBackendNotifications();
       render();
       loginButton.disabled = false;
       return;
@@ -4967,6 +6381,7 @@ function logout() {
   if (qrScanner) stopCameraScanner();
   sessionAccountId = "";
   clearSession();
+  resetPersonnelPage();
   if (backendMode()) {
     apiRequest("/api/auth/logout", { method: "POST" }).catch(() => {});
   }
@@ -5014,6 +6429,7 @@ document.addEventListener("click", async (event) => {
   const noticeButton = event.target.closest("[data-notice-open]");
   if (noticeButton) {
     state.selectedNoticeId = noticeButton.dataset.noticeOpen;
+    await markBackendNoticeRead(state.selectedNoticeId);
     switchView("notifications");
     return;
   }
@@ -5048,6 +6464,44 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const selectAllAssignmentButton = event.target.closest("[data-select-all-assignment]");
+  if (selectAllAssignmentButton) {
+    const subjectId = selectAllAssignmentButton.dataset.selectAllAssignment;
+    document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]`).forEach((input) => {
+      input.checked = true;
+    });
+    updateSubjectTeacherSelectionCount(subjectId);
+    return;
+  }
+
+  const clearAssignmentButton = event.target.closest("[data-clear-assignment]");
+  if (clearAssignmentButton) {
+    const subjectId = clearAssignmentButton.dataset.clearAssignment;
+    document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]`).forEach((input) => {
+      input.checked = false;
+    });
+    updateSubjectTeacherSelectionCount(subjectId);
+    return;
+  }
+
+  if (event.target.closest("#toggleCourseEditMode")) {
+    courseRulesEditMode = !courseRulesEditMode;
+    renderAdminScheduling();
+    return;
+  }
+
+  const deleteScheduleConstraintButton = event.target.closest("[data-delete-schedule-constraint]");
+  if (deleteScheduleConstraintButton) {
+    await deleteAdminScheduleConstraint(deleteScheduleConstraintButton.dataset.deleteScheduleConstraint);
+    return;
+  }
+
+  const deleteGradeCourseButton = event.target.closest("[data-delete-grade-course]");
+  if (deleteGradeCourseButton) {
+    await deleteAdminGradeCourse(deleteGradeCourseButton.dataset.deleteGradeCourse);
+    return;
+  }
+
   const saveAssignmentButton = event.target.closest("[data-save-assignment]");
   if (saveAssignmentButton) {
     if (!backendMode() || currentRole() !== "admin") {
@@ -5055,11 +6509,13 @@ document.addEventListener("click", async (event) => {
       return;
     }
     const subjectId = saveAssignmentButton.dataset.saveAssignment;
-    const input = document.querySelector(`[data-assignment-teachers="${subjectId}"]`);
-    const teacherIds = String(input?.value || "")
-      .split(/[,，\s]+/)
-      .map((item) => item.trim())
-      .filter(Boolean);
+    const teacherIds = Array.from(
+      document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]:checked`),
+    ).map((input) => input.value);
+    if (!teacherIds.length) {
+      showToast("请至少选择 1 位任课老师");
+      return;
+    }
     try {
       await apiRequest("/api/scheduling/teacher-assignments", {
         method: "POST",
@@ -5075,6 +6531,18 @@ document.addEventListener("click", async (event) => {
     } catch (error) {
       showToast(error.message || "任课关系保存失败");
     }
+    return;
+  }
+
+  const assignmentTeacherOption = event.target.closest("[data-assignment-teacher-option]");
+  if (assignmentTeacherOption) {
+    updateSubjectTeacherSelectionCount(assignmentTeacherOption.dataset.assignmentTeacherOption);
+    return;
+  }
+
+  const approveChangeRequestButton = event.target.closest("[data-approve-change-request]");
+  if (approveChangeRequestButton) {
+    await approveScheduleChangeRequest(approveChangeRequestButton.dataset.approveChangeRequest);
     return;
   }
 });
@@ -5104,6 +6572,9 @@ document.querySelector("#quickScan").addEventListener("click", async (event) => 
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
+document.querySelector("#saveCourseRules").addEventListener("click", saveAdminCourseRules);
+document.querySelector("#addGradeCourse").addEventListener("click", addAdminGradeCourse);
+document.querySelector("#addScheduleConstraint").addEventListener("click", addAdminScheduleConstraint);
 document.querySelector("#loadTeacherImportTemplate").addEventListener("click", () => {
   teacherImportState = {
     ...teacherImportState,
@@ -5214,6 +6685,55 @@ document.querySelector("#financeNextPage").addEventListener("click", () => {
   loadFinanceTeacherPage({ page: nextPage });
 });
 
+function applyPersonnelFilters() {
+  personnelPage.search = document.querySelector("#personnelSearch").value.trim();
+  personnelPage.stageId = document.querySelector("#personnelStageFilter").value;
+  personnelPage.role = document.querySelector("#personnelRoleFilter").value;
+  personnelPage.status = document.querySelector("#personnelStatusFilter").value;
+  personnelPage.pageSize = Number.parseInt(document.querySelector("#personnelPageSize").value, 10);
+  if (backendMode()) {
+    loadPersonnelPage({ page: 1 });
+  } else {
+    personnelPage.page = 1;
+    renderPersonnelList();
+  }
+}
+
+document.querySelector("#personnelSearchButton").addEventListener("click", applyPersonnelFilters);
+
+document.querySelector("#personnelSearch").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  applyPersonnelFilters();
+});
+
+document.querySelector("#personnelStageFilter").addEventListener("change", applyPersonnelFilters);
+document.querySelector("#personnelRoleFilter").addEventListener("change", applyPersonnelFilters);
+document.querySelector("#personnelStatusFilter").addEventListener("change", applyPersonnelFilters);
+document.querySelector("#personnelPageSize").addEventListener("change", applyPersonnelFilters);
+
+document.querySelector("#personnelPrevPage").addEventListener("click", () => {
+  if (backendMode()) {
+    const nextPage = Math.max((personnelPage.meta?.page || personnelPage.page) - 1, 1);
+    loadPersonnelPage({ page: nextPage });
+  } else {
+    personnelPage.page = Math.max(personnelPage.page - 1, 1);
+    renderPersonnelList();
+  }
+});
+
+document.querySelector("#personnelNextPage").addEventListener("click", () => {
+  if (backendMode()) {
+    const meta = personnelPage.meta || { page: 1, totalPages: 1 };
+    const nextPage = Math.min((meta.page || personnelPage.page || 1) + 1, meta.totalPages || 1);
+    loadPersonnelPage({ page: nextPage });
+  } else {
+    const totalPages = Math.max(Math.ceil(filteredLocalPersonnelRows().length / personnelPage.pageSize), 1);
+    personnelPage.page = Math.min(personnelPage.page + 1, totalPages);
+    renderPersonnelList();
+  }
+});
+
 document.querySelector("#qrLessonSelect").addEventListener("change", (event) => {
   state.scannerLessonId = event.target.value;
   renderScanner();
@@ -5256,6 +6776,19 @@ document.querySelector("#adminAssignmentSelect").addEventListener("change", (eve
   renderAdminScheduling();
 });
 
+document.querySelector("#changeAssignmentSelect").addEventListener("change", (event) => {
+  state.selectedScheduleAssignmentId = event.target.value;
+  renderAdminScheduling();
+});
+
+document.querySelector("#teacherRuleTeacherSelect").addEventListener("change", () => {
+  const selectedRule = (state.schedulingConfig.teacherRules || []).find(
+    (rule) => rule.teacherId === document.querySelector("#teacherRuleTeacherSelect").value,
+  );
+  document.querySelector("#teacherRuleMaxDaily").value = selectedRule?.maxDailyLessons || 4;
+  document.querySelector("#teacherRuleMaxConsecutive").value = selectedRule?.maxConsecutiveLessons || 3;
+});
+
 document.querySelector("#applyScheduleAdjustment").addEventListener("click", () => {
   applyScheduleAdjustment();
 });
@@ -5266,6 +6799,35 @@ document.querySelector("#toggleScheduleAssignmentLock").addEventListener("click"
 
 document.querySelector("#regenerateUnlockedSchedule").addEventListener("click", () => {
   regenerateUnlockedSchedule();
+});
+
+document.querySelector("#saveTeacherRule").addEventListener("click", () => {
+  saveTeacherScheduleRule();
+});
+
+document.querySelector("#submitScheduleChangeRequest").addEventListener("click", () => {
+  submitScheduleChangeRequest();
+});
+
+document.addEventListener("dragstart", (event) => {
+  const item = event.target.closest("[data-drag-assignment]");
+  if (!item) return;
+  draggedScheduleAssignmentId = item.dataset.dragAssignment;
+  event.dataTransfer?.setData("text/plain", draggedScheduleAssignmentId);
+});
+
+document.addEventListener("dragover", (event) => {
+  if (!draggedScheduleAssignmentId || !event.target.closest("[data-schedule-drop-date]")) return;
+  event.preventDefault();
+});
+
+document.addEventListener("drop", async (event) => {
+  const zone = event.target.closest("[data-schedule-drop-date]");
+  if (!zone || !draggedScheduleAssignmentId) return;
+  event.preventDefault();
+  const assignmentId = draggedScheduleAssignmentId;
+  draggedScheduleAssignmentId = "";
+  await moveScheduleAssignmentToSlot(assignmentId, zone.dataset.scheduleDropDate, zone.dataset.scheduleDropPeriod);
 });
 
 document.querySelector("#simulateQrRead").addEventListener("click", async () => {
@@ -5326,7 +6888,7 @@ document.querySelector("#financeTeacherSelect").addEventListener("change", async
   state.selectedFinanceTeacherId = event.target.value;
   resetAttendanceRecordState();
   resetFinanceTeacherDetailState();
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
     return;
   }
@@ -5336,7 +6898,7 @@ document.querySelector("#financeTeacherSelect").addEventListener("change", async
 document.querySelector("#settlementTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
   resetFinanceTeacherDetailState();
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
     return;
   }
@@ -5358,6 +6920,8 @@ document.querySelector("#settleTeacherPayroll").addEventListener("click", async 
 });
 
 document.querySelector("#reviewTeacherPayroll").addEventListener("click", reviewBackendPayroll);
+document.querySelector("#approveAcademicWorkload").addEventListener("click", () => approveBackendWorkload("academic"));
+document.querySelector("#approveSchoolWorkload").addEventListener("click", () => approveBackendWorkload("school"));
 document.querySelector("#batchGeneratePayroll").addEventListener("click", batchGenerateBackendPayroll);
 document.querySelector("#exportPayrollCsv").addEventListener("click", exportBackendPayrollCsv);
 document.querySelector("#savePayrollRules").addEventListener("click", saveBackendPayrollRules);
@@ -5374,8 +6938,9 @@ document.querySelector("#submitManualQr").addEventListener("click", async () => 
 render();
 
 if (backendMode()) {
+  loadBackendNotifications().then(render);
   if (currentRole() === "teacher") {
-    loadBackendTeacherContext(currentTeacherId(), "2026-06-15").then(render);
+    loadBackendTeacherContext(currentTeacherId(), "auto").then(render);
   }
   if (currentRole() === "finance") {
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
@@ -5383,5 +6948,7 @@ if (backendMode()) {
   }
   if (currentRole() === "admin") {
     loadBackendSchedulingContext();
+    loadFinanceTeacherPage({ page: financeTeacherPage.page });
+    loadPayrollRules();
   }
 }

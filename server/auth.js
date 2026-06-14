@@ -28,3 +28,7 @@ export function verifyPassword(password, storedHash = "") {
 export function createToken() {
   return crypto.randomBytes(32).toString("hex");
 }
+
+export function hashToken(token = "") {
+  return crypto.createHash("sha256").update(String(token)).digest("hex");
+}
