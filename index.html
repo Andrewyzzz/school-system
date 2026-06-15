@@ -103,7 +103,7 @@
           </button>
           <button class="nav-item" data-view="teacherPayroll" data-role="teacher" type="button">
             <span aria-hidden="true">¥</span>
-            薪资明细
+            总薪资
           </button>
           <button class="nav-item" data-view="finance" data-role="finance" type="button">
             <span aria-hidden="true">□</span>
@@ -622,7 +622,7 @@
             <div class="panel-heading">
               <div>
                 <h2>调课/代课审批</h2>
-                <p>课表发布后通过审批单变更课程实例，审批通过后同步老师端签到入口和薪资明细。</p>
+                <p>课表发布后通过审批单变更课程实例，审批通过后同步老师端签到入口和薪资汇总。</p>
               </div>
               <span class="status-pill" id="scheduleChangeStatus">等待发布</span>
             </div>
@@ -1028,36 +1028,19 @@
           <section class="panel table-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="teacherPayrollTitle">我的薪资明细</h2>
-                <p>老师端只查看本人月度薪资项目，财务锁定后作为最终发放口径。</p>
+                <h2 id="teacherPayrollTitle">我的总薪资</h2>
+                <p>老师端仅展示本人月度总薪资，不展示逐课时金额和薪资拆分。</p>
               </div>
               <span class="status-pill" id="teacherPayrollStatus">读取中</span>
             </div>
             <div class="salary-total">
               <div>
-                <span>应发工资</span>
-                <strong id="teacherPayrollGross">¥0</strong>
-              </div>
-              <div>
-                <span>代扣个税</span>
-                <strong id="teacherPayrollTax">¥0</strong>
-              </div>
-              <div>
-                <span>实发工资</span>
+                <span>本月总薪资</span>
                 <strong id="teacherPayrollNet">¥0</strong>
               </div>
             </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>薪资项目</th>
-                    <th>计算口径</th>
-                    <th>金额</th>
-                  </tr>
-                </thead>
-                <tbody id="teacherPayrollTable"></tbody>
-              </table>
+            <div class="empty-state" id="teacherPayrollSummaryNote">
+              财务端保留明细核算，老师端只展示最终汇总。
             </div>
           </section>
         </section>

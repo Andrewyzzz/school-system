@@ -41,8 +41,8 @@
       <text class="item-meta">查看签入签出结果</text>
     </view>
     <view class="nav-card" bindtap="goPayroll">
-      <text class="item-main">薪资明细</text>
-      <text class="item-meta">查看本月薪资试算</text>
+      <text class="item-main">我的总薪资</text>
+      <text class="item-meta">查看本月薪资汇总</text>
     </view>
     <view class="nav-card" bindtap="goWorkload">
       <text class="item-main">工作量确认</text>

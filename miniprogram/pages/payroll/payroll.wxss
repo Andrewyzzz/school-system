@@ -1,3 +1,7 @@
+.grid {
+  grid-template-columns: 1fr;
+}
+
 .metric .value {
-  font-size: 32rpx;
+  font-size: 48rpx;
 }

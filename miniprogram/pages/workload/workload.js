@@ -36,10 +36,7 @@ Page({
         summary: result.summary || {},
         statusText: confirmationText(status),
         confirmDisabled: Boolean(status),
-        payableLines: (result.payableLines || []).map((line) => ({
-          ...line,
-          amountText: dateUtil.money(line.amount || 0),
-        })),
+        payableLines: result.payableLines || [],
         pendingLines: (result.pendingLines || []).map((line) => ({
           ...line,
           statusText: dateUtil.statusText(line.status),

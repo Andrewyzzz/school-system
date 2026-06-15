@@ -761,7 +761,7 @@ const views = {
   },
   teacherPayroll: {
     role: "teacher",
-    title: "我的薪资明细",
+    title: "我的总薪资",
     el: document.querySelector("#teacherPayrollView"),
   },
   finance: {
@@ -2003,7 +2003,7 @@ async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month =
       month,
       loading: false,
       loaded: true,
-      error: error.message || "薪资明细加载失败",
+      error: error.message || "总薪资加载失败",
       data: null,
     };
   }
@@ -5256,11 +5256,10 @@ function renderBackendConfirmation() {
     const categories = data.categories || [];
     const summary = data.summary || {};
     list.innerHTML = [
-      ...categories.map((category) => [category.label, `${category.units} 节`, `${category.description}，金额 ${formatCurrency(category.amount)}`]),
+      ...categories.map((category) => [category.label, `${category.units} 节`, "签入签出完成后计入月度工作量"]),
       ["待处理考勤", `${summary.pendingCount || 0} 节`, "未完成签入和签出，暂不计入工资"],
       ["异常记录", `${summary.exceptionCount || 0} 条`, "待教务复核后处理"],
-      ["可计薪课时", `${summary.payableUnits || 0} 节`, `后端生成，应发试算 ${formatCurrency(summary.grossPay || 0)}`],
-      ["预计实发", formatCurrency(summary.netPay || 0), "按当前规则自动试算"],
+      ["可计薪课时", `${summary.payableUnits || 0} 节`, "已完成签入签出的课时数量"],
     ]
       .map(
         ([label, value, desc]) => `
@@ -5281,8 +5280,8 @@ function renderBackendConfirmation() {
 }
 
 function renderTeacherPayroll() {
-  const table = document.querySelector("#teacherPayrollTable");
-  if (!table) return;
+  const summaryNote = document.querySelector("#teacherPayrollSummaryNote");
+  if (!summaryNote) return;
   const teacherId = currentRole() === "teacher" ? currentTeacherId() : "";
 
   if (backendMode() && currentRole() === "teacher") {
@@ -5292,63 +5291,33 @@ function renderTeacherPayroll() {
     const status = document.querySelector("#teacherPayrollStatus");
 
     if (teacherPayrollState.loading && (!isCurrent || !teacherPayrollState.loaded)) {
-      document.querySelector("#teacherPayrollGross").textContent = "读取中";
-      document.querySelector("#teacherPayrollTax").textContent = "读取中";
       document.querySelector("#teacherPayrollNet").textContent = "读取中";
-      status.textContent = "正在读取后端薪资明细";
+      status.textContent = "正在读取后端总薪资";
       status.className = "status-pill";
-      table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在读取本人薪资明细...</div></td></tr>`;
+      summaryNote.textContent = "正在读取本人月度总薪资...";
       return;
     }
 
     if (teacherPayrollState.error && isCurrent) {
-      document.querySelector("#teacherPayrollGross").textContent = "¥0";
-      document.querySelector("#teacherPayrollTax").textContent = "¥0";
       document.querySelector("#teacherPayrollNet").textContent = "¥0";
       status.textContent = teacherPayrollState.error;
       status.className = "status-pill warning";
-      table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${teacherPayrollState.error}</div></td></tr>`;
+      summaryNote.textContent = teacherPayrollState.error;
       return;
     }
 
-    document.querySelector("#teacherPayrollGross").textContent = formatCurrency(payroll?.grossPay || 0);
-    document.querySelector("#teacherPayrollTax").textContent = formatCurrency(payroll?.tax || 0);
     document.querySelector("#teacherPayrollNet").textContent = formatCurrency(payroll?.netPay || 0);
     status.textContent = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
     status.className = payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done";
-    table.innerHTML = payroll?.rows?.length
-      ? payroll.rows
-          .map(
-            (row) => `
-              <tr>
-                <td class="row-title" data-label="薪资项目">${row.name}</td>
-                <td class="muted" data-label="计算口径">${row.basis}</td>
-                <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
-              </tr>
-            `,
-          )
-          .join("")
-      : `<tr><td colspan="3"><div class="empty-state">暂无薪资明细</div></td></tr>`;
+    summaryNote.textContent = "财务端保留逐课时与薪资项目核算明细，老师端只展示月度总薪资。";
     return;
   }
 
   const salary = calculateSalary(teacherId);
-  document.querySelector("#teacherPayrollGross").textContent = formatCurrency(salary.gross);
-  document.querySelector("#teacherPayrollTax").textContent = formatCurrency(salary.tax);
   document.querySelector("#teacherPayrollNet").textContent = formatCurrency(salary.net);
   document.querySelector("#teacherPayrollStatus").textContent = settlementText(teacherId);
   document.querySelector("#teacherPayrollStatus").className = "status-pill";
-  table.innerHTML = salaryRows(teacherId)
-    .map(
-      ([name, basis, amount]) => `
-        <tr>
-          <td class="row-title" data-label="薪资项目">${name}</td>
-          <td class="muted" data-label="计算口径">${basis}</td>
-          <td data-label="金额">${formatCurrency(amount)}</td>
-        </tr>
-      `,
-    )
-    .join("");
+  summaryNote.textContent = "财务端保留逐课时与薪资项目核算明细，老师端只展示月度总薪资。";
 }
 
 function renderFinanceDashboard() {

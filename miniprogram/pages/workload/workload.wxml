@@ -17,7 +17,7 @@
     <view class="list">
       <view class="list-item" wx:for="{{payableLines}}" wx:key="lessonId">
         <text class="item-main">{{item.date}} · {{item.subjectName}} · {{item.className}}</text>
-        <text class="item-meta">{{item.time}} · {{item.room}} · {{item.amountText}}</text>
+        <text class="item-meta">{{item.time}} · {{item.room}} · {{item.units}} 节</text>
       </view>
     </view>
   </view>

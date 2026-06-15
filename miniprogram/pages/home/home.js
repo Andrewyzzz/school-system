@@ -23,11 +23,12 @@ Page({
       const teacherId = api.getTeacherId();
       const teacherResult = await api.request("/api/teachers/me");
       const workload = await api.request(`/api/teachers/${teacherId}/workload?month=${config.defaultMonth}`);
+      const payroll = await api.request(`/api/teachers/${teacherId}/payroll?month=${config.defaultMonth}`);
       const notices = await api.request("/api/notifications?limit=3");
       this.setData({
         teacher: teacherResult.teacher || {},
         summary: workload.summary || {},
-        netPay: dateUtil.money((workload.summary || {}).netPay),
+        netPay: dateUtil.money((payroll || {}).netPay),
         notifications: notices.items || notices.notifications || [],
       });
     } catch (error) {

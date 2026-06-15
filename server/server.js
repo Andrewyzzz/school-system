@@ -138,6 +138,53 @@ function teacherIdFromPath(parts) {
   return parts.length >= 3 ? parts[2] : "";
 }
 
+function teacherPayrollSummaryOnly(payroll) {
+  if (!payroll) return null;
+  return {
+    teacher: payroll.teacher,
+    month: payroll.month,
+    netPay: payroll.netPay || 0,
+    generated: payroll.generated || null,
+    confirmation: payroll.confirmation || null,
+  };
+}
+
+function teacherWorkloadWithoutSalaryDetails(workload) {
+  if (!workload) return null;
+  return {
+    teacher: workload.teacher,
+    month: workload.month,
+    generatedAt: workload.generatedAt,
+    summary: {
+      plannedUnits: workload.summary?.plannedUnits || 0,
+      payableUnits: workload.summary?.payableUnits || 0,
+      pendingCount: workload.summary?.pendingCount || 0,
+      exceptionCount: workload.summary?.exceptionCount || 0,
+    },
+    categories: (workload.categories || []).map((category) => ({
+      type: category.type,
+      label: category.label,
+      units: category.units,
+    })),
+    payableLines: (workload.payableLines || []).map((line) => ({
+      lessonId: line.lessonId,
+      date: line.date,
+      time: line.time,
+      className: line.className,
+      subjectName: line.subjectName,
+      room: line.room,
+      type: line.type,
+      units: line.units,
+      status: line.status,
+      checkInAt: line.checkInAt,
+      checkOutAt: line.checkOutAt,
+    })),
+    pendingLines: workload.pendingLines || [],
+    exceptionLines: workload.exceptionLines || [],
+    confirmation: workload.confirmation || null,
+  };
+}
+
 async function handleApi(req, res, db, url) {
   if (req.method === "OPTIONS") {
     sendJson(res, 204, {});
@@ -599,7 +646,12 @@ async function handleApi(req, res, db, url) {
           await saveDatabase(db);
         }
         const month = url.searchParams.get("month") || "2026-06";
-        sendJson(res, 200, teacherMonthlyWorkload(db, teacherId, month));
+        const workload = teacherMonthlyWorkload(db, teacherId, month);
+        sendJson(
+          res,
+          200,
+          auth.account.role === "teacher" ? teacherWorkloadWithoutSalaryDetails(workload) : workload,
+        );
         return;
       }
 
@@ -612,7 +664,7 @@ async function handleApi(req, res, db, url) {
         const month = String(body.month || url.searchParams.get("month") || "2026-06");
         const result = confirmMonthlyWorkload(db, teacherId, month, auth.account);
         await saveDatabase(db);
-        sendJson(res, 200, result);
+        sendJson(res, 200, teacherWorkloadWithoutSalaryDetails(result));
         return;
       }
 
@@ -654,7 +706,8 @@ async function handleApi(req, res, db, url) {
           await saveDatabase(db);
         }
         const month = url.searchParams.get("month") || "2026-06";
-        sendJson(res, 200, teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month));
+        const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
+        sendJson(res, 200, auth.account.role === "teacher" ? teacherPayrollSummaryOnly(payroll) : payroll);
         return;
       }
 
