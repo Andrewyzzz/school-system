@@ -1144,6 +1144,14 @@
               <span class="status-pill" id="financeApiStatus">本地演示数据</span>
             </div>
             <div class="finance-list-toolbar" aria-label="教师列表筛选">
+              <label class="field-label" for="financeStageFilter">
+                学部
+                <select class="lesson-select" id="financeStageFilter"></select>
+              </label>
+              <label class="field-label" for="financeGradeFilter">
+                年级
+                <select class="lesson-select" id="financeGradeFilter"></select>
+              </label>
               <label class="field-label" for="financeTeacherSearch">
                 搜索老师
                 <input id="financeTeacherSearch" type="search" placeholder="姓名、工号、学科、手机号" />
@@ -1190,10 +1198,25 @@
                 <h2 id="financeRecordsTitle">老师考勤记录</h2>
                 <p>财务可按老师查看课时任务、签入签出结果和异常状态。</p>
               </div>
-              <div class="finance-filter">
-                <label class="field-label" for="financeTeacherSelect">选择老师</label>
+            </div>
+            <div class="finance-list-toolbar compact-teacher-picker" aria-label="考勤记录老师筛选">
+              <label class="field-label" for="financeRecordsStageFilter">
+                学部
+                <select class="lesson-select" id="financeRecordsStageFilter"></select>
+              </label>
+              <label class="field-label" for="financeRecordsGradeFilter">
+                年级
+                <select class="lesson-select" id="financeRecordsGradeFilter"></select>
+              </label>
+              <label class="field-label" for="financeRecordsSearch">
+                搜索老师
+                <input id="financeRecordsSearch" type="search" placeholder="姓名、工号、学科、手机号" />
+              </label>
+              <label class="field-label" for="financeTeacherSelect">
+                选择老师
                 <select class="lesson-select" id="financeTeacherSelect"></select>
-              </div>
+              </label>
+              <button class="ghost-button" id="financeRecordsSearchButton" type="button">查询</button>
             </div>
             <div class="table-wrap">
               <table>
@@ -1222,10 +1245,25 @@
                 <h2 id="settlementTitle">薪资结算</h2>
                 <p>财务确认该老师本月有效课时和工资明细后，点击结算锁定。</p>
               </div>
-              <div class="finance-filter">
-                <label class="field-label" for="settlementTeacherSelect">选择老师</label>
+            </div>
+            <div class="finance-list-toolbar compact-teacher-picker" aria-label="薪资结算老师筛选">
+              <label class="field-label" for="settlementStageFilter">
+                学部
+                <select class="lesson-select" id="settlementStageFilter"></select>
+              </label>
+              <label class="field-label" for="settlementGradeFilter">
+                年级
+                <select class="lesson-select" id="settlementGradeFilter"></select>
+              </label>
+              <label class="field-label" for="settlementTeacherSearch">
+                搜索老师
+                <input id="settlementTeacherSearch" type="search" placeholder="姓名、工号、学科、手机号" />
+              </label>
+              <label class="field-label" for="settlementTeacherSelect">
+                选择老师
                 <select class="lesson-select" id="settlementTeacherSelect"></select>
-              </div>
+              </label>
+              <button class="ghost-button" id="settlementTeacherSearchButton" type="button">查询</button>
             </div>
             <div class="salary-total">
               <div>

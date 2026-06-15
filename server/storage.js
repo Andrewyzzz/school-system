@@ -995,6 +995,14 @@ function gradeCoverageText(db, teacher) {
   return grades.map(displayGrade).join("、");
 }
 
+function teacherGradeValues(db, teacher) {
+  const stage = db.stages.find((item) => item.id === teacher.stageId);
+  const assignmentGrades = (db.teacherAssignments || [])
+    .filter((assignment) => assignment.teacherIds.includes(teacher.id))
+    .map((assignment) => assignment.grade);
+  return Array.from(new Set(assignmentGrades.length ? assignmentGrades : stage?.grades || [])).sort((a, b) => a - b);
+}
+
 function publicPersonnelRows(db) {
   const accountsByTeacherId = new Map();
   db.accounts.forEach((account) => {
@@ -1249,6 +1257,7 @@ export function queryTeachers(db, query = {}) {
   const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || "20", 10), 1), 100);
   const search = String(query.search || "").trim().toLowerCase();
   const stageId = String(query.stageId || "").trim();
+  const grade = Number.parseInt(query.grade || "", 10);
   const subjectId = String(query.subjectId || "").trim();
   const status = String(query.status || "active").trim();
   const month = String(query.month || "2026-06").trim();
@@ -1256,6 +1265,7 @@ export function queryTeachers(db, query = {}) {
   const filtered = db.teachers.filter((teacher) => {
     if (status && teacher.status !== status) return false;
     if (stageId && teacher.stageId !== stageId) return false;
+    if (Number.isFinite(grade) && !teacherGradeValues(db, teacher).includes(grade)) return false;
     if (subjectId && teacher.primarySubjectId !== subjectId) return false;
     if (!search) return true;
     return [
@@ -1263,6 +1273,7 @@ export function queryTeachers(db, query = {}) {
       teacher.employeeNo,
       teacher.name,
       teacher.stageName,
+      gradeCoverageText(db, teacher),
       teacher.primarySubjectName,
       teacher.phone,
     ]
@@ -1278,6 +1289,7 @@ export function queryTeachers(db, query = {}) {
     const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
     return {
       ...teacher,
+      gradeText: gradeCoverageText(db, teacher),
       summary,
       payroll: payroll
         ? {
@@ -1746,8 +1758,30 @@ function csvCell(value) {
 
 export function exportPayrollDetails(db, options = {}) {
   const month = String(options.month || "2026-06");
-  const details = ensurePayrollDetails(db).filter((detail) => detail.month === month);
-  const headers = ["月份", "工号", "姓名", "学部", "科目", "状态", "基本工资", "岗位工资", "课时津贴", "应发", "个税", "实发", "可计薪课时", "待处理", "异常"];
+  const stageId = String(options.stageId || "").trim();
+  const grade = Number.parseInt(options.grade || "", 10);
+  const search = String(options.search || "").trim().toLowerCase();
+  const details = ensurePayrollDetails(db).filter((detail) => {
+    if (detail.month !== month) return false;
+    const teacher = findTeacher(db, detail.teacherId);
+    if (!teacher) return !stageId && !Number.isFinite(grade) && !search;
+    if (stageId && teacher.stageId !== stageId) return false;
+    if (Number.isFinite(grade) && !teacherGradeValues(db, teacher).includes(grade)) return false;
+    if (!search) return true;
+    return [
+      teacher.id,
+      teacher.employeeNo,
+      teacher.name,
+      teacher.stageName,
+      gradeCoverageText(db, teacher),
+      teacher.primarySubjectName,
+      teacher.phone,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(search);
+  });
+  const headers = ["月份", "工号", "姓名", "学部", "年级", "科目", "状态", "基本工资", "岗位工资", "课时津贴", "应发", "个税", "实发", "可计薪课时", "待处理", "异常"];
   const rows = details.map((detail) => {
     const teacher = findTeacher(db, detail.teacherId);
     const summary = detail.summarySnapshot || {};
@@ -1756,6 +1790,7 @@ export function exportPayrollDetails(db, options = {}) {
       teacher?.employeeNo || detail.teacherId,
       teacher?.name || detail.teacherId,
       teacher?.department || "",
+      teacher ? gradeCoverageText(db, teacher) : "",
       teacher?.primarySubjectName || "",
       detail.status,
       summary.baseSalary || 0,
@@ -1772,7 +1807,7 @@ export function exportPayrollDetails(db, options = {}) {
 
   return {
     month,
-    filename: `teacher-payroll-${month}.csv`,
+    filename: `teacher-payroll-${month}${stageId ? `-${stageId}` : ""}${Number.isFinite(grade) ? `-g${grade}` : ""}.csv`,
     total: rows.length,
     content: [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n"),
   };

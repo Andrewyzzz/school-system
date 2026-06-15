@@ -208,6 +208,7 @@ const initialState = {
   selectedFinanceTeacherId: "T001",
   financeGroupBy: "department",
   selectedNoticeId: "N001",
+  selectedScheduleDate: "2026-06-09",
   selectedSchedulingDivisionId: "elementary",
   selectedSchedulingGradeId: "elementary-g1",
   selectedSchedulingClassId: "P1C01",
@@ -654,11 +655,18 @@ let financeTeacherPage = {
   meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
   page: 1,
   pageSize: 20,
+  stageId: "",
+  grade: "",
   search: "",
   loaded: false,
   loading: false,
   error: "",
 };
+const financeStageCatalog = [
+  { id: "primary", name: "小学部", grades: [1, 2, 3, 4, 5, 6] },
+  { id: "middle", name: "初中部", grades: [7, 8, 9] },
+  { id: "high", name: "高中部", grades: [10, 11, 12] },
+];
 let personnelPage = {
   items: [],
   summary: { total: 0, active: 0, teachers: 0, adminFinance: 0, filtered: 0 },
@@ -1033,7 +1041,7 @@ function normalizeBackendTeacher(teacher) {
     name: teacher.name,
     department: teacher.department || teacher.stageName || "未设置学部",
     subject: teacher.primarySubjectName || "未设置学科",
-    grade: teacher.stageName || teacher.department || "未设置年级",
+    grade: teacher.gradeText || teacher.stageName || teacher.department || "未设置年级",
     position: teacher.title || "任课教师",
     boundDeviceId: "backend-web",
     salaryProfile: {
@@ -1834,9 +1842,137 @@ function backendTeacherDepartment(teacher) {
   return teacher.department || teacher.stageName || "未设置学部";
 }
 
+function financeGradeLabel(grade) {
+  const number = Number(grade);
+  const names = ["", "一", "二", "三", "四", "五", "六"];
+  if (number >= 10) return `高${names[number - 9] || number - 9}`;
+  if (number >= 7) return `初${names[number - 6] || number - 6}`;
+  if (number > 0) return `${names[number] || number}年级`;
+  return "全部年级";
+}
+
+function financeStageOptions(selectedId = "") {
+  return [
+    `<option value="" ${selectedId ? "" : "selected"}>全部学部</option>`,
+    ...financeStageCatalog.map(
+      (stage) => `<option value="${stage.id}" ${stage.id === selectedId ? "selected" : ""}>${stage.name}</option>`,
+    ),
+  ].join("");
+}
+
+function financeGradeOptions(stageId = "", selectedGrade = "") {
+  const stage = financeStageCatalog.find((item) => item.id === stageId);
+  const grades = stage
+    ? stage.grades
+    : financeStageCatalog.flatMap((item) => item.grades);
+  return [
+    `<option value="" ${selectedGrade ? "" : "selected"}>${stage ? "全部年级" : "全部年级"}</option>`,
+    ...grades.map(
+      (grade) => `<option value="${grade}" ${String(grade) === String(selectedGrade) ? "selected" : ""}>${financeGradeLabel(grade)}</option>`,
+    ),
+  ].join("");
+}
+
+function financeFilteredTeacherItems() {
+  if (backendMode() && financeTeacherPage.loaded) return financeTeacherPage.items;
+  return state.teachers.filter((teacher) => {
+    if (financeTeacherPage.stageId) {
+      const stage = financeStageCatalog.find((item) => item.id === financeTeacherPage.stageId);
+      if (stage && backendTeacherDepartment(teacher) !== stage.name) return false;
+    }
+    if (financeTeacherPage.search) {
+      const text = [teacher.id, teacher.name, teacher.department, teacher.subject, teacher.grade].join(" ").toLowerCase();
+      if (!text.includes(financeTeacherPage.search.toLowerCase())) return false;
+    }
+    return true;
+  });
+}
+
+function financeTeacherSelectOptions(selectedId = "") {
+  const teachers = financeFilteredTeacherItems();
+  if (!teachers.length) return `<option value="">当前筛选下无老师</option>`;
+  return teachers
+    .map(
+      (teacher) => `
+        <option value="${teacher.id}" ${teacher.id === selectedId ? "selected" : ""}>
+          ${teacher.name} · ${backendTeacherDepartment(teacher)} · ${financeTeacherPage.grade ? financeGradeLabel(financeTeacherPage.grade) : teacher.gradeText || teacher.grade || "年级未设置"} · ${backendTeacherSubject(teacher)}
+        </option>
+      `,
+    )
+    .join("");
+}
+
+function renderFinanceTeacherFilters(context = "overview") {
+  const map = {
+    overview: {
+      stage: "#financeStageFilter",
+      grade: "#financeGradeFilter",
+      search: "#financeTeacherSearch",
+      pageSize: "#financeTeacherPageSize",
+    },
+    records: {
+      stage: "#financeRecordsStageFilter",
+      grade: "#financeRecordsGradeFilter",
+      search: "#financeRecordsSearch",
+      teacher: "#financeTeacherSelect",
+    },
+    settlement: {
+      stage: "#settlementStageFilter",
+      grade: "#settlementGradeFilter",
+      search: "#settlementTeacherSearch",
+      teacher: "#settlementTeacherSelect",
+    },
+  }[context];
+  if (!map) return;
+
+  const stage = document.querySelector(map.stage);
+  const grade = document.querySelector(map.grade);
+  const search = document.querySelector(map.search);
+  const teacher = map.teacher ? document.querySelector(map.teacher) : null;
+  const pageSize = map.pageSize ? document.querySelector(map.pageSize) : null;
+
+  if (stage) stage.innerHTML = financeStageOptions(financeTeacherPage.stageId);
+  if (grade) grade.innerHTML = financeGradeOptions(financeTeacherPage.stageId, financeTeacherPage.grade);
+  if (search) search.value = financeTeacherPage.search;
+  if (pageSize) pageSize.value = String(financeTeacherPage.pageSize);
+  if (teacher) teacher.innerHTML = financeTeacherSelectOptions(state.selectedFinanceTeacherId);
+}
+
+function financeReadFilterInputs(context = "overview") {
+  const map = {
+    overview: {
+      stage: "#financeStageFilter",
+      grade: "#financeGradeFilter",
+      search: "#financeTeacherSearch",
+      pageSize: "#financeTeacherPageSize",
+    },
+    records: {
+      stage: "#financeRecordsStageFilter",
+      grade: "#financeRecordsGradeFilter",
+      search: "#financeRecordsSearch",
+    },
+    settlement: {
+      stage: "#settlementStageFilter",
+      grade: "#settlementGradeFilter",
+      search: "#settlementTeacherSearch",
+    },
+  }[context];
+  if (!map) return {};
+  const stageId = document.querySelector(map.stage)?.value || "";
+  const grade = stageId ? document.querySelector(map.grade)?.value || "" : "";
+  const search = document.querySelector(map.search)?.value.trim() || "";
+  const pageSizeValue = map.pageSize ? Number.parseInt(document.querySelector(map.pageSize)?.value || "", 10) : financeTeacherPage.pageSize;
+  return {
+    stageId,
+    grade,
+    search,
+    pageSize: Number.isFinite(pageSizeValue) ? pageSizeValue : financeTeacherPage.pageSize,
+  };
+}
+
 function backendFinanceGroupKey(teacher) {
   if (state.financeGroupBy === "subject") return backendTeacherSubject(teacher);
-  if (state.financeGroupBy === "grade") return teacher.stageName || teacher.grade || "未设置年级";
+  if (state.financeGroupBy === "grade") return teacher.gradeText || teacher.grade || "未设置年级";
   return backendTeacherDepartment(teacher);
 }
 
@@ -2164,7 +2300,11 @@ async function batchGenerateBackendPayroll() {
 async function exportBackendPayrollCsv() {
   if (!backendMode() || currentRole() !== "finance") return;
   try {
-    const result = await apiRequest("/api/payroll/export?month=2026-06");
+    const params = new URLSearchParams({ month: "2026-06" });
+    if (financeTeacherPage.stageId) params.set("stageId", financeTeacherPage.stageId);
+    if (financeTeacherPage.grade) params.set("grade", financeTeacherPage.grade);
+    if (financeTeacherPage.search) params.set("search", financeTeacherPage.search);
+    const result = await apiRequest(`/api/payroll/export?${params.toString()}`);
     const blob = new Blob([result.content || ""], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -2285,6 +2425,8 @@ async function loadFinanceTeacherPage(overrides = {}) {
     pageSize: String(financeTeacherPage.pageSize),
     month: "2026-06",
   });
+  if (financeTeacherPage.stageId) params.set("stageId", financeTeacherPage.stageId);
+  if (financeTeacherPage.grade) params.set("grade", financeTeacherPage.grade);
   if (financeTeacherPage.search) params.set("search", financeTeacherPage.search);
 
   try {
@@ -2302,7 +2444,8 @@ async function loadFinanceTeacherPage(overrides = {}) {
     financeTeacherPage.items.forEach(upsertTeacher);
     if (!financeTeacherPage.items.some((teacher) => teacher.id === state.selectedFinanceTeacherId)) {
       resetFinanceTeacherDetailState();
-      state.selectedFinanceTeacherId = financeTeacherPage.items[0]?.id || state.selectedFinanceTeacherId;
+      resetAttendanceRecordState();
+      state.selectedFinanceTeacherId = financeTeacherPage.items[0]?.id || "";
     }
   } catch (error) {
     financeTeacherPage = {
@@ -3688,6 +3831,76 @@ function availableScheduleWeeks(lessons) {
   return weeks;
 }
 
+function minutesFromClock(value = "00:00") {
+  const [hour, minute] = String(value).split(":").map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return 0;
+  return hour * 60 + minute;
+}
+
+function lessonTimeRange(lesson) {
+  const [start = "00:00", end = start] = String(lesson.time || "").split("-");
+  const startMinutes = minutesFromClock(start);
+  const endMinutes = Math.max(minutesFromClock(end), startMinutes + 40);
+  return { start, end, startMinutes, endMinutes };
+}
+
+function scheduleTimelineHtml(dayLessons, selectedDate) {
+  if (!dayLessons.length) {
+    return `<div class="schedule-empty timeline-empty">这一天暂无课程</div>`;
+  }
+
+  const ranges = dayLessons.map(lessonTimeRange);
+  const minStart = Math.min(...ranges.map((range) => range.startMinutes));
+  const maxEnd = Math.max(...ranges.map((range) => range.endMinutes));
+  const dayStart = Math.max(7 * 60, Math.floor(minStart / 60) * 60);
+  const dayEnd = Math.min(21 * 60, Math.ceil(maxEnd / 60) * 60);
+  const totalMinutes = Math.max(dayEnd - dayStart, 60);
+  const tickHours = [];
+  for (let minutes = dayStart; minutes <= dayEnd; minutes += 60) {
+    tickHours.push(minutes);
+  }
+
+  const ticks = tickHours
+    .map((minutes) => {
+      const top = ((minutes - dayStart) / totalMinutes) * 100;
+      return `
+        <div class="schedule-time-tick" style="top: ${top}%">
+          <span>${String(Math.floor(minutes / 60)).padStart(2, "0")}:00</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  const events = dayLessons
+    .map((lesson) => {
+      const range = lessonTimeRange(lesson);
+      const top = ((range.startMinutes - dayStart) / totalMinutes) * 100;
+      const height = Math.max(((range.endMinutes - range.startMinutes) / totalMinutes) * 100, 10);
+      const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
+      return `
+        <article class="schedule-timeline-event ${lesson.status}" style="top: ${top}%; height: ${height}%">
+          <div class="schedule-timeline-time">
+            <strong>${range.start}</strong>
+            <span>${range.end}</span>
+          </div>
+          <div class="schedule-timeline-main">
+            <strong>${lesson.className} · ${lesson.course}</strong>
+            <span>${lesson.room} · ${lessonTypeLabel[lesson.type]}</span>
+          </div>
+          <div class="schedule-timeline-action">${action}</div>
+        </article>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="schedule-day-timeline" aria-label="${formatDate(selectedDate)}日程时间线">
+      <div class="schedule-time-axis">${ticks}</div>
+      <div class="schedule-event-layer">${events}</div>
+    </section>
+  `;
+}
+
 function renderSchedule() {
   const summary = document.querySelector("#scheduleSummary");
   const grid = document.querySelector("#scheduleWeekGrid");
@@ -3705,7 +3918,11 @@ function renderSchedule() {
   }
   const selectedWeek = state.selectedScheduleWeekStart;
   const weekDates = weekDateKeys(selectedWeek);
+  if (!weekDates.includes(state.selectedScheduleDate)) {
+    state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
+  }
   const weekLessons = lessons.filter((lesson) => weekDates.includes(lesson.date));
+  const selectedDayLessons = weekLessons.filter((lesson) => lesson.date === state.selectedScheduleDate);
   const pendingCount = weekLessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
   const completedCount = weekLessons.filter((lesson) => lesson.status === "completed").length;
   const scheduledCount = weekLessons.filter((lesson) => lesson.status === "scheduled").length;
@@ -3755,36 +3972,28 @@ function renderSchedule() {
     .map((date, index) => {
       const dayLessons = grouped.get(date);
       return `
-        <a class="schedule-day-pill ${date === todayKey() ? "today" : ""}" href="#teacher-day-${date}">
+        <button class="schedule-day-pill ${date === todayKey() ? "today" : ""} ${date === state.selectedScheduleDate ? "active" : ""}" data-schedule-date="${date}" type="button">
           <span>${dayNames[index]}</span>
           <strong>${formatDate(date).replace("月", "/").replace("日", "")}</strong>
           <small>${dayLessons.length} 节</small>
-        </a>
+        </button>
       `;
     })
     .join("");
 
-  const agenda = weekDates
-    .map((date, index) => {
-      const dayLessons = grouped.get(date);
-      return `
-        <article class="schedule-column ${date === todayKey() ? "today" : ""}" id="teacher-day-${date}">
-          <header>
-            <span>${dayNames[index]}</span>
-            <strong>${formatDate(date)}</strong>
-            <small>${dayLessons.length ? `${dayLessons.length} 节课` : "无排班"}</small>
-          </header>
-          <div class="schedule-items">
-            ${dayLessons.length ? dayLessons.map(scheduleLessonItem).join("") : `<div class="schedule-empty">暂无课程</div>`}
-          </div>
-        </article>
-      `;
-    })
-    .join("");
+  const selectedIndex = weekDates.indexOf(state.selectedScheduleDate);
+  const selectedDayName = dayNames[selectedIndex] || "";
 
   grid.innerHTML = `
     <nav class="schedule-day-strip" aria-label="本周日期快捷查看">${dayPills}</nav>
-    <div class="schedule-agenda-list">${agenda}</div>
+    <article class="schedule-day-focus ${state.selectedScheduleDate === todayKey() ? "today" : ""}">
+      <header>
+        <span>${selectedDayName}</span>
+        <strong>${formatDate(state.selectedScheduleDate)}</strong>
+        <small>${selectedDayLessons.length ? `${selectedDayLessons.length} 节课` : "无排班"}</small>
+      </header>
+      ${scheduleTimelineHtml(selectedDayLessons, state.selectedScheduleDate)}
+    </article>
   `;
 }
 
@@ -5411,8 +5620,10 @@ function renderFinanceDashboard() {
   const allWarnings = buildWarnings().length;
   const settledCount = state.teachers.filter((teacher) => state.settlements[teacher.id]?.status === "settled").length;
   const totals = financeSalaryTotals();
+  const filteredTeachers = financeFilteredTeacherItems();
 
-  document.querySelector("#financeTeacherCount").textContent = state.teachers.length;
+  renderFinanceTeacherFilters("overview");
+  document.querySelector("#financeTeacherCount").textContent = filteredTeachers.length;
   document.querySelector("#financePendingCount").textContent = allPending;
   document.querySelector("#financeWarningCount").textContent = allWarnings;
   document.querySelector("#financeSettledCount").textContent = settledCount;
@@ -5425,7 +5636,7 @@ function renderFinanceDashboard() {
     financeApiStatus.className = "status-pill";
   }
   if (financePageInfo) {
-    financePageInfo.textContent = `本地演示 · 共 ${state.teachers.length} 位老师`;
+    financePageInfo.textContent = `本地演示 · 共 ${filteredTeachers.length} 位老师`;
   }
   document.querySelector("#financePrevPage").disabled = true;
   document.querySelector("#financeNextPage").disabled = true;
@@ -5450,7 +5661,7 @@ function renderFinanceDashboard() {
     )
     .join("");
 
-  document.querySelector("#financeOverviewTable").innerHTML = state.teachers
+  document.querySelector("#financeOverviewTable").innerHTML = filteredTeachers
     .map((teacher) => {
       const stats = teacherLessonStats(teacher.id);
       const salary = calculateSalary(teacher.id);
@@ -5491,12 +5702,9 @@ function renderBackendFinanceDashboard() {
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
   document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
 
-  const searchInput = document.querySelector("#financeTeacherSearch");
-  const pageSizeSelect = document.querySelector("#financeTeacherPageSize");
+  renderFinanceTeacherFilters("overview");
   const pageInfo = document.querySelector("#financeTeacherPageInfo");
   const status = document.querySelector("#financeApiStatus");
-  if (searchInput) searchInput.value = financeTeacherPage.search;
-  if (pageSizeSelect) pageSizeSelect.value = String(financeTeacherPage.pageSize);
   if (pageInfo) pageInfo.textContent = `第 ${meta.page || 1} / ${meta.totalPages || 1} 页 · 共 ${meta.total || 0} 位老师`;
   if (status) {
     status.textContent = financeTeacherPage.loading
@@ -5561,7 +5769,7 @@ function renderFinanceRecords() {
   }
 
   const select = document.querySelector("#financeTeacherSelect");
-  select.innerHTML = teacherOptions(state.selectedFinanceTeacherId);
+  renderFinanceTeacherFilters("records");
   const teacherId = state.selectedFinanceTeacherId;
   const lessons = teacherLessons(teacherId);
   document.querySelector("#financeRecordTable").innerHTML = lessons.length
@@ -5606,9 +5814,15 @@ function backendFinanceRecordRow(row, teacher) {
 }
 
 function renderBackendFinanceRecords() {
-  const select = document.querySelector("#financeTeacherSelect");
-  select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
+  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
+    loadFinanceTeacherPage();
+  }
+  renderFinanceTeacherFilters("records");
   const teacherId = state.selectedFinanceTeacherId;
+  if (!teacherId) {
+    document.querySelector("#financeRecordTable").innerHTML = `<tr><td colspan="8"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
+    return;
+  }
   ensureBackendAttendanceRecords(teacherId);
 
   const table = document.querySelector("#financeRecordTable");
@@ -5648,7 +5862,7 @@ function renderSettlement() {
   }
 
   const select = document.querySelector("#settlementTeacherSelect");
-  select.innerHTML = teacherOptions(state.selectedFinanceTeacherId);
+  renderFinanceTeacherFilters("settlement");
   const teacherId = state.selectedFinanceTeacherId;
   const salary = calculateSalary(teacherId);
   const settlement = state.settlements[teacherId];
@@ -5681,9 +5895,27 @@ function renderSettlement() {
 }
 
 function renderBackendSettlement() {
-  const select = document.querySelector("#settlementTeacherSelect");
-  select.innerHTML = backendFinanceTeacherOptions(state.selectedFinanceTeacherId);
+  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
+    loadFinanceTeacherPage();
+  }
+  renderFinanceTeacherFilters("settlement");
   const teacherId = state.selectedFinanceTeacherId;
+  if (!teacherId) {
+    document.querySelector("#settlementGrossSalary").textContent = "¥0";
+    document.querySelector("#settlementTaxSalary").textContent = "¥0";
+    document.querySelector("#settlementNetSalary").textContent = "¥0";
+    document.querySelector("#settlementStatus").textContent = "当前筛选无老师";
+    document.querySelector("#settlementStatus").className = "status-pill warning";
+    document.querySelector("#settleTeacherPayroll").disabled = true;
+    document.querySelector("#reviewTeacherPayroll").disabled = true;
+    document.querySelector("#approveAcademicWorkload").disabled = true;
+    document.querySelector("#approveSchoolWorkload").disabled = true;
+    document.querySelector("#batchGeneratePayroll").disabled = currentRole() !== "finance";
+    document.querySelector("#exportPayrollCsv").disabled = currentRole() !== "finance";
+    document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
+    renderPayrollRulesPanel();
+    return;
+  }
   ensureFinanceTeacherDetail(teacherId, { generatePayroll: true });
   if (!payrollRuleState.loaded && !payrollRuleState.loading) {
     loadPayrollRules();
@@ -6695,6 +6927,13 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const scheduleDateButton = event.target.closest("[data-schedule-date]");
+  if (scheduleDateButton) {
+    state.selectedScheduleDate = scheduleDateButton.dataset.scheduleDate;
+    renderSchedule();
+    return;
+  }
+
   const scanButton = event.target.closest("[data-scan]");
   if (scanButton) {
     await attemptSecureAttendance(scanButton.dataset.scan, scanButton.dataset.attendanceAction);
@@ -6930,23 +7169,77 @@ document.querySelectorAll("[data-finance-group]").forEach((button) => {
   });
 });
 
-document.querySelector("#financeTeacherSearchButton").addEventListener("click", () => {
-  financeTeacherPage.search = document.querySelector("#financeTeacherSearch").value.trim();
-  financeTeacherPage.pageSize = Number.parseInt(document.querySelector("#financeTeacherPageSize").value, 10);
-  loadFinanceTeacherPage({ page: 1 });
+async function applyFinanceTeacherFilters(context = "overview", options = {}) {
+  const next = financeReadFilterInputs(context);
+  if (options.resetGrade) next.grade = "";
+  financeTeacherPage = {
+    ...financeTeacherPage,
+    ...next,
+    page: 1,
+    loaded: backendMode() ? financeTeacherPage.loaded : true,
+  };
+  resetAttendanceRecordState();
+  resetFinanceTeacherDetailState();
+
+  if (backendMode()) {
+    await loadFinanceTeacherPage({ page: 1, ...next, grade: options.resetGrade ? "" : next.grade });
+    if (state.activeView === "financeRecords" && state.selectedFinanceTeacherId) {
+      await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
+    }
+    if (state.activeView === "settlement" && state.selectedFinanceTeacherId) {
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
+    }
+    return;
+  }
+
+  const teachers = financeFilteredTeacherItems();
+  state.selectedFinanceTeacherId = teachers.some((teacher) => teacher.id === state.selectedFinanceTeacherId)
+    ? state.selectedFinanceTeacherId
+    : teachers[0]?.id || "";
+  render();
+}
+
+[
+  ["#financeStageFilter", "overview"],
+  ["#financeRecordsStageFilter", "records"],
+  ["#settlementStageFilter", "settlement"],
+].forEach(([selector, context]) => {
+  document.querySelector(selector).addEventListener("change", () => {
+    applyFinanceTeacherFilters(context, { resetGrade: true });
+  });
 });
 
-document.querySelector("#financeTeacherSearch").addEventListener("keydown", (event) => {
-  if (event.key !== "Enter") return;
-  event.preventDefault();
-  financeTeacherPage.search = event.currentTarget.value.trim();
-  financeTeacherPage.pageSize = Number.parseInt(document.querySelector("#financeTeacherPageSize").value, 10);
-  loadFinanceTeacherPage({ page: 1 });
+[
+  ["#financeGradeFilter", "overview"],
+  ["#financeRecordsGradeFilter", "records"],
+  ["#settlementGradeFilter", "settlement"],
+  ["#financeTeacherPageSize", "overview"],
+].forEach(([selector, context]) => {
+  document.querySelector(selector).addEventListener("change", () => {
+    applyFinanceTeacherFilters(context);
+  });
 });
 
-document.querySelector("#financeTeacherPageSize").addEventListener("change", (event) => {
-  financeTeacherPage.pageSize = Number.parseInt(event.target.value, 10);
-  loadFinanceTeacherPage({ page: 1 });
+[
+  ["#financeTeacherSearchButton", "overview"],
+  ["#financeRecordsSearchButton", "records"],
+  ["#settlementTeacherSearchButton", "settlement"],
+].forEach(([selector, context]) => {
+  document.querySelector(selector).addEventListener("click", () => {
+    applyFinanceTeacherFilters(context);
+  });
+});
+
+[
+  ["#financeTeacherSearch", "overview"],
+  ["#financeRecordsSearch", "records"],
+  ["#settlementTeacherSearch", "settlement"],
+].forEach(([selector, context]) => {
+  document.querySelector(selector).addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    applyFinanceTeacherFilters(context);
+  });
 });
 
 document.querySelector("#financePrevPage").addEventListener("click", () => {
@@ -7016,6 +7309,8 @@ document.querySelector("#qrLessonSelect").addEventListener("change", (event) => 
 
 document.querySelector("#scheduleWeekSelect").addEventListener("change", async (event) => {
   state.selectedScheduleWeekStart = event.target.value;
+  const weekDates = weekDateKeys(state.selectedScheduleWeekStart);
+  state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   if (backendMode() && currentRole() === "teacher") {
     await loadBackendTeacherContext(currentTeacherId(), event.target.value);
   }
