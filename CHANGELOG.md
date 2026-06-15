@@ -7,7 +7,7 @@
 - 类型：功能 / 体验优化
 - 影响范围：老师端 / 财务端 / 后端导出
 - 提交：随本次提交
-- 部署：未部署
+- 部署：已部署到生产
 - 验证：
   - `node --check app.js`
   - `node --check server/storage.js`
