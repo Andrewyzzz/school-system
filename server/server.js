@@ -60,6 +60,7 @@ import {
 } from "./storage.js";
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
+const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
 const MIME_TYPES = {
@@ -783,8 +784,9 @@ const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.r
 
 if (isDirectRun) {
   const server = await createServer();
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`School system demo running at http://127.0.0.1:${PORT}/`);
+  server.listen(PORT, HOST, () => {
+    console.log(`School system demo running at http://${HOST}:${PORT}/`);
+    console.log(`Local URL: http://127.0.0.1:${PORT}/`);
     console.log(`API health: http://127.0.0.1:${PORT}/api/health`);
   });
 }
