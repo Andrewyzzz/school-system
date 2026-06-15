@@ -1,0 +1,45 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">教室动态二维码</text>
+    <text class="h1">扫码签入/签出</text>
+    <text class="muted">老师先选择本人课时，再扫描教室电脑实时二维码，后端会校验身份、教室、动态码、时间窗口和重复计薪。</text>
+  </view>
+
+  <view class="card">
+    <text class="card-title">选择课时</text>
+    <picker mode="selector" range="{{lessonLabels}}" value="{{lessonIndex}}" bindchange="onLessonChange">
+      <view class="picker-box">{{lessonLabels[lessonIndex] || "暂无可签到课时"}}</view>
+    </picker>
+    <view wx:if="{{selectedLesson.id}}" class="lesson-box">
+      <text class="item-main">{{selectedLesson.subjectName}} · {{selectedLesson.className}}</text>
+      <text class="item-meta">{{selectedLesson.date}} {{selectedLesson.time}} · {{selectedLesson.room}}</text>
+      <text class="tag {{selectedLesson.statusClass}}">{{selectedLesson.statusText}}</text>
+    </view>
+  </view>
+
+  <view class="card">
+    <text class="card-title">提交考勤</text>
+    <text class="muted">真实扫码会使用手机相机读取教室电脑上的二维码；演示提交会自动向后端获取同教室动态码，用课表允许时间完成测试。</text>
+    <view class="button-row">
+      <button class="primary-button" loading="{{submitting}}" bindtap="scanCode">真实扫码</button>
+      <button class="ghost-button" loading="{{submitting}}" bindtap="submitDemo">演示提交</button>
+    </view>
+  </view>
+
+  <view class="card" wx:if="{{checks.length}}">
+    <text class="card-title">防作弊校验</text>
+    <view class="list">
+      <view class="list-item" wx:for="{{checks}}" wx:key="label">
+        <text class="item-main">{{item.label}}</text>
+        <text class="item-meta">{{item.detail}}</text>
+        <text class="tag {{item.passed ? 'done' : 'error'}}">{{item.passed ? "通过" : "拦截"}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="card">
+    <text class="card-title">教室电脑大屏地址</text>
+    <text class="muted">如果要在电脑上模拟教室实时二维码，请打开对应教室屏幕页。</text>
+    <text class="screen-url">{{screenUrl}}</text>
+  </view>
+</view>

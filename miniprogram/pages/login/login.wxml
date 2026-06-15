@@ -1,0 +1,21 @@
+<view class="page login-page">
+  <view class="login-hero">
+    <text class="eyebrow">富源学校管理系统</text>
+    <text class="h1">老师端小程序 MVP</text>
+    <text class="muted">用于查看课表、扫码签入签出、确认工作量和查看薪资明细。</text>
+  </view>
+
+  <view class="card">
+    <text class="card-title">账号登录</text>
+    <text class="muted">当前 MVP 使用已有老师账号登录，后续正式版会接微信 openid 绑定。</text>
+
+    <text class="field-label">用户名</text>
+    <input class="input" value="{{username}}" bindinput="onUsernameInput" placeholder="teacher0001" />
+
+    <text class="field-label">密码</text>
+    <input class="input" value="{{password}}" password bindinput="onPasswordInput" placeholder="请输入密码" />
+
+    <button class="primary-button" loading="{{loading}}" bindtap="submitLogin">登录</button>
+    <button class="ghost-button quick-login" bindtap="useDemoAccount">使用演示老师账号</button>
+  </view>
+</view>

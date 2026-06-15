@@ -1,0 +1,53 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">任课老师薪资</text>
+    <text class="h1">我的薪资明细</text>
+    <text class="muted">展示固定工资、课时津贴、个税试算和最终实发。</text>
+  </view>
+
+  <view class="card">
+    <view class="grid">
+      <view class="metric">
+        <text class="muted">应发</text>
+        <text class="value">{{grossPay}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">个税</text>
+        <text class="value">{{tax}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">课时津贴</text>
+        <text class="value">{{lessonAmount}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">实发</text>
+        <text class="value">{{netPay}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">加载中...</view>
+  <view wx:elif="{{rows.length}}" class="card">
+    <text class="card-title">薪资项目</text>
+    <view class="list">
+      <view class="list-item" wx:for="{{rows}}" wx:key="label">
+        <text class="item-main">{{item.label}}</text>
+        <text class="item-meta">{{item.basis}}</text>
+        <text class="tag {{item.amount >= 0 ? 'done' : 'warn'}}">{{item.amountText}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{lines.length}}" class="card">
+    <text class="card-title">课时明细</text>
+    <view class="list">
+      <view class="list-item" wx:for="{{lines}}" wx:key="lessonId">
+        <text class="item-main">{{item.date}} · {{item.subjectName}} · {{item.className}}</text>
+        <text class="item-meta">{{item.time}} · {{item.room}} · {{item.statusText}}</text>
+        <text class="tag {{item.statusClass}}">{{item.amountText}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{!loading && !rows.length && !lines.length}}" class="card empty">暂无薪资明细。</view>
+</view>

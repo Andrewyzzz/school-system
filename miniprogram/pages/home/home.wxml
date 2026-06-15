@@ -1,0 +1,68 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">老师端</text>
+    <text class="h1">{{teacher.name || account.name}}</text>
+    <text class="muted">{{teacher.department}} · {{teacher.grade}} · {{teacher.subject}}</text>
+  </view>
+
+  <view class="card">
+    <text class="card-title">本月工作概览</text>
+    <view class="grid">
+      <view class="metric">
+        <text class="muted">计划课时</text>
+        <text class="value">{{summary.plannedUnits || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">可计薪课时</text>
+        <text class="value">{{summary.payableUnits || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">待处理</text>
+        <text class="value">{{summary.pendingCount || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">预计实发</text>
+        <text class="value small-value">{{netPay}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="nav-grid">
+    <view class="nav-card" bindtap="goSchedule">
+      <text class="item-main">我的课表</text>
+      <text class="item-meta">按自然周查看排课</text>
+    </view>
+    <view class="nav-card" bindtap="goScanner">
+      <text class="item-main">扫码签到</text>
+      <text class="item-meta">扫教室动态二维码</text>
+    </view>
+    <view class="nav-card" bindtap="goRecords">
+      <text class="item-main">考勤记录</text>
+      <text class="item-meta">查看签入签出结果</text>
+    </view>
+    <view class="nav-card" bindtap="goPayroll">
+      <text class="item-main">薪资明细</text>
+      <text class="item-meta">查看本月薪资试算</text>
+    </view>
+    <view class="nav-card" bindtap="goWorkload">
+      <text class="item-main">工作量确认</text>
+      <text class="item-meta">确认月度课时</text>
+    </view>
+    <view class="nav-card" bindtap="goNotifications">
+      <text class="item-main">通知中心</text>
+      <text class="item-meta">{{notifications.length}} 条最新通知</text>
+    </view>
+  </view>
+
+  <view class="card" wx:if="{{notifications.length}}">
+    <text class="card-title">最新通知</text>
+    <view class="list">
+      <view class="list-item" wx:for="{{notifications}}" wx:key="id">
+        <text class="item-main">{{item.title}}</text>
+        <text class="item-meta">{{item.createdAt}}</text>
+      </view>
+    </view>
+  </view>
+
+  <button class="danger-button" bindtap="logout">退出登录</button>
+</view>

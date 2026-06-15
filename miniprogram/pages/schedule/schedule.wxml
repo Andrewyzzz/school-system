@@ -1,0 +1,29 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">自然周课表</text>
+    <text class="h1">我的课表</text>
+    <text class="muted">显示行政端发布到当前老师名下的正式课表。</text>
+  </view>
+
+  <view class="card">
+    <text class="card-title">选择周次</text>
+    <picker mode="selector" range="{{weekLabels}}" value="{{weekIndex}}" bindchange="onWeekChange">
+      <view class="picker-box">{{weekLabels[weekIndex] || "暂无可选周次"}}</view>
+    </picker>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">加载中...</view>
+  <view wx:elif="{{groups.length}}" class="list">
+    <view class="card day-card" wx:for="{{groups}}" wx:key="date">
+      <text class="card-title">{{item.label}}</text>
+      <view class="list">
+        <view class="list-item" wx:for="{{item.lessons}}" wx:key="id" wx:for-item="lesson">
+          <text class="item-main">第 {{lesson.period}} 节 · {{lesson.subjectName}}</text>
+          <text class="item-meta">{{lesson.time}} · {{lesson.className}} · {{lesson.room}}</text>
+          <text class="tag {{lesson.statusClass}}">{{lesson.statusText}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+  <view wx:else class="card empty">暂无课表，请确认行政端已发布排课。</view>
+</view>

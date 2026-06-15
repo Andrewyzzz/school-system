@@ -1,0 +1,25 @@
+{
+  "pages": [
+    "pages/login/login",
+    "pages/home/home",
+    "pages/schedule/schedule",
+    "pages/scanner/scanner",
+    "pages/records/records",
+    "pages/payroll/payroll",
+    "pages/workload/workload",
+    "pages/notifications/notifications"
+  ],
+  "window": {
+    "navigationBarTitleText": "富源学校教师端",
+    "navigationBarBackgroundColor": "#0f766e",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f5f7f8",
+    "backgroundTextStyle": "dark"
+  },
+  "permission": {
+    "scope.camera": {
+      "desc": "用于扫描教室动态二维码完成课程签入和签出"
+    }
+  },
+  "sitemapLocation": "sitemap.json"
+}

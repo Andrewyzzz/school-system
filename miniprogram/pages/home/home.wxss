@@ -1,0 +1,7 @@
+.small-value {
+  font-size: 34rpx;
+}
+
+.danger-button {
+  margin-top: 28rpx;
+}

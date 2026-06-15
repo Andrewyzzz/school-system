@@ -1,0 +1,18 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">消息</text>
+    <text class="h1">通知中心</text>
+    <text class="muted">查看行政、财务和系统发送给老师的通知。</text>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">加载中...</view>
+  <view wx:elif="{{items.length}}" class="list">
+    <view class="list-item" wx:for="{{items}}" wx:key="id" bindtap="markRead" data-id="{{item.id}}">
+      <text class="item-main">{{item.title}}</text>
+      <text class="item-meta">{{item.source}} · {{item.createdAt}}</text>
+      <text class="item-meta">{{item.text}}</text>
+      <text class="tag {{item.read ? 'done' : 'warn'}}">{{item.read ? "已读" : "未读"}}</text>
+    </view>
+  </view>
+  <view wx:else class="card empty">暂无通知。</view>
+</view>

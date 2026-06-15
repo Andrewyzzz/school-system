@@ -1,0 +1,39 @@
+<view class="page">
+  <view class="page-title">
+    <text class="eyebrow">签入签出</text>
+    <text class="h1">考勤记录</text>
+    <text class="muted">展示本人课程扫码记录、通过/拦截原因和异常结果。</text>
+  </view>
+
+  <view class="card">
+    <view class="grid">
+      <view class="metric">
+        <text class="muted">总记录</text>
+        <text class="value">{{summary.total || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">通过</text>
+        <text class="value">{{summary.acceptedCount || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">拦截</text>
+        <text class="value">{{summary.rejectedCount || 0}}</text>
+      </view>
+      <view class="metric">
+        <text class="muted">异常</text>
+        <text class="value">{{summary.exceptionCount || 0}}</text>
+      </view>
+    </view>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">加载中...</view>
+  <view wx:elif="{{records.length}}" class="list">
+    <view class="list-item" wx:for="{{records}}" wx:key="id">
+      <text class="item-main">{{item.actionLabel}} · {{item.statusText}}</text>
+      <text class="item-meta">{{item.date}} {{item.time}} · {{item.className}} · {{item.subjectName}} · {{item.room}}</text>
+      <text class="item-meta">{{item.resultText}}</text>
+      <text class="tag {{item.statusClass}}">{{item.statusText}}</text>
+    </view>
+  </view>
+  <view wx:else class="card empty">暂无考勤记录。</view>
+</view>

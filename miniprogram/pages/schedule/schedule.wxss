@@ -1,0 +1,12 @@
+.picker-box {
+  min-height: 78rpx;
+  box-sizing: border-box;
+  padding: 20rpx 22rpx;
+  border: 1rpx solid #d7e2e5;
+  border-radius: 14rpx;
+  color: #0f766e;
+}
+
+.day-card {
+  margin-bottom: 18rpx;
+}

@@ -1,0 +1,13 @@
+{
+  "appid": "touristappid",
+  "projectname": "school-system-teacher-mvp",
+  "miniprogramRoot": "./",
+  "compileType": "miniprogram",
+  "setting": {
+    "urlCheck": true,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true
+  }
+}
