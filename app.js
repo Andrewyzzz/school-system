@@ -3647,6 +3647,8 @@ function renderShell() {
   const role = account.role;
   const teacher = role === "teacher" ? teacherById(account.teacherId) : null;
 
+  document.body.dataset.activeView = state.activeView;
+  document.body.dataset.accountRole = role;
   document.querySelector("#viewTitle").textContent = views[state.activeView].title;
   document.querySelector("#accountRoleSide").textContent = account.title;
   document.querySelector("#teacherNameSide").textContent = account.name;
@@ -3849,36 +3851,12 @@ function scheduleTimelineHtml(dayLessons, selectedDate) {
     return `<div class="schedule-empty timeline-empty">这一天暂无课程</div>`;
   }
 
-  const ranges = dayLessons.map(lessonTimeRange);
-  const minStart = Math.min(...ranges.map((range) => range.startMinutes));
-  const maxEnd = Math.max(...ranges.map((range) => range.endMinutes));
-  const dayStart = Math.max(7 * 60, Math.floor(minStart / 60) * 60);
-  const dayEnd = Math.min(21 * 60, Math.ceil(maxEnd / 60) * 60);
-  const totalMinutes = Math.max(dayEnd - dayStart, 60);
-  const tickHours = [];
-  for (let minutes = dayStart; minutes <= dayEnd; minutes += 60) {
-    tickHours.push(minutes);
-  }
-
-  const ticks = tickHours
-    .map((minutes) => {
-      const top = ((minutes - dayStart) / totalMinutes) * 100;
-      return `
-        <div class="schedule-time-tick" style="top: ${top}%">
-          <span>${String(Math.floor(minutes / 60)).padStart(2, "0")}:00</span>
-        </div>
-      `;
-    })
-    .join("");
-
   const events = dayLessons
     .map((lesson) => {
       const range = lessonTimeRange(lesson);
-      const top = ((range.startMinutes - dayStart) / totalMinutes) * 100;
-      const height = Math.max(((range.endMinutes - range.startMinutes) / totalMinutes) * 100, 10);
       const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
       return `
-        <article class="schedule-timeline-event ${lesson.status}" style="top: ${top}%; height: ${height}%">
+        <article class="schedule-timeline-event ${lesson.status}">
           <div class="schedule-timeline-time">
             <strong>${range.start}</strong>
             <span>${range.end}</span>
@@ -3895,8 +3873,7 @@ function scheduleTimelineHtml(dayLessons, selectedDate) {
 
   return `
     <section class="schedule-day-timeline" aria-label="${formatDate(selectedDate)}日程时间线">
-      <div class="schedule-time-axis">${ticks}</div>
-      <div class="schedule-event-layer">${events}</div>
+      ${events}
     </section>
   `;
 }

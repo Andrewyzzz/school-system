@@ -1461,12 +1461,12 @@ h2 {
 }
 
 .schedule-day-focus > header {
-  min-height: 72px;
-  padding: 12px 14px;
+  min-height: 58px;
+  padding: 10px 12px;
   background: var(--surface-soft);
   border-bottom: 1px solid var(--line);
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 
 .schedule-day-focus.today > header {
@@ -1481,73 +1481,73 @@ h2 {
 
 .schedule-day-timeline {
   position: relative;
-  min-height: 620px;
   display: grid;
-  grid-template-columns: 70px minmax(0, 1fr);
-  background:
-    linear-gradient(90deg, var(--surface-soft) 0 70px, transparent 70px),
-    var(--surface);
+  gap: 6px;
+  padding: 8px;
+  background: var(--surface);
 }
 
-.schedule-time-axis,
-.schedule-event-layer {
-  position: relative;
-  min-height: 620px;
-}
-
-.schedule-time-axis {
-  border-right: 1px solid var(--line);
-}
-
-.schedule-time-tick {
+.schedule-day-timeline::before {
+  content: "";
   position: absolute;
-  left: 0;
-  right: 0;
-  border-top: 1px solid rgba(196, 197, 213, 0.72);
-}
-
-.schedule-time-tick span {
-  position: absolute;
-  top: -10px;
-  left: 10px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.schedule-event-layer {
-  background-image: linear-gradient(to bottom, rgba(196, 197, 213, 0.55) 1px, transparent 1px);
-  background-size: 100% 62px;
+  top: 18px;
+  bottom: 18px;
+  left: 82px;
+  width: 2px;
+  background: rgba(0, 32, 104, 0.16);
 }
 
 .schedule-timeline-event {
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  min-height: 74px;
+  position: relative;
+  min-height: 58px;
   border: 1px solid rgba(0, 32, 104, 0.16);
   border-left: 5px solid var(--primary);
   border-radius: 8px;
   background: #fff;
   box-shadow: var(--shadow);
-  padding: 10px 12px;
+  padding: 8px 10px 8px 12px;
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: start;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
   overflow: hidden;
+}
+
+.schedule-timeline-event::before {
+  content: "";
+  position: absolute;
+  left: 61px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--primary);
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%);
 }
 
 .schedule-timeline-event.completed {
   border-left-color: #1e7c58;
 }
 
+.schedule-timeline-event.completed::before {
+  border-color: #1e7c58;
+}
+
 .schedule-timeline-event.exception {
   border-left-color: var(--action);
 }
 
+.schedule-timeline-event.exception::before {
+  border-color: var(--action);
+}
+
 .schedule-timeline-event.checkedIn {
   border-left-color: var(--amber);
+}
+
+.schedule-timeline-event.checkedIn::before {
+  border-color: var(--amber);
 }
 
 .schedule-timeline-time strong,
@@ -1559,19 +1559,24 @@ h2 {
 
 .schedule-timeline-time strong {
   color: var(--primary);
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .schedule-timeline-time span,
 .schedule-timeline-main span {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .schedule-timeline-main {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
+  padding-left: 4px;
+}
+
+.schedule-timeline-main strong {
+  font-size: 15px;
 }
 
 .schedule-timeline-main strong,
@@ -1582,6 +1587,12 @@ h2 {
 .schedule-timeline-action {
   display: flex;
   justify-content: flex-end;
+}
+
+.schedule-timeline-action .tag {
+  min-height: 22px;
+  padding: 0 7px;
+  white-space: nowrap;
 }
 
 .timeline-empty {
@@ -2809,10 +2820,22 @@ td {
     padding: 96px 16px 10px;
   }
 
+  body[data-account-role="teacher"][data-active-view="schedule"] .main {
+    padding-top: 84px;
+  }
+
   .topbar {
     display: grid;
     gap: 12px;
     margin-bottom: 16px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] .topbar {
+    margin-bottom: 8px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] .top-actions {
+    display: none;
   }
 
   .eyebrow {
@@ -2857,23 +2880,73 @@ td {
 
   .schedule-summary {
     grid-template-columns: repeat(5, minmax(86px, 1fr));
-    gap: 8px;
+    gap: 6px;
     overflow-x: auto;
     padding-bottom: 2px;
   }
 
   .schedule-stat {
-    min-height: 78px;
-    padding: 10px;
+    min-height: 64px;
+    padding: 8px 9px;
   }
 
   .schedule-stat strong {
-    font-size: 22px;
+    font-size: 20px;
   }
 
   .schedule-stat span,
   .schedule-stat small {
     font-size: 12px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .panel {
+    padding: 12px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .panel-heading {
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .panel-heading p {
+    display: none;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-panel {
+    gap: 8px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-toolbar {
+    display: grid;
+    gap: 0;
+    padding: 8px 10px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-toolbar > div {
+    display: none;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .week-select-label .lesson-select {
+    min-height: 38px;
+    margin-top: 4px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-summary {
+    grid-template-columns: repeat(5, minmax(68px, 1fr));
+    gap: 4px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-stat {
+    min-height: 46px;
+    padding: 6px 7px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-stat strong {
+    font-size: 17px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-stat small {
+    display: none;
   }
 
   .notice-item {
@@ -2970,6 +3043,21 @@ td {
     min-width: 72px;
   }
 
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .teacher-week-grid .schedule-day-strip {
+    grid-auto-columns: minmax(60px, 1fr);
+    gap: 6px;
+    padding-bottom: 6px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .teacher-week-grid .schedule-day-pill {
+    min-width: 60px;
+    padding: 7px 6px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .teacher-week-grid .schedule-day-pill strong {
+    font-size: 15px;
+  }
+
   .teacher-week-grid .schedule-agenda-list {
     grid-template-columns: 1fr;
     overflow: visible;
@@ -3029,44 +3117,58 @@ td {
     border-left: 4px solid var(--primary);
   }
 
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-day-focus > header {
+    min-height: 44px;
+    padding: 7px 10px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-day-focus > header span {
+    display: none;
+  }
+
   .schedule-day-focus.today > header {
     border-left-color: var(--action);
   }
 
   .schedule-day-timeline {
-    min-height: 540px;
-    grid-template-columns: 58px minmax(0, 1fr);
-    background:
-      linear-gradient(90deg, var(--surface-soft) 0 58px, transparent 58px),
-      var(--surface);
+    gap: 6px;
+    padding: 8px;
   }
 
-  .schedule-time-axis,
-  .schedule-event-layer {
-    min-height: 540px;
-  }
-
-  .schedule-time-tick span {
-    left: 6px;
-    font-size: 11px;
+  .schedule-day-timeline::before {
+    left: 70px;
+    top: 18px;
+    bottom: 18px;
   }
 
   .schedule-timeline-event {
-    left: 8px;
-    right: 8px;
-    min-height: 82px;
-    grid-template-columns: 62px minmax(0, 1fr);
-    gap: 8px;
-    padding: 9px;
+    min-height: 56px;
+    grid-template-columns: 54px minmax(0, 1fr) auto;
+    gap: 7px;
+    padding: 7px 8px 7px 9px;
+  }
+
+  .schedule-timeline-event::before {
+    left: 53px;
   }
 
   .schedule-timeline-action {
-    grid-column: 2;
-    justify-content: flex-start;
+    grid-column: auto;
+    justify-content: flex-end;
   }
 
   .schedule-timeline-time strong {
-    font-size: 16px;
+    font-size: 15px;
+  }
+
+  .schedule-timeline-main strong {
+    font-size: 14px;
+  }
+
+  .schedule-timeline-action .tag {
+    min-height: 20px;
+    padding: 0 6px;
+    font-size: 11px;
   }
 
   .mail-notice {
