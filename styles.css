@@ -28,11 +28,14 @@
 
 html {
   min-width: 320px;
+  max-width: 100%;
 }
 
 body {
   margin: 0;
   min-height: 100vh;
+  max-width: 100%;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--ink);
   font-family:
@@ -56,12 +59,19 @@ button {
 
 input {
   width: 100%;
+  max-width: 100%;
   min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: #fff;
   color: var(--ink);
   padding: 0 12px;
+}
+
+button,
+select,
+textarea {
+  max-width: 100%;
 }
 
 input:focus,
@@ -1377,6 +1387,52 @@ h2 {
   padding-bottom: 4px;
 }
 
+.schedule-week-grid.teacher-week-grid {
+  grid-template-columns: 1fr;
+  overflow: visible;
+  padding-bottom: 0;
+}
+
+.teacher-week-grid .schedule-day-strip {
+  display: none;
+}
+
+.teacher-week-grid .schedule-agenda-list {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(160px, 1fr));
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.schedule-day-pill {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  text-decoration: none;
+  padding: 10px;
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+
+.schedule-day-pill span,
+.schedule-day-pill small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-day-pill strong {
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.schedule-day-pill.today {
+  border-color: rgba(188, 0, 12, 0.34);
+  background: var(--action-soft);
+}
+
 .schedule-column {
   min-width: 160px;
   border: 1px solid var(--line);
@@ -1657,6 +1713,94 @@ h2 {
 .salary-total strong {
   font-size: 25px;
   line-height: 1.1;
+}
+
+.teacher-total-preview {
+  grid-template-columns: 1fr;
+}
+
+.teacher-total-preview div {
+  min-height: 112px;
+  border-left: 5px solid var(--action);
+  background:
+    linear-gradient(135deg, rgba(233, 6, 20, 0.08), transparent 44%),
+    var(--surface-soft);
+}
+
+.teacher-total-preview strong,
+.teacher-pay-hero strong,
+.teacher-pay-strip strong {
+  color: var(--primary);
+  font-size: 34px;
+}
+
+.teacher-total-preview small,
+.teacher-pay-hero small,
+.teacher-pay-strip small {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.teacher-pay-strip {
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--action);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.teacher-pay-strip span {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.teacher-pay-hero div {
+  min-height: 140px;
+  border-left: 5px solid var(--action);
+  background:
+    linear-gradient(135deg, rgba(0, 32, 104, 0.08), transparent 48%),
+    var(--surface-soft);
+}
+
+.salary-summary-actions {
+  margin-top: 14px;
+}
+
+.salary-support-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.salary-support-grid article {
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+  display: grid;
+  align-content: space-between;
+  gap: 6px;
+}
+
+.salary-support-grid span,
+.salary-support-grid small {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.salary-support-grid strong {
+  color: var(--primary);
+  font-size: 22px;
+  line-height: 1.2;
 }
 
 .progress-block {
@@ -2533,7 +2677,7 @@ td {
 
   .top-actions #resetDemo,
   .top-actions #topLogoutButton {
-    grid-column: 1 / -1;
+    grid-column: auto;
   }
 
   .primary-button,
@@ -2547,9 +2691,29 @@ td {
     gap: 12px;
   }
 
-  .notice-list,
-  .schedule-summary {
+  .notice-list {
     grid-template-columns: 1fr;
+  }
+
+  .schedule-summary {
+    grid-template-columns: repeat(5, minmax(86px, 1fr));
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .schedule-stat {
+    min-height: 78px;
+    padding: 10px;
+  }
+
+  .schedule-stat strong {
+    font-size: 22px;
+  }
+
+  .schedule-stat span,
+  .schedule-stat small {
+    font-size: 12px;
   }
 
   .notice-item {
@@ -2623,6 +2787,81 @@ td {
 
   .schedule-week-grid {
     grid-template-columns: repeat(7, 180px);
+  }
+
+  .schedule-week-grid.teacher-week-grid {
+    grid-template-columns: 1fr;
+    overflow: visible;
+    gap: 12px;
+  }
+
+  .teacher-week-grid .schedule-day-strip {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(72px, 1fr);
+    gap: 8px;
+    overflow-x: auto;
+    padding: 2px 2px 8px;
+    scroll-snap-type: x proximity;
+  }
+
+  .teacher-week-grid .schedule-day-pill {
+    scroll-snap-align: start;
+    min-width: 72px;
+  }
+
+  .teacher-week-grid .schedule-agenda-list {
+    grid-template-columns: 1fr;
+    overflow: visible;
+    padding-bottom: 0;
+    gap: 14px;
+  }
+
+  .teacher-week-grid .schedule-column {
+    min-width: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+  }
+
+  .teacher-week-grid .schedule-column header {
+    min-height: auto;
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    background: var(--surface);
+  }
+
+  .teacher-week-grid .schedule-column.today header {
+    border-left-color: var(--action);
+    background: var(--action-soft);
+  }
+
+  .teacher-week-grid .schedule-column .schedule-items {
+    padding: 8px 0 0;
+    gap: 10px;
+  }
+
+  .teacher-week-grid .schedule-column .schedule-item {
+    grid-template-columns: 76px minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+  }
+
+  .teacher-week-grid .schedule-column .schedule-time {
+    display: grid;
+    gap: 2px;
+  }
+
+  .teacher-week-grid .schedule-column .schedule-main {
+    gap: 6px;
+  }
+
+  .teacher-week-grid .schedule-column .schedule-action {
+    grid-column: 2;
   }
 
   .mail-notice {
@@ -2757,6 +2996,21 @@ td {
   .salary-total {
     grid-template-columns: 1fr;
     padding: 0 16px 16px;
+  }
+
+  .teacher-pay-strip {
+    display: grid;
+    align-items: start;
+  }
+
+  .teacher-pay-strip .status-pill {
+    justify-self: start;
+  }
+
+  .teacher-total-preview strong,
+  .teacher-pay-hero strong,
+  .teacher-pay-strip strong {
+    font-size: 31px;
   }
 
   .generated-qr {

@@ -219,21 +219,18 @@
               </div>
             </section>
 
-            <section class="panel" aria-labelledby="salaryPreviewTitle">
+            <section class="panel salary-summary-panel" aria-labelledby="salaryPreviewTitle">
               <div class="panel-heading">
                 <div>
-                  <h2 id="salaryPreviewTitle">本月薪资试算</h2>
-                  <p>课时变化后自动刷新，可在月度确认后锁定。</p>
+                  <h2 id="salaryPreviewTitle">本月总薪资</h2>
+                  <p>老师端只展示最终汇总，逐项核算由财务端留存。</p>
                 </div>
               </div>
-              <div class="pay-preview">
+              <div class="pay-preview teacher-total-preview">
                 <div>
-                  <span>预计应发</span>
-                  <strong id="grossPreview">¥0</strong>
-                </div>
-                <div>
-                  <span>预计实发</span>
+                  <span>当前总薪资</span>
                   <strong id="netPreview">¥0</strong>
+                  <small id="dashboardPayrollStatus">月度确认后锁定</small>
                 </div>
               </div>
               <div class="progress-block">
@@ -299,7 +296,6 @@
                     <th>课程</th>
                     <th>教室</th>
                     <th>课时类型</th>
-                    <th>津贴</th>
                     <th>状态</th>
                     <th>操作</th>
                   </tr>
@@ -331,7 +327,7 @@
               </label>
             </div>
             <div class="schedule-summary" id="scheduleSummary"></div>
-            <div class="schedule-week-grid" id="scheduleWeekGrid"></div>
+            <div class="schedule-week-grid teacher-week-grid" id="scheduleWeekGrid"></div>
           </section>
         </section>
 
@@ -1000,6 +996,14 @@
                   <p>老师先确认课时，之后进入教务和总校审批，审批完成后工资锁定。</p>
                 </div>
               </div>
+              <div class="teacher-pay-strip">
+                <div>
+                  <span>本月总薪资</span>
+                  <strong id="confirmPayrollNet">¥0</strong>
+                  <small id="confirmPayrollNote">明细仅财务端可见</small>
+                </div>
+                <span class="status-pill" id="confirmPayrollStatus">读取中</span>
+              </div>
               <div class="confirm-steps" id="confirmSteps"></div>
               <div class="action-row">
                 <button class="primary-button" id="confirmWorkload" type="button">
@@ -1025,22 +1029,44 @@
         </section>
 
         <section class="view" id="teacherPayrollView" aria-labelledby="teacherPayrollTitle">
-          <section class="panel table-panel">
+          <section class="panel salary-summary-panel">
             <div class="panel-heading">
               <div>
                 <h2 id="teacherPayrollTitle">我的总薪资</h2>
-                <p>老师端仅展示本人月度总薪资，不展示逐课时金额和薪资拆分。</p>
+                <p>这里只展示本人月度总薪资，详细核算由财务端留存。</p>
               </div>
               <span class="status-pill" id="teacherPayrollStatus">读取中</span>
             </div>
-            <div class="salary-total">
+            <div class="salary-total teacher-pay-hero">
               <div>
                 <span>本月总薪资</span>
                 <strong id="teacherPayrollNet">¥0</strong>
+                <small>月度确认和审批完成后锁定</small>
               </div>
             </div>
+            <div class="salary-support-grid" id="teacherPayrollSupportGrid">
+              <article>
+                <span>可计工作量</span>
+                <strong id="teacherPayrollPayableUnits">0 节</strong>
+                <small>已完成签入签出</small>
+              </article>
+              <article>
+                <span>待处理考勤</span>
+                <strong id="teacherPayrollPendingUnits">0 节</strong>
+                <small>未完成不进入结算</small>
+              </article>
+              <article>
+                <span>确认状态</span>
+                <strong id="teacherPayrollConfirmState">待确认</strong>
+                <small>月度工作量流程</small>
+              </article>
+            </div>
             <div class="empty-state" id="teacherPayrollSummaryNote">
-              财务端保留明细核算，老师端只展示最终汇总。
+              老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。
+            </div>
+            <div class="action-row salary-summary-actions">
+              <button class="primary-button" data-view-jump="confirm" type="button">查看月度确认</button>
+              <button class="ghost-button" data-view-jump="records" type="button">查看考勤记录</button>
             </div>
           </section>
         </section>

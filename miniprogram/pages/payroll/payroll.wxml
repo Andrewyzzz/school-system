@@ -2,7 +2,7 @@
   <view class="page-title">
     <text class="eyebrow">任课老师薪资</text>
     <text class="h1">我的总薪资</text>
-    <text class="muted">老师端仅展示本人月度总薪资，逐课时金额和薪资拆分由财务端核算留存。</text>
+    <text class="muted">老师端仅展示本人月度总薪资，逐课时核算和薪资拆分由财务端留存。</text>
   </view>
 
   <view class="card">
@@ -17,6 +17,6 @@
   <view wx:if="{{loading}}" class="empty">加载中...</view>
   <view wx:else class="card">
     <text class="card-title">展示口径</text>
-    <text class="muted">当前页面只展示月度薪资汇总。逐节课、逐薪资项目的核算明细仅在财务端查看。</text>
+    <text class="muted">当前页面只展示月度薪资汇总。逐节课和薪资项目的核算仅在财务端查看。</text>
   </view>
 </view>

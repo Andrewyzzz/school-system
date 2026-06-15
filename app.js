@@ -761,7 +761,7 @@ const views = {
   },
   teacherPayroll: {
     role: "teacher",
-    title: "我的总薪资",
+    title: "薪资汇总",
     el: document.querySelector("#teacherPayrollView"),
   },
   finance: {
@@ -2008,7 +2008,7 @@ async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month =
     };
   }
 
-  if (state.activeView === "teacherPayroll") render();
+  if (["dashboard", "confirm", "teacherPayroll"].includes(state.activeView)) render();
 }
 
 function ensureBackendTeacherPayroll(teacherId, month = "2026-06") {
@@ -3425,7 +3425,7 @@ function buildWarnings(teacherId = null) {
       level: "中",
       teacherId: pendingTeacherId,
       title: `${teacherName(pendingTeacherId)} 有 ${count} 节课未完成考勤`,
-      text: "未完成签入和签出的项目当前不会计入课时津贴，财务结算时会自动剔除。",
+      text: "未完成签入和签出的项目当前不会计入月度工作量，财务结算时会自动剔除。",
     });
   });
 
@@ -3617,8 +3617,11 @@ function renderDashboard() {
   document.querySelector("#completedLessons").textContent = completedUnits;
   document.querySelector("#pendingLessons").textContent = pendingLessons.length;
   document.querySelector("#warningCount").textContent = warnings.length;
-  document.querySelector("#grossPreview").textContent = formatCurrency(salary.gross);
   document.querySelector("#netPreview").textContent = formatCurrency(salary.net);
+  const dashboardPayrollStatus = document.querySelector("#dashboardPayrollStatus");
+  if (dashboardPayrollStatus) {
+    dashboardPayrollStatus.textContent = settlementText(teacherId);
+  }
   document.querySelector("#confirmStatusText").textContent = confirmationText(teacherId);
   document.querySelector("#confirmProgressBar").style.width = `${25 + (state.confirmationStages[teacherId] || 0) * 25}%`;
 
@@ -3645,7 +3648,7 @@ function renderDashboard() {
         <div class="detail-cell"><span>上课时间</span>${formatDate(nextLesson.date)} ${nextLesson.time}</div>
         <div class="detail-cell"><span>教室</span>${nextLesson.room}</div>
         <div class="detail-cell"><span>课时类型</span>${lessonTypeLabel[nextLesson.type]}</div>
-        <div class="detail-cell"><span>计薪口径</span>${allowanceText(nextLesson)}</div>
+        <div class="detail-cell"><span>签到要求</span>课前签入 · 课后签出</div>
       </div>
     `;
     scanButton.disabled = false;
@@ -3675,7 +3678,7 @@ function renderTasks() {
 
   document.querySelector("#taskTable").innerHTML = lessons.length
     ? lessons.map(fullTaskRow).join("")
-    : `<tr><td colspan="9"><div class="empty-state">当前筛选条件下没有课时任务</div></td></tr>`;
+    : `<tr><td colspan="8"><div class="empty-state">当前筛选条件下没有课时任务</div></td></tr>`;
 }
 
 function availableScheduleWeeks(lessons) {
@@ -3748,12 +3751,24 @@ function renderSchedule() {
   });
 
   const dayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-  grid.innerHTML = weekDates
-    .map(
-      (date, index) => {
-        const dayLessons = grouped.get(date);
-        return `
-        <article class="schedule-column ${date === todayKey() ? "today" : ""}">
+  const dayPills = weekDates
+    .map((date, index) => {
+      const dayLessons = grouped.get(date);
+      return `
+        <a class="schedule-day-pill ${date === todayKey() ? "today" : ""}" href="#teacher-day-${date}">
+          <span>${dayNames[index]}</span>
+          <strong>${formatDate(date).replace("月", "/").replace("日", "")}</strong>
+          <small>${dayLessons.length} 节</small>
+        </a>
+      `;
+    })
+    .join("");
+
+  const agenda = weekDates
+    .map((date, index) => {
+      const dayLessons = grouped.get(date);
+      return `
+        <article class="schedule-column ${date === todayKey() ? "today" : ""}" id="teacher-day-${date}">
           <header>
             <span>${dayNames[index]}</span>
             <strong>${formatDate(date)}</strong>
@@ -3764,9 +3779,13 @@ function renderSchedule() {
           </div>
         </article>
       `;
-      },
-    )
+    })
     .join("");
+
+  grid.innerHTML = `
+    <nav class="schedule-day-strip" aria-label="本周日期快捷查看">${dayPills}</nav>
+    <div class="schedule-agenda-list">${agenda}</div>
+  `;
 }
 
 function renderAdminScheduling() {
@@ -5192,9 +5211,9 @@ function renderConfirmation() {
   ).length;
 
   document.querySelector("#workloadList").innerHTML = [
-    ["正常课时", `${salary.regularUnits} 节`, "按每节 80 元计入课时津贴"],
-    ["早晚自习", `${salary.selfStudyUnits} 节`, "按每节 50 元计入补贴"],
-    ["周末补课", `${salary.weekendUnits} 节`, "按每节 120 元计入补贴"],
+    ["正常课时", `${salary.regularUnits} 节`, "签入签出完成后计入月度工作量"],
+    ["早晚自习", `${salary.selfStudyUnits} 节`, "签入签出完成后计入月度工作量"],
+    ["周末补课", `${salary.weekendUnits} 节`, "签入签出完成后计入月度工作量"],
     ["审批加班", `${salary.profile.approvedOvertimeHours || 0} 小时`, "由主管发起并审批通过"],
     ["待处理考勤", `${pendingCount} 节`, "未完成签入和签出，暂不计入工资"],
     ["异常记录", `${exceptionCount} 条`, "待教务复核后处理"],
@@ -5279,45 +5298,104 @@ function renderBackendConfirmation() {
   document.querySelector("#simulateApproval").disabled = true;
 }
 
-function renderTeacherPayroll() {
+function setTeacherPayrollSupport(teacherId) {
+  const lessons = teacherLessons(teacherId);
+  const payableUnits = lessons
+    .filter((lesson) => lesson.status === "completed")
+    .reduce((sum, lesson) => sum + (lesson.units || 0), 0);
+  const pendingCount = lessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
+  const stage = state.confirmationStages[teacherId] || 0;
+  const supportValues = [
+    ["#teacherPayrollPayableUnits", `${payableUnits} 节`],
+    ["#teacherPayrollPendingUnits", `${pendingCount} 节`],
+    ["#teacherPayrollConfirmState", confirmationText(teacherId)],
+  ];
+
+  supportValues.forEach(([selector, value]) => {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  });
+
+  const grid = document.querySelector("#teacherPayrollSupportGrid");
+  if (grid) {
+    grid.dataset.confirmationStage = String(stage);
+  }
+}
+
+function setTeacherPayrollWidgets({ amountText, statusText, statusClass = "status-pill", noteText, summaryText }) {
+  ["#teacherPayrollNet", "#confirmPayrollNet", "#netPreview"].forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = amountText;
+  });
+
+  ["#teacherPayrollStatus", "#confirmPayrollStatus"].forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (element) {
+      element.textContent = statusText;
+      element.className = statusClass;
+    }
+  });
+
+  const dashboardStatus = document.querySelector("#dashboardPayrollStatus");
+  if (dashboardStatus) dashboardStatus.textContent = statusText;
+
+  const confirmNote = document.querySelector("#confirmPayrollNote");
+  if (confirmNote && noteText) confirmNote.textContent = noteText;
+
   const summaryNote = document.querySelector("#teacherPayrollSummaryNote");
-  if (!summaryNote) return;
+  if (summaryNote && summaryText) summaryNote.textContent = summaryText;
+}
+
+function renderTeacherPayroll() {
   const teacherId = currentRole() === "teacher" ? currentTeacherId() : "";
+  setTeacherPayrollSupport(teacherId);
 
   if (backendMode() && currentRole() === "teacher") {
     ensureBackendTeacherPayroll(teacherId);
     const isCurrent = teacherPayrollState.teacherId === teacherId;
     const payroll = isCurrent ? teacherPayrollState.data : null;
-    const status = document.querySelector("#teacherPayrollStatus");
 
     if (teacherPayrollState.loading && (!isCurrent || !teacherPayrollState.loaded)) {
-      document.querySelector("#teacherPayrollNet").textContent = "读取中";
-      status.textContent = "正在读取后端总薪资";
-      status.className = "status-pill";
-      summaryNote.textContent = "正在读取本人月度总薪资...";
+      setTeacherPayrollWidgets({
+        amountText: "读取中",
+        statusText: "正在读取后端总薪资",
+        statusClass: "status-pill",
+        noteText: "正在读取本人月度总薪资",
+        summaryText: "正在读取本人月度总薪资...",
+      });
       return;
     }
 
     if (teacherPayrollState.error && isCurrent) {
-      document.querySelector("#teacherPayrollNet").textContent = "¥0";
-      status.textContent = teacherPayrollState.error;
-      status.className = "status-pill warning";
-      summaryNote.textContent = teacherPayrollState.error;
+      setTeacherPayrollWidgets({
+        amountText: "¥0",
+        statusText: teacherPayrollState.error,
+        statusClass: "status-pill warning",
+        noteText: "总薪资读取失败",
+        summaryText: teacherPayrollState.error,
+      });
       return;
     }
 
-    document.querySelector("#teacherPayrollNet").textContent = formatCurrency(payroll?.netPay || 0);
-    status.textContent = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
-    status.className = payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done";
-    summaryNote.textContent = "财务端保留逐课时与薪资项目核算明细，老师端只展示月度总薪资。";
+    const payrollStatus = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
+    setTeacherPayrollWidgets({
+      amountText: formatCurrency(payroll?.netPay || 0),
+      statusText: payrollStatus,
+      statusClass: payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done",
+      noteText: "明细仅财务端可见",
+      summaryText: "老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。",
+    });
     return;
   }
 
   const salary = calculateSalary(teacherId);
-  document.querySelector("#teacherPayrollNet").textContent = formatCurrency(salary.net);
-  document.querySelector("#teacherPayrollStatus").textContent = settlementText(teacherId);
-  document.querySelector("#teacherPayrollStatus").className = "status-pill";
-  summaryNote.textContent = "财务端保留逐课时与薪资项目核算明细，老师端只展示月度总薪资。";
+  setTeacherPayrollWidgets({
+    amountText: formatCurrency(salary.net),
+    statusText: settlementText(teacherId),
+    statusClass: "status-pill",
+    noteText: "明细仅财务端可见",
+    summaryText: "老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。",
+  });
 }
 
 function renderFinanceDashboard() {
@@ -5836,7 +5914,7 @@ function scheduleLessonItem(lesson) {
       </div>
       <div class="schedule-main">
         <strong>${lesson.className} · ${lesson.course}</strong>
-        <span>${lesson.room} · ${lessonTypeLabel[lesson.type]} · ${allowanceText(lesson)}</span>
+        <span>${lesson.room} · ${lessonTypeLabel[lesson.type]}</span>
       </div>
       <div class="schedule-action">${action}</div>
     </div>
@@ -5866,7 +5944,6 @@ function fullTaskRow(lesson) {
       <td data-label="课程">${lesson.course}</td>
       <td data-label="教室">${lesson.room}</td>
       <td data-label="课时类型">${lessonTypeLabel[lesson.type]}</td>
-      <td data-label="津贴">${allowanceText(lesson)}</td>
       <td data-label="状态">${statusTag(lesson.status)}</td>
       <td data-label="操作">${actionCell(lesson)}</td>
     </tr>
