@@ -179,12 +179,25 @@ function clearScheduleDraftForScope(db, division, grade) {
   );
 }
 
-function assignmentTeachers(db, division, grade, subjectId) {
+function teacherIdsForAssignment(assignment, classId = "") {
+  if (!assignment) return [];
+  if (classId && Array.isArray(assignment.classTeacherIds?.[classId]) && assignment.classTeacherIds[classId].length) {
+    return Array.from(new Set(assignment.classTeacherIds[classId].map(String)));
+  }
+  const classTeacherIds =
+    assignment.classTeacherIds && typeof assignment.classTeacherIds === "object"
+      ? Object.values(assignment.classTeacherIds).flat()
+      : [];
+  return Array.from(new Set([...(assignment.teacherIds || []), ...classTeacherIds].map(String).filter(Boolean)));
+}
+
+function assignmentTeachers(db, division, grade, subjectId, classId = "") {
   const assignment = (db.teacherAssignments || []).find(
     (item) => item.stageId === division.stageId && item.grade === grade.grade && item.subjectId === subjectId,
   );
-  if (!assignment?.teacherIds?.length) return [];
-  return assignment.teacherIds
+  const teacherIds = teacherIdsForAssignment(assignment, classId);
+  if (!teacherIds.length) return [];
+  return teacherIds
     .map((teacherId) => db.teachers.find((teacher) => teacher.id === teacherId))
     .filter((teacher) => teacher?.status === "active");
 }
@@ -368,9 +381,32 @@ function schedulingSubjects(db, division, grade) {
     .filter((rule) => rule.enabled && rule.weeklyLessons > 0)
     .map((rule) => {
       const subject = subjectById(db, rule.subjectId);
+      const assignment = (db.teacherAssignments || []).find(
+        (item) =>
+          item.stageId === division.stageId &&
+          Number(item.grade) === Number(grade.grade) &&
+          item.subjectId === rule.subjectId,
+      );
       const configuredTeachers = assignmentTeachers(db, division, grade, rule.subjectId);
       const availableTeachers = activeSubjectTeachers(db, division.stageId, rule.subjectId);
-      const teachers = configuredTeachers.length ? configuredTeachers : availableTeachers.slice(0, 5);
+      const teachers = configuredTeachers;
+      const classTeacherIds = {};
+      db.classes
+        .filter(
+          (schoolClass) =>
+            schoolClass.stageId === division.stageId &&
+            Number(schoolClass.grade) === Number(grade.grade) &&
+            schoolClass.active,
+        )
+        .forEach((schoolClass, index) => {
+          const configuredIds = teacherIdsForAssignment(assignment, schoolClass.id);
+          classTeacherIds[schoolClass.id] = configuredIds.length
+            ? configuredIds
+            : teachers.length
+              ? [teachers[index % teachers.length].id]
+              : [];
+        });
+      const teacherIds = Array.from(new Set(Object.values(classTeacherIds).flat()));
       return subject
         ? {
             id: subject.id,
@@ -381,7 +417,8 @@ function schedulingSubjects(db, division, grade) {
             allowConsecutive: rule.allowConsecutive,
             forbiddenPeriods: rule.forbiddenPeriods || [],
             preferredDayPart: rule.preferredDayPart,
-            teacherIds: teachers.map((teacher) => teacher.id),
+            teacherIds,
+            classTeacherIds,
             availableTeachers: availableTeachers.map(publicSchedulingTeacher),
           }
         : null;
@@ -848,6 +885,30 @@ export function requiredScheduleLessonCount(config) {
   return config.classes.length * weeklyPerClass;
 }
 
+function missingTeacherAssignmentCells(config) {
+  return (config.classes || []).flatMap((schoolClass) =>
+    (config.subjects || [])
+      .filter((subject) => !Array.isArray(subject.classTeacherIds?.[schoolClass.id]) || !subject.classTeacherIds[schoolClass.id].length)
+      .map((subject) => ({
+        className: schoolClass.name,
+        subjectName: subject.name,
+      })),
+  );
+}
+
+function assertTeacherAssignmentsComplete(config) {
+  const missingCells = missingTeacherAssignmentCells(config);
+  if (!missingCells.length) return;
+  const preview = missingCells
+    .slice(0, 4)
+    .map((item) => `${item.className} ${item.subjectName}`)
+    .join("、");
+  const error = new Error(`请先补齐任课老师配置：${preview}${missingCells.length > 4 ? " 等" : ""}`);
+  error.statusCode = 400;
+  error.details = { missingTeacherAssignments: missingCells };
+  throw error;
+}
+
 function buildSubjectQueueFromCounters(config, classIndex, counters) {
   const targetCount = Array.from(counters.values()).reduce((sum, count) => sum + Math.max(count, 0), 0);
   const queue = [];
@@ -888,8 +949,11 @@ function teacherName(config, teacherId) {
   return config.teachers.find((teacher) => teacher.id === teacherId)?.name || teacherId;
 }
 
-function teacherCanTeachSubject(config, teacherId, subjectId) {
+function teacherCanTeachSubject(config, teacherId, subjectId, classId = "") {
   const subject = config.subjects.find((item) => item.id === subjectId);
+  if (classId && subject?.classTeacherIds?.[classId]?.length) {
+    return subject.classTeacherIds[classId].includes(teacherId);
+  }
   return Boolean(subject?.teacherIds.includes(teacherId));
 }
 
@@ -1393,6 +1457,9 @@ function buildScheduleTasks(config, lockedAssignments = []) {
     config.subjects.forEach((subject, subjectIndex) => {
       const countKey = `${schoolClass.id}:${subject.id}`;
       const remaining = Math.max(Number(subject.weeklyLessons || 0) - (existingCounts.get(countKey) || 0), 0);
+      const taskTeacherIds = Array.isArray(subject.classTeacherIds?.[schoolClass.id]) && subject.classTeacherIds[schoolClass.id].length
+        ? subject.classTeacherIds[schoolClass.id]
+        : subject.teacherIds || [];
       for (let index = 0; index < remaining; index += 1) {
         const lessonNumber = (existingCounts.get(countKey) || 0) + 1;
         const nextId = nextAssignmentId(usedIds, schoolClass.id, subject.id, lessonNumber);
@@ -1408,9 +1475,9 @@ function buildScheduleTasks(config, lockedAssignments = []) {
           subjectName: subject.name,
           subjectIndex,
           subject,
-          teacherIds: subject.teacherIds || [],
+          teacherIds: taskTeacherIds,
           durationMinutes: subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
-          difficulty: 80 - Math.min((subject.teacherIds || []).length, 12) * 5 + Number(subject.weeklyLessons || 0) * 3,
+          difficulty: 80 - Math.min(taskTeacherIds.length, 12) * 5 + Number(subject.weeklyLessons || 0) * 3,
         });
       }
     });
@@ -1619,7 +1686,7 @@ function buildScheduleDiagnostics(config, options = {}) {
       diagnostics.push({
         severity: "error",
         title: `${subject.name} 没有可排老师`,
-        text: "请先在教师池里至少选择 1 位任课老师，否则该科目无法生成排课。",
+        text: "请先为当前年级各班配置该科目的任课老师，否则该科目无法生成排课。",
       });
       return;
     }
@@ -1631,8 +1698,8 @@ function buildScheduleDiagnostics(config, options = {}) {
     if (weeklyCapacity > 0 && demand > weeklyCapacity) {
       diagnostics.push({
         severity: "warning",
-        title: `${subject.name} 老师池容量偏紧`,
-        text: `本年级需要 ${demand} 节，当前老师池按每日上限估算最多 ${weeklyCapacity} 节，建议增加老师或放宽课量上限。`,
+        title: `${subject.name} 任课老师容量偏紧`,
+        text: `本年级需要 ${demand} 节，当前任课老师按每日上限估算最多 ${weeklyCapacity} 节，建议调整任课配置或放宽课量上限。`,
       });
     }
   });
@@ -1645,7 +1712,7 @@ function buildScheduleDiagnostics(config, options = {}) {
     diagnostics.push({
       severity: "error",
       title: `${task.className} ${task.subjectName} 没有可用候选`,
-      text: "当前老师池、老师不可用时间、教室/班级占用或课程硬约束共同作用后，没有任何可排时段。",
+      text: "当前任课老师、老师不可用时间、教室/班级占用或课程硬约束共同作用后，没有任何可排时段。",
     });
   });
 
@@ -1653,7 +1720,7 @@ function buildScheduleDiagnostics(config, options = {}) {
     diagnostics.push({
       severity: "ok",
       title: "排课准备度正常",
-      text: "老师池、硬约束和全校老师时间线具备可行候选，若仍然求解失败，优先检查锁定课过多或软约束过紧。",
+      text: "任课配置、硬约束和全校老师时间线具备可行候选，若仍然求解失败，优先检查锁定课过多或软约束过紧。",
     });
   }
 
@@ -2134,6 +2201,7 @@ export function findScheduleDraft(db, options = {}) {
 export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertTeacherAssignmentsComplete(config);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   const solution = generateScheduleSolution(config, { externalAssignments });
   const assignments = solution.assignments;
@@ -2345,7 +2413,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
     error.statusCode = 409;
     throw error;
   }
-  if (!teacherCanTeachSubject(config, next.teacherId, lesson.subjectId)) {
+  if (!teacherCanTeachSubject(config, next.teacherId, lesson.subjectId, lesson.classId)) {
     const error = new Error("目标老师不属于该科目的可排老师");
     error.statusCode = 400;
     throw error;
@@ -2634,7 +2702,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   }
 
   const nextTeacherId = String(options.teacherId || assignment.teacherId);
-  if (!teacherCanTeachSubject(config, nextTeacherId, assignment.subjectId)) {
+  if (!teacherCanTeachSubject(config, nextTeacherId, assignment.subjectId, assignment.classId)) {
     const error = new Error("选择的老师不属于该科目的可排老师");
     error.statusCode = 400;
     throw error;
@@ -2818,6 +2886,7 @@ export function setScheduleAssignmentLock(db, options = {}, actorAccount = null)
 export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertTeacherAssignmentsComplete(config);
   const draft = findScheduleDraft(db, options);
 
   if (!draft) {

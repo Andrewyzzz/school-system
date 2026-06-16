@@ -1238,6 +1238,130 @@ h2 {
   gap: 8px;
 }
 
+.teacher-assignment-matrix-card {
+  background: #fff;
+}
+
+.teacher-assignment-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.teacher-assignment-matrix {
+  width: 100%;
+  min-width: 920px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.teacher-assignment-matrix th,
+.teacher-assignment-matrix td {
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+  text-align: left;
+  vertical-align: top;
+  background: #fff;
+}
+
+.teacher-assignment-matrix tr:last-child th,
+.teacher-assignment-matrix tr:last-child td {
+  border-bottom: 0;
+}
+
+.teacher-assignment-matrix th:last-child,
+.teacher-assignment-matrix td:last-child {
+  border-right: 0;
+}
+
+.teacher-assignment-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f7faf9;
+}
+
+.teacher-assignment-matrix thead th:first-child,
+.teacher-assignment-matrix tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  min-width: 150px;
+  background: #fbfcfd;
+}
+
+.teacher-assignment-matrix thead th:first-child {
+  z-index: 4;
+}
+
+.teacher-assignment-matrix th strong,
+.teacher-assignment-matrix th span {
+  display: block;
+}
+
+.teacher-assignment-matrix th span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.teacher-assignment-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 150px;
+}
+
+.teacher-assignment-input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 10px;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.teacher-assignment-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(0, 32, 104, 0.08);
+}
+
+.teacher-assignment-input.matched {
+  border-color: rgba(27, 122, 79, 0.42);
+  background: #f4fbf7;
+}
+
+.teacher-assignment-input.missing {
+  border-style: dashed;
+}
+
+.teacher-assignment-input.invalid {
+  border-color: rgba(190, 18, 60, 0.48);
+  background: #fff6f7;
+}
+
+.teacher-assignment-state {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.teacher-assignment-state.matched {
+  color: #176b46;
+}
+
+.teacher-assignment-state.invalid {
+  color: #be123c;
+}
+
+.teacher-pool-summary-warning {
+  color: #9a3412 !important;
+}
+
 .conflict-panel {
   margin-bottom: 16px;
 }
@@ -1597,6 +1721,216 @@ h2 {
 
 .timeline-empty {
   margin: 12px;
+}
+
+.weekly-calendar {
+  --time-gutter: 64px;
+  --day-column-width: 148px;
+  --hour-height: 72px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.weekly-calendar-scroller {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+
+.weekly-calendar-grid {
+  display: grid;
+  grid-template-rows: 74px calc(var(--calendar-hours) * var(--hour-height));
+  width: max-content;
+  min-width: 100%;
+  background: var(--surface);
+}
+
+.weekly-calendar-timezone,
+.weekly-calendar-time-rail {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+}
+
+.weekly-calendar-timezone {
+  min-height: 74px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.weekly-calendar-day-heading {
+  min-height: 74px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  padding: 10px 8px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 1px;
+  text-align: center;
+  scroll-snap-align: start;
+}
+
+.weekly-calendar-day-heading span,
+.weekly-calendar-day-heading small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.weekly-calendar-day-heading strong {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.weekly-calendar-day-heading.today {
+  background: var(--action-soft);
+}
+
+.weekly-calendar-day-heading.active {
+  color: var(--primary);
+}
+
+.weekly-calendar-day-heading.active span,
+.weekly-calendar-day-heading.active small {
+  color: var(--primary);
+}
+
+.weekly-calendar-time-rail {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+}
+
+.weekly-calendar-time-rail span {
+  position: absolute;
+  right: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  transform: translateY(-50%);
+}
+
+.weekly-calendar-time-rail span:first-child {
+  transform: translateY(8px);
+}
+
+.weekly-calendar-day-column {
+  position: relative;
+  min-height: calc(var(--calendar-hours) * var(--hour-height));
+  border-right: 1px solid var(--line);
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--hour-height) - 1px),
+      rgba(0, 32, 104, 0.1) calc(var(--hour-height) - 1px),
+      rgba(0, 32, 104, 0.1) var(--hour-height)
+    );
+}
+
+.weekly-calendar-day-column.today {
+  background:
+    linear-gradient(rgba(188, 0, 12, 0.035), rgba(188, 0, 12, 0.035)),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(var(--hour-height) - 1px),
+      rgba(0, 32, 104, 0.1) calc(var(--hour-height) - 1px),
+      rgba(0, 32, 104, 0.1) var(--hour-height)
+    );
+}
+
+.weekly-calendar-event {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  min-height: 46px;
+  border: 1px solid rgba(0, 32, 104, 0.16);
+  border-left: 4px solid var(--primary);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 18px rgba(0, 32, 104, 0.09);
+  padding: 7px 8px;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.weekly-calendar-event.completed {
+  border-left-color: #1e7c58;
+}
+
+.weekly-calendar-event.exception {
+  border-left-color: var(--action);
+}
+
+.weekly-calendar-event.checkedIn {
+  border-left-color: var(--amber);
+}
+
+.weekly-calendar-event-time,
+.weekly-calendar-event span,
+.weekly-calendar-event small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.weekly-calendar-event strong {
+  font-size: 13px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weekly-calendar-event span,
+.weekly-calendar-event small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weekly-calendar-event-action {
+  margin-top: 2px;
+  display: flex;
+  justify-content: flex-start;
+}
+
+.weekly-calendar-event-action .tag,
+.weekly-calendar-event-action .mini-button {
+  min-height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.weekly-calendar-empty {
+  position: absolute;
+  top: 14px;
+  left: 8px;
+  right: 8px;
+  min-height: 42px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.76);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
 }
 
 .schedule-column {
@@ -2932,8 +3266,7 @@ td {
   }
 
   body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-summary {
-    grid-template-columns: repeat(5, minmax(68px, 1fr));
-    gap: 4px;
+    display: none;
   }
 
   body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-stat {
@@ -2947,6 +3280,91 @@ td {
 
   body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-stat small {
     display: none;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar {
+    --time-gutter: 46px;
+    --day-column-width: calc((100vw - 126px) / 3);
+    --hour-height: 112px;
+    margin-left: -4px;
+    margin-right: -4px;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-scroller {
+    scroll-snap-type: none;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-grid {
+    grid-template-rows: 68px calc(var(--calendar-hours) * var(--hour-height));
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-timezone,
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-day-heading {
+    min-height: 68px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-day-heading {
+    padding: 8px 4px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-day-heading strong {
+    font-size: 24px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-time-rail span {
+    right: 5px;
+    font-size: 11px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-time-rail span:first-child {
+    transform: translateY(10px);
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event {
+    left: 4px;
+    right: 4px;
+    min-height: 72px;
+    padding: 6px;
+    gap: 2px;
+    align-content: start;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event small {
+    display: none;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event-time {
+    display: block;
+    color: var(--primary);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.15;
+    white-space: nowrap;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event strong {
+    font-size: 12px;
+    line-height: 1.15;
+    white-space: normal;
+    display: block;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event span {
+    font-size: 10px;
+    line-height: 1.15;
+    white-space: normal;
+    display: block;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event-action .tag,
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .weekly-calendar-event-action .mini-button {
+    min-height: 17px;
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 17px;
   }
 
   .notice-item {
@@ -3008,6 +3426,28 @@ td {
   .teacher-pool-summary-row {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .teacher-assignment-scroll {
+    width: 100%;
+  }
+
+  .teacher-assignment-matrix {
+    min-width: 760px;
+  }
+
+  .teacher-assignment-matrix th,
+  .teacher-assignment-matrix td {
+    padding: 8px;
+  }
+
+  .teacher-assignment-matrix thead th:first-child,
+  .teacher-assignment-matrix tbody th {
+    min-width: 120px;
+  }
+
+  .teacher-assignment-cell {
+    min-width: 132px;
   }
 
   .schedule-toolbar {

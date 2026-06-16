@@ -3022,7 +3022,7 @@ function scheduleWeekdayLabel(date) {
 function teacherOptionsForAssignment(assignment) {
   if (!assignment) return [];
   const subject = state.schedulingConfig.subjects.find((item) => item.id === assignment.subjectId);
-  return (subject?.teacherIds || []).map((teacherId) => ({
+  return subjectClassTeacherIds(subject, assignment.classId).map((teacherId) => ({
     id: teacherId,
     name: schedulingTeacherName(teacherId),
   }));
@@ -3846,6 +3846,123 @@ function lessonTimeRange(lesson) {
   return { start, end, startMinutes, endMinutes };
 }
 
+function scheduleCalendarBounds(lessons) {
+  let startHour = 8;
+  let endHour = 18;
+
+  lessons.forEach((lesson) => {
+    const range = lessonTimeRange(lesson);
+    startHour = Math.min(startHour, Math.floor(range.startMinutes / 60));
+    endHour = Math.max(endHour, Math.ceil(range.endMinutes / 60));
+  });
+
+  return {
+    startHour,
+    endHour: Math.max(endHour, startHour + 1),
+  };
+}
+
+function scheduleHourLabels(startHour, endHour) {
+  return Array.from({ length: endHour - startHour + 1 }, (_, index) => {
+    const hour = startHour + index;
+    const offset = ((hour - startHour) / (endHour - startHour)) * 100;
+    return `<span style="top: ${offset}%">${String(hour).padStart(2, "0")}:00</span>`;
+  }).join("");
+}
+
+function scheduleDateMeta(dateKey, index) {
+  const dayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const [, month, day] = dateKey.split("-");
+  return {
+    dayName: dayNames[index] || "",
+    month: Number(month),
+    day: Number(day),
+  };
+}
+
+function scheduleCalendarEventHtml(lesson, bounds) {
+  const range = lessonTimeRange(lesson);
+  const totalMinutes = (bounds.endHour - bounds.startHour) * 60;
+  const top = ((range.startMinutes - bounds.startHour * 60) / totalMinutes) * 100;
+  const height = ((range.endMinutes - range.startMinutes) / totalMinutes) * 100;
+  const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
+
+  return `
+    <article class="weekly-calendar-event ${lesson.status}" style="top: ${top}%; height: ${height}%">
+      <div class="weekly-calendar-event-time">${range.start}-${range.end}</div>
+      <strong>${lesson.course}</strong>
+      <span>${lesson.className}</span>
+      <small>${lesson.room} · ${lessonTypeLabel[lesson.type]}</small>
+      <div class="weekly-calendar-event-action">${action}</div>
+    </article>
+  `;
+}
+
+function scheduleWeeklyCalendarHtml(weekDates, grouped, selectedDate, weekLessons) {
+  const bounds = scheduleCalendarBounds(weekLessons);
+  const dayHeaders = weekDates
+    .map((date, index) => {
+      const meta = scheduleDateMeta(date, index);
+      const count = grouped.get(date)?.length || 0;
+      return `
+        <button
+          class="weekly-calendar-day-heading ${date === todayKey() ? "today" : ""} ${date === selectedDate ? "active" : ""}"
+          data-schedule-date="${date}"
+          style="grid-column: ${index + 2}; grid-row: 1"
+          type="button"
+        >
+          <span>${meta.dayName}</span>
+          <strong>${meta.day}</strong>
+          <small>${count ? `${count} 节` : `${meta.month}月`}</small>
+        </button>
+      `;
+    })
+    .join("");
+
+  const dayColumns = weekDates
+    .map((date, index) => {
+      const dayLessons = (grouped.get(date) || []).sort((a, b) => lessonTimeRange(a).startMinutes - lessonTimeRange(b).startMinutes);
+      const events = dayLessons.map((lesson) => scheduleCalendarEventHtml(lesson, bounds)).join("");
+      return `
+        <section
+          class="weekly-calendar-day-column ${date === todayKey() ? "today" : ""} ${date === selectedDate ? "active" : ""}"
+          style="grid-column: ${index + 2}; grid-row: 2"
+          aria-label="${formatDate(date)}日程"
+        >
+          ${events || `<div class="weekly-calendar-empty">无排班</div>`}
+        </section>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="weekly-calendar" aria-label="本周日程表">
+      <div class="weekly-calendar-scroller" data-weekly-calendar-scroller>
+        <div
+          class="weekly-calendar-grid"
+          style="grid-template-columns: var(--time-gutter) repeat(${weekDates.length}, var(--day-column-width)); --calendar-hours: ${bounds.endHour - bounds.startHour}"
+        >
+          <div class="weekly-calendar-timezone" style="grid-column: 1; grid-row: 1">GMT+8</div>
+          ${dayHeaders}
+          <div class="weekly-calendar-time-rail" style="grid-column: 1; grid-row: 2">
+            ${scheduleHourLabels(bounds.startHour, bounds.endHour)}
+          </div>
+          ${dayColumns}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function focusWeeklyCalendarDate(grid, selectedIndex) {
+  const scroller = grid.querySelector("[data-weekly-calendar-scroller]");
+  if (!scroller || selectedIndex < 0) return;
+
+  requestAnimationFrame(() => {
+    scroller.scrollLeft = 0;
+  });
+}
+
 function scheduleTimelineHtml(dayLessons, selectedDate) {
   if (!dayLessons.length) {
     return `<div class="schedule-empty timeline-empty">这一天暂无课程</div>`;
@@ -3899,7 +4016,6 @@ function renderSchedule() {
     state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   }
   const weekLessons = lessons.filter((lesson) => weekDates.includes(lesson.date));
-  const selectedDayLessons = weekLessons.filter((lesson) => lesson.date === state.selectedScheduleDate);
   const pendingCount = weekLessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
   const completedCount = weekLessons.filter((lesson) => lesson.status === "completed").length;
   const scheduledCount = weekLessons.filter((lesson) => lesson.status === "scheduled").length;
@@ -3944,34 +4060,12 @@ function renderSchedule() {
     grouped.get(lesson.date).push(lesson);
   });
 
-  const dayNames = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-  const dayPills = weekDates
-    .map((date, index) => {
-      const dayLessons = grouped.get(date);
-      return `
-        <button class="schedule-day-pill ${date === todayKey() ? "today" : ""} ${date === state.selectedScheduleDate ? "active" : ""}" data-schedule-date="${date}" type="button">
-          <span>${dayNames[index]}</span>
-          <strong>${formatDate(date).replace("月", "/").replace("日", "")}</strong>
-          <small>${dayLessons.length} 节</small>
-        </button>
-      `;
-    })
-    .join("");
-
   const selectedIndex = weekDates.indexOf(state.selectedScheduleDate);
-  const selectedDayName = dayNames[selectedIndex] || "";
 
   grid.innerHTML = `
-    <nav class="schedule-day-strip" aria-label="本周日期快捷查看">${dayPills}</nav>
-    <article class="schedule-day-focus ${state.selectedScheduleDate === todayKey() ? "today" : ""}">
-      <header>
-        <span>${selectedDayName}</span>
-        <strong>${formatDate(state.selectedScheduleDate)}</strong>
-        <small>${selectedDayLessons.length ? `${selectedDayLessons.length} 节课` : "无排班"}</small>
-      </header>
-      ${scheduleTimelineHtml(selectedDayLessons, state.selectedScheduleDate)}
-    </article>
+    ${scheduleWeeklyCalendarHtml(weekDates, grouped, state.selectedScheduleDate, weekLessons)}
   `;
+  focusWeeklyCalendarDate(grid, selectedIndex);
 }
 
 function renderAdminScheduling() {
@@ -4051,7 +4145,7 @@ function renderAdminScheduling() {
       .map((subject) => subject.name)
       .join("、")} ${config.subjects.length} 门课。`;
   document.querySelector("#subjectConfigHelp").textContent =
-    `${config.divisionName}${config.gradeName}每门课配置多位老师，系统按老师空闲时段、课量和全校时间线自动均衡。`;
+    `${config.divisionName}${config.gradeName}按班级逐科指定老师，输入老师姓名、工号或编号完成匹配后再生成排课。`;
   document.querySelector("#courseRulesHelp").textContent =
     `${config.divisionName}${config.gradeName}可配置开设课程、周课时和每节时长，保存后重新生成排课时生效。`;
   document.querySelector("#courseRulesStatus").textContent =
@@ -4070,10 +4164,9 @@ function renderAdminScheduling() {
   document.querySelector("#constraintPeriodSelect").innerHTML = scheduleConstraintPeriodOptions(config);
   document.querySelector("#scheduleConstraintList").innerHTML = adminScheduleConstraintList(config);
   document.querySelector("#selectedTeacherPoolSummary").innerHTML = adminSelectedTeacherPoolSummary(config);
-  document.querySelector("#subjectConfigList").innerHTML = config.subjects
-    .map(adminSubjectConfigItem)
-    .join("");
+  document.querySelector("#subjectConfigList").innerHTML = adminSubjectConfigItem(config);
   renderTeacherRulePanel(config);
+  const missingTeacherAssignments = missingClassSubjectTeacherAssignments(config);
   document.querySelector("#conflictList").innerHTML =
     assignments.length === 0
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
@@ -4093,7 +4186,7 @@ function renderAdminScheduling() {
   renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
-  document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading;
+  document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0;
   document.querySelector("#confirmSchedule").disabled =
     schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
   document.querySelector("#saveCourseRules").disabled = schedulingBackendState.loading;
@@ -4102,6 +4195,9 @@ function renderAdminScheduling() {
   document.querySelector("#addScheduleConstraint").disabled =
     schedulingBackendState.loading || !(config.courseRules || []).some((rule) => rule.enabled);
   document.querySelector("#saveTeacherRule").disabled = schedulingBackendState.loading || !(config.teachers || []).length;
+  document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
+    button.disabled = schedulingBackendState.loading;
+  });
 }
 
 function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
@@ -4246,7 +4342,7 @@ function renderTeacherRulePanel(config) {
           `,
         )
         .join("")
-    : `<option value="">请先配置教师池</option>`;
+    : `<option value="">请先配置任课老师</option>`;
   unavailablePeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不新增" });
   avoidPeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不设置" });
   preferPeriodSelect.innerHTML = schedulePeriodOptions(config, { emptyLabel: "不设置" });
@@ -4696,16 +4792,22 @@ function renderPersonnelList() {
 }
 
 function subjectTeacherPool(subject) {
+  const configuredIds = [
+    ...(subject.teacherIds || []),
+    ...Object.values(subject.classTeacherIds || {})
+      .flat()
+      .map(String),
+  ];
   const pool = subject.availableTeachers?.length
     ? subject.availableTeachers
-    : subject.teacherIds.map((teacherId) => ({
+    : (subject.teacherIds || []).map((teacherId) => ({
         id: teacherId,
         name: schedulingTeacherName(teacherId),
         title: "任课教师",
         department: state.schedulingConfig.divisionName,
       }));
   const poolIds = new Set(pool.map((teacher) => teacher.id));
-  const missingSelected = subject.teacherIds
+  const missingSelected = Array.from(new Set(configuredIds))
     .filter((teacherId) => !poolIds.has(teacherId))
     .map((teacherId) => ({
       id: teacherId,
@@ -4716,6 +4818,169 @@ function subjectTeacherPool(subject) {
   return [...pool, ...missingSelected].sort((a, b) =>
     String(a.employeeNo || a.id).localeCompare(String(b.employeeNo || b.id), "zh-CN"),
   );
+}
+
+function subjectClassTeacherIds(subject, classId) {
+  if (!subject) return [];
+  const classIds = subject.classTeacherIds?.[classId];
+  if (Array.isArray(classIds) && classIds.length) {
+    return Array.from(new Set(classIds.map(String).filter(Boolean)));
+  }
+  return Array.from(new Set((subject.teacherIds || []).map(String).filter(Boolean)));
+}
+
+function teacherInputValue(teacher) {
+  if (!teacher) return "";
+  const code = teacher.employeeNo || teacher.id;
+  return `${teacher.name} / ${code}`;
+}
+
+function teacherQueryKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\/\s·・,，。:：-]+/g, "");
+}
+
+function teacherSearchFields(teacher) {
+  return [
+    teacher.id,
+    teacher.employeeNo,
+    teacher.name,
+    teacher.username,
+    teacherInputValue(teacher),
+    `${teacher.name}${teacher.employeeNo || teacher.id}`,
+  ].filter(Boolean);
+}
+
+function findTeacherMatchForSubject(subject, value) {
+  const query = teacherQueryKey(value);
+  if (!query) return null;
+  const pool = subjectTeacherPool(subject);
+  return (
+    pool.find((teacher) => teacherSearchFields(teacher).some((field) => teacherQueryKey(field) === query)) ||
+    pool.find((teacher) => teacherSearchFields(teacher).some((field) => teacherQueryKey(field).includes(query)))
+  );
+}
+
+function classSubjectTeacher(subject, classId) {
+  const teacherId = subjectClassTeacherIds(subject, classId)[0];
+  return subjectTeacherPool(subject).find((teacher) => teacher.id === teacherId) || null;
+}
+
+function missingClassSubjectTeacherAssignments(config) {
+  return (config.classes || []).flatMap((schoolClass) =>
+    (config.subjects || [])
+      .filter((subject) => !classSubjectTeacher(subject, schoolClass.id))
+      .map((subject) => ({
+        classId: schoolClass.id,
+        className: schoolClass.name,
+        subjectId: subject.id,
+        subjectName: subject.name,
+      })),
+  );
+}
+
+function syncClassSubjectTeacherInput(input, options = {}) {
+  const subject = state.schedulingConfig.subjects.find((item) => item.id === input.dataset.subjectId);
+  const stateNode = input
+    .closest(".teacher-assignment-cell")
+    ?.querySelector("[data-assignment-match-state]");
+  const value = input.value.trim();
+  if (!subject || !value) {
+    input.dataset.teacherId = "";
+    input.classList.remove("matched", "invalid");
+    input.classList.add("missing");
+    if (stateNode) {
+      stateNode.textContent = "未配置";
+      stateNode.className = "teacher-assignment-state missing";
+    }
+    return null;
+  }
+
+  const teacher = findTeacherMatchForSubject(subject, value);
+  if (!teacher) {
+    input.dataset.teacherId = "";
+    input.classList.remove("matched", "missing");
+    input.classList.add("invalid");
+    if (stateNode) {
+      stateNode.textContent = "未匹配";
+      stateNode.className = "teacher-assignment-state invalid";
+    }
+    return null;
+  }
+
+  input.dataset.teacherId = teacher.id;
+  input.classList.remove("missing", "invalid");
+  input.classList.add("matched");
+  if (options.commit) input.value = teacherInputValue(teacher);
+  if (stateNode) {
+    stateNode.textContent = `${teacher.name} · ${teacher.employeeNo || teacher.id}`;
+    stateNode.className = "teacher-assignment-state matched";
+  }
+  return teacher;
+}
+
+function teacherAssignmentMatrixInputs() {
+  return Array.from(document.querySelectorAll("[data-class-subject-teacher-input]"));
+}
+
+function collectClassSubjectTeacherAssignments() {
+  const missing = [];
+  const bySubject = new Map((state.schedulingConfig.subjects || []).map((subject) => [subject.id, {}]));
+
+  teacherAssignmentMatrixInputs().forEach((input) => {
+    const teacher = syncClassSubjectTeacherInput(input, { commit: true });
+    const subject = state.schedulingConfig.subjects.find((item) => item.id === input.dataset.subjectId);
+    const schoolClass = state.schedulingConfig.classes.find((item) => item.id === input.dataset.classId);
+    if (!subject || !schoolClass) return;
+    if (!teacher) {
+      missing.push(`${schoolClass.name} ${subject.name}`);
+      return;
+    }
+    bySubject.get(subject.id)[schoolClass.id] = [teacher.id];
+  });
+
+  if (missing.length) {
+    const preview = missing.slice(0, 4).join("、");
+    throw new Error(`还有 ${missing.length} 个任课格未匹配：${preview}`);
+  }
+
+  return Array.from(bySubject.entries()).map(([subjectId, classTeacherIds]) => ({
+    subjectId,
+    classTeacherIds,
+  }));
+}
+
+async function saveClassSubjectTeacherAssignments() {
+  if (!backendMode() || currentRole() !== "admin") {
+    showToast("请使用后端行政账号保存任课配置");
+    return;
+  }
+  try {
+    const payloads = collectClassSubjectTeacherAssignments();
+    if (!payloads.length) {
+      showToast("当前没有可保存的任课配置");
+      return;
+    }
+    await Promise.all(
+      payloads.map((payload) =>
+        apiRequest("/api/scheduling/teacher-assignments", {
+          method: "POST",
+          body: {
+            stageId: state.schedulingConfig.stageId,
+            grade: state.schedulingConfig.grade,
+            subjectId: payload.subjectId,
+            classTeacherIds: payload.classTeacherIds,
+          },
+        }),
+      ),
+    );
+    showToast("任课配置已保存，重新生成排课时生效");
+    await loadBackendSchedulingContext();
+  } catch (error) {
+    showToast(error.message || "任课配置保存失败");
+  }
 }
 
 function selectedSubjectTeacherCount(subjectId) {
@@ -4975,28 +5240,48 @@ function adminScheduleConstraintList(config) {
 }
 
 function adminSelectedTeacherPoolSummary(config) {
+  const totalCells = (config.classes || []).length * (config.subjects || []).length;
+  const missing = missingClassSubjectTeacherAssignments(config);
+  const assignedCells = Math.max(totalCells - missing.length, 0);
   const rows = config.subjects
     .map((subject) => {
-      const selectedIds = new Set(subject.teacherIds || []);
-      const selectedTeachers = subjectTeacherPool(subject).filter((teacher) => selectedIds.has(teacher.id));
+      const assignedClasses = (config.classes || []).filter((schoolClass) =>
+        classSubjectTeacher(subject, schoolClass.id),
+      );
+      const selectedTeachers = Array.from(
+        new Map(
+          assignedClasses
+            .map((schoolClass) => classSubjectTeacher(subject, schoolClass.id))
+            .filter(Boolean)
+            .map((teacher) => [teacher.id, teacher]),
+        ).values(),
+      );
+      const missingClassNames = (config.classes || [])
+        .filter((schoolClass) => !classSubjectTeacher(subject, schoolClass.id))
+        .map((schoolClass) => schoolClass.name);
       const teacherTags = selectedTeachers.length
         ? selectedTeachers
             .map(
               (teacher) => `
                 <span class="teacher-pool-summary-tag">
                   ${escapeHtml(teacher.name)}
-                  <small>${escapeHtml(teacher.id)}</small>
+                  <small>${escapeHtml(teacher.employeeNo || teacher.id)}</small>
                 </span>
               `,
             )
             .join("")
-        : `<span class="teacher-pool-summary-empty">未选择老师</span>`;
+        : `<span class="teacher-pool-summary-empty">暂无任课老师</span>`;
 
       return `
         <article class="teacher-pool-summary-row">
           <div class="teacher-pool-summary-subject">
             <strong>${escapeHtml(subject.name)}</strong>
-            <span>每班每周 ${subject.weeklyLessons} 节 · ${selectedTeachers.length} 位已确认</span>
+            <span>已配置 ${assignedClasses.length}/${(config.classes || []).length} 个班 · ${selectedTeachers.length} 位老师</span>
+            ${
+              missingClassNames.length
+                ? `<span class="teacher-pool-summary-warning">缺少：${escapeHtml(missingClassNames.slice(0, 4).join("、"))}${missingClassNames.length > 4 ? " 等" : ""}</span>`
+                : ""
+            }
           </div>
           <div class="teacher-pool-summary-tags">${teacherTags}</div>
         </article>
@@ -5006,58 +5291,112 @@ function adminSelectedTeacherPoolSummary(config) {
 
   return `
     <div class="teacher-pool-summary-head">
-      <strong>当前任课老师池</strong>
-      <span>${escapeHtml(config.divisionName)}${escapeHtml(config.gradeName)} · 保存任课关系后同步更新</span>
+      <strong>任课配置进度</strong>
+      <span>${escapeHtml(config.divisionName)}${escapeHtml(config.gradeName)} · ${assignedCells}/${totalCells || 0} 个格子已匹配${missing.length ? ` · ${missing.length} 个待补齐` : " · 可生成排课"}</span>
     </div>
     <div class="teacher-pool-summary-list">${rows}</div>
   `;
 }
 
-function adminSubjectConfigItem(subject) {
-  const teacherIds = new Set(subject.teacherIds || []);
-  const teacherPool = subjectTeacherPool(subject);
+function adminSubjectConfigItem(config) {
+  const subjects = config.subjects || [];
+  const classes = config.classes || [];
+  if (!subjects.length || !classes.length) {
+    return `<div class="empty-state">请先配置当前年级的课程和班级</div>`;
+  }
+  const datalists = subjects
+    .map((subject) => {
+      const teachers = subjectTeacherPool(subject);
+      return `
+        <datalist id="teacher-options-${escapeHtml(subject.id)}">
+          ${teachers
+            .map(
+              (teacher) => `
+                <option value="${escapeHtml(teacherInputValue(teacher))}" label="${escapeHtml(`${teacher.id} · ${teacher.title || teacher.subject || "任课教师"}`)}"></option>
+              `,
+            )
+            .join("")}
+        </datalist>
+      `;
+    })
+    .join("");
+
   return `
-    <article class="subject-config-item">
+    <article class="subject-config-item teacher-assignment-matrix-card">
       <div class="subject-config-head">
         <div>
-          <strong>${subject.name}</strong>
-          <span>每班每周 ${subject.weeklyLessons} 节</span>
+          <strong>班级任课老师指定表</strong>
+          <span>按班级逐科指定老师，输入姓名、工号或教师 ID 后自动匹配。</span>
         </div>
         <div class="subject-config-meta">
-          <span data-assignment-selected-count="${subject.id}">${teacherIds.size} 位已选</span>
-          <span>${teacherPool.length} 位可选</span>
+          <span>${classes.length} 个班级</span>
+          <span>${subjects.length} 门课程</span>
         </div>
       </div>
-      <div class="teacher-pool-grid" data-assignment-teachers="${subject.id}">
-        ${
-          teacherPool.length
-            ? teacherPool
+      ${datalists}
+      <div class="teacher-assignment-scroll">
+        <table class="teacher-assignment-matrix">
+          <thead>
+            <tr>
+              <th>班级</th>
+              ${subjects
                 .map(
-                  (teacher) => `
-                    <label class="teacher-pool-card">
-                      <input
-                        type="checkbox"
-                        data-assignment-teacher-option="${subject.id}"
-                        value="${teacher.id}"
-                        ${teacherIds.has(teacher.id) ? "checked" : ""}
-                      />
-                      <span>
-                        <strong>${escapeHtml(teacher.name)}</strong>
-                        <small>${escapeHtml(teacher.id)} · ${escapeHtml(teacher.title || teacher.subject || "任课教师")}</small>
-                      </span>
-                    </label>
+                  (subject) => `
+                    <th>
+                      <strong>${escapeHtml(subject.name)}</strong>
+                      <span>每周 ${Number(subject.weeklyLessons || 0)} 节</span>
+                    </th>
                   `,
                 )
-                .join("")
-            : `<div class="empty-state">当前学部暂无${escapeHtml(subject.name)}老师，请先到人员导入或人员列表补充教师档案。</div>`
-        }
+                .join("")}
+            </tr>
+          </thead>
+          <tbody>
+            ${classes
+              .map(
+                (schoolClass) => `
+                  <tr>
+                    <th>
+                      <strong>${escapeHtml(schoolClass.name)}</strong>
+                      <span>${escapeHtml(schoolClass.room || "")}</span>
+                    </th>
+                    ${subjects
+                      .map((subject) => {
+                        const teacher = classSubjectTeacher(subject, schoolClass.id);
+                        const value = teacher ? teacherInputValue(teacher) : "";
+                        return `
+                          <td>
+                            <div class="teacher-assignment-cell">
+                              <input
+                                class="teacher-assignment-input ${teacher ? "matched" : "missing"}"
+                                data-class-subject-teacher-input
+                                data-class-id="${escapeHtml(schoolClass.id)}"
+                                data-subject-id="${escapeHtml(subject.id)}"
+                                data-teacher-id="${escapeHtml(teacher?.id || "")}"
+                                list="teacher-options-${escapeHtml(subject.id)}"
+                                value="${escapeHtml(value)}"
+                                placeholder="姓名/工号"
+                                autocomplete="off"
+                              />
+                              <span class="teacher-assignment-state ${teacher ? "matched" : "missing"}" data-assignment-match-state>
+                                ${teacher ? `${escapeHtml(teacher.name)} · ${escapeHtml(teacher.employeeNo || teacher.id)}` : "未配置"}
+                              </span>
+                            </div>
+                          </td>
+                        `;
+                      })
+                      .join("")}
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
       </div>
       <div class="subject-config-actions">
-        <span>排课时只会从已选老师中自动均衡分配。</span>
+        <span>排课时每个班级科目只使用该格子匹配到的老师。</span>
         <div class="subject-config-buttons">
-          <button class="mini-button" data-select-all-assignment="${subject.id}" type="button">全选</button>
-          <button class="mini-button" data-clear-assignment="${subject.id}" type="button">清空</button>
-          <button class="mini-button primary" data-save-assignment="${subject.id}" type="button">保存任课关系</button>
+          <button class="mini-button primary" data-save-teacher-assignment-matrix type="button">保存全部任课配置</button>
         </div>
       </div>
     </article>
@@ -6884,6 +7223,13 @@ function showToast(text) {
   }, 2200);
 }
 
+document.addEventListener("input", (event) => {
+  const assignmentInput = event.target.closest("[data-class-subject-teacher-input]");
+  if (assignmentInput) {
+    syncClassSubjectTeacherInput(assignmentInput);
+  }
+});
+
 document.addEventListener("click", async (event) => {
   const demoLoginButton = event.target.closest("[data-demo-login]");
   if (demoLoginButton) {
@@ -6952,6 +7298,11 @@ document.addEventListener("click", async (event) => {
       await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
     }
     switchView("settlement");
+    return;
+  }
+
+  if (event.target.closest("[data-save-teacher-assignment-matrix]")) {
+    await saveClassSubjectTeacherAssignments();
     return;
   }
 

@@ -321,7 +321,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
   return { teachers, accounts };
 }
 
-function createTeacherAssignments(teachers) {
+function createTeacherAssignments(teachers, classes = []) {
   const assignments = [];
 
   STAGES.forEach((stage) => {
@@ -337,12 +337,19 @@ function createTeacherAssignments(teachers) {
           .slice(0, 5)
           .map((teacher) => teacher.id);
         if (!teacherIds.length) return;
+        const classTeacherIds = {};
+        classes
+          .filter((schoolClass) => schoolClass.stageId === stage.id && schoolClass.grade === grade && schoolClass.active)
+          .forEach((schoolClass, index) => {
+            classTeacherIds[schoolClass.id] = [teacherIds[index % teacherIds.length]];
+          });
         assignments.push({
           id: `TA-${stage.id}-${grade}-${subject.id}`,
           stageId: stage.id,
           grade,
           subjectId: subject.id,
           teacherIds,
+          classTeacherIds,
           updatedAt: new Date().toISOString(),
         });
       });
@@ -350,6 +357,61 @@ function createTeacherAssignments(teachers) {
   });
 
   return assignments;
+}
+
+function normalizeTeacherAssignments(db) {
+  let changed = false;
+  const assignments = db.teacherAssignments || [];
+  assignments.forEach((assignment) => {
+    const classes = (db.classes || []).filter(
+      (schoolClass) =>
+        schoolClass.stageId === assignment.stageId &&
+        Number(schoolClass.grade) === Number(assignment.grade) &&
+        schoolClass.active,
+    );
+    if (!assignment.classTeacherIds || Array.isArray(assignment.classTeacherIds) || typeof assignment.classTeacherIds !== "object") {
+      assignment.classTeacherIds = {};
+      changed = true;
+    }
+
+    const validClassIds = new Set(classes.map((schoolClass) => schoolClass.id));
+    Object.keys(assignment.classTeacherIds).forEach((classId) => {
+      if (!validClassIds.has(classId)) {
+        delete assignment.classTeacherIds[classId];
+        changed = true;
+      }
+    });
+
+    const basePool = Array.from(new Set(Array.isArray(assignment.teacherIds) ? assignment.teacherIds.map(String) : []));
+    classes.forEach((schoolClass, index) => {
+      const currentIds = Array.isArray(assignment.classTeacherIds[schoolClass.id])
+        ? Array.from(new Set(assignment.classTeacherIds[schoolClass.id].map(String).filter(Boolean)))
+        : [];
+      if (currentIds.length) {
+        assignment.classTeacherIds[schoolClass.id] = currentIds;
+        return;
+      }
+      if (basePool.length) {
+        assignment.classTeacherIds[schoolClass.id] = [basePool[index % basePool.length]];
+        changed = true;
+      }
+    });
+
+    const unionTeacherIds = Array.from(
+      new Set([
+        ...basePool,
+        ...Object.values(assignment.classTeacherIds)
+          .flat()
+          .map(String)
+          .filter(Boolean),
+      ]),
+    );
+    if (unionTeacherIds.join("|") !== basePool.join("|")) {
+      assignment.teacherIds = unionTeacherIds;
+      changed = true;
+    }
+  });
+  return changed;
 }
 
 function createSampleLessons(teachers, classes) {
@@ -402,7 +464,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
   const { classes, rooms } = createClassesAndRooms();
   const { teachers, accounts } = createTeachersAndAccounts(teacherCount, defaultPasswordHash);
   const lessonInstances = createSampleLessons(teachers, classes);
-  const teacherAssignments = createTeacherAssignments(teachers);
+  const teacherAssignments = createTeacherAssignments(teachers, classes);
 
   return {
     meta: {
@@ -480,7 +542,10 @@ function normalizeDatabase(db) {
   });
 
   if (!Array.isArray(db.teacherAssignments)) {
-    db.teacherAssignments = createTeacherAssignments(db.teachers || []);
+    db.teacherAssignments = createTeacherAssignments(db.teachers || [], db.classes || []);
+    changed = true;
+  }
+  if (normalizeTeacherAssignments(db)) {
     changed = true;
   }
 
@@ -1176,11 +1241,12 @@ export function queryTeacherAssignments(db, options = {}) {
     .map((assignment) => ({
       ...assignment,
       subjectName: db.subjects.find((subject) => subject.id === assignment.subjectId)?.name || assignment.subjectId,
-      teachers: assignment.teacherIds
+      teachers: (assignment.teacherIds || [])
         .map((teacherId) => findTeacher(db, teacherId))
         .filter(Boolean)
         .map((teacher) => ({
           id: teacher.id,
+          employeeNo: teacher.employeeNo,
           name: teacher.name,
           primarySubjectName: teacher.primarySubjectName,
           department: teacher.department,
@@ -1193,6 +1259,8 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
   const grade = Number(options.grade);
   const subjectId = String(options.subjectId || "").trim();
   const teacherIds = Array.isArray(options.teacherIds) ? options.teacherIds.map(String) : [];
+  const hasClassTeacherIds =
+    options.classTeacherIds && typeof options.classTeacherIds === "object" && !Array.isArray(options.classTeacherIds);
   if (!stageId || !Number.isFinite(grade) || !subjectId) {
     const error = new Error("学部、年级和科目不能为空");
     error.statusCode = 400;
@@ -1205,7 +1273,37 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     error.statusCode = 400;
     throw error;
   }
-  const uniqueTeacherIds = Array.from(new Set(teacherIds));
+  const activeClasses = (db.classes || []).filter(
+    (schoolClass) => schoolClass.stageId === stageId && Number(schoolClass.grade) === grade && schoolClass.active,
+  );
+  const activeClassIds = new Set(activeClasses.map((schoolClass) => schoolClass.id));
+  const classTeacherIds = {};
+
+  if (hasClassTeacherIds) {
+    Object.entries(options.classTeacherIds).forEach(([classId, ids]) => {
+      if (!activeClassIds.has(classId)) {
+        const error = new Error(`班级不属于当前年级：${classId}`);
+        error.statusCode = 400;
+        throw error;
+      }
+      classTeacherIds[classId] = Array.from(
+        new Set((Array.isArray(ids) ? ids : [ids]).map(String).map((id) => id.trim()).filter(Boolean)),
+      );
+    });
+    const missingClass = activeClasses.find((schoolClass) => !classTeacherIds[schoolClass.id]?.length);
+    if (missingClass) {
+      const error = new Error(`请为 ${missingClass.name} 配置 ${subject.name} 任课老师`);
+      error.statusCode = 400;
+      throw error;
+    }
+  } else {
+    const legacyTeacherIds = Array.from(new Set(teacherIds.map((id) => id.trim()).filter(Boolean)));
+    activeClasses.forEach((schoolClass) => {
+      classTeacherIds[schoolClass.id] = legacyTeacherIds;
+    });
+  }
+
+  const uniqueTeacherIds = Array.from(new Set(Object.values(classTeacherIds).flat()));
   const invalidTeacherId = uniqueTeacherIds.find((teacherId) => !findTeacher(db, teacherId));
   if (invalidTeacherId) {
     const error = new Error(`教师不存在：${invalidTeacherId}`);
@@ -1221,7 +1319,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
         teacher.primarySubjectId !== subjectId,
     );
   if (invalidTeacher) {
-    const error = new Error(`${invalidTeacher.name} 不属于当前学部或学科，不能加入该任课池`);
+    const error = new Error(`${invalidTeacher.name} 不属于当前学部或学科，不能作为该科任课老师`);
     error.statusCode = 400;
     throw error;
   }
@@ -1234,6 +1332,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     grade,
     subjectId,
     teacherIds: uniqueTeacherIds,
+    classTeacherIds,
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
   };
