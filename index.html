@@ -350,6 +350,32 @@
                 <select class="lesson-select" id="adminGradeSelect"></select>
               </label>
             </div>
+            <div class="class-structure-card" aria-label="年级班级结构">
+              <div class="class-structure-copy">
+                <strong>班级结构</strong>
+                <span id="classStructureHelp">设置当前年级普通班和实验班数量，保存后用于老师配置和排课。</span>
+              </div>
+              <div class="class-structure-controls">
+                <label class="field-label compact-field" for="regularClassCountInput">
+                  <span>普通班</span>
+                  <div class="input-with-unit">
+                    <input id="regularClassCountInput" type="number" min="0" max="30" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="experimentalClassCountInput">
+                  <span>实验班</span>
+                  <div class="input-with-unit">
+                    <input id="experimentalClassCountInput" type="number" min="0" max="10" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <button class="primary-button compact-button" id="saveClassStructure" type="button">
+                  保存班级结构
+                </button>
+              </div>
+              <div class="class-structure-preview" id="classStructurePreview"></div>
+            </div>
             <div class="summary-grid admin-scope-summary">
               <article class="metric">
                 <span>排课学部</span>
@@ -460,11 +486,10 @@
           <section class="panel teacher-pool-panel">
             <div class="panel-heading">
               <div>
-                <h2>指定任课老师</h2>
-                <p id="subjectConfigHelp">按班级和科目指定老师，输入老师姓名、工号或编号进行匹配。</p>
+                <h2>班级任课老师</h2>
+                <p id="subjectConfigHelp">直接按班级和科目指定老师，输入老师姓名、工号或编号进行匹配。</p>
               </div>
             </div>
-            <div class="selected-teacher-pool" id="selectedTeacherPoolSummary" aria-label="任课配置进度"></div>
             <div class="subject-config-list" id="subjectConfigList"></div>
           </section>
 
@@ -531,7 +556,7 @@
             <div class="panel-heading">
               <div>
                 <h2>生成与发布</h2>
-                <p>确认课程、硬约束和任课老师后，一键生成排课草稿，再发布到老师端。</p>
+                <p>确认课程、硬约束和每个班的任课老师后，一键生成排课草稿，再发布到老师端。</p>
               </div>
             </div>
             <div class="rule-list">

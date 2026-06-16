@@ -4,6 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>教室动态签到码</title>
+    <meta name="theme-color" content="#002068" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="课堂签到码" />
+    <link rel="manifest" href="classroom.webmanifest" />
+    <link rel="apple-touch-icon" href="assets/school-logo.jpeg" />
     <style>
       :root {
         color-scheme: light;
@@ -128,6 +133,18 @@
         margin: 0 auto;
       }
 
+      .setup-actions,
+      .screen-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .screen-actions {
+        margin-top: 0;
+      }
+
       form {
         display: grid;
         gap: 16px;
@@ -160,6 +177,30 @@
         cursor: pointer;
       }
 
+      .ghost-button {
+        border: 1px solid #cfd8e3;
+        background: #fff;
+        color: #18202b;
+      }
+
+      .danger-button {
+        border: 1px solid #f2c1c6;
+        background: #fff5f6;
+        color: #b10012;
+      }
+
+      button[hidden] {
+        display: none;
+      }
+
+      .binding-note,
+      .install-note {
+        margin-top: 14px;
+        color: #637083;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
       code {
         display: block;
         max-width: 100%;
@@ -188,6 +229,10 @@
         .qr-panel {
           min-height: 420px;
         }
+
+        .screen-actions {
+          display: grid;
+        }
       }
     </style>
   </head>
@@ -195,7 +240,7 @@
     <main>
       <section class="panel setup" id="setupPanel" hidden>
         <h1>教室动态签到码</h1>
-        <p style="margin-top: 12px; color: #637083">请输入教室编号和大屏密钥，绑定后本机将持续展示实时二维码。</p>
+        <p style="margin-top: 12px; color: #637083">第一次在教室电脑上绑定教室，之后从桌面图标打开即可自动展示实时二维码。</p>
         <form id="setupForm">
           <label>
             教室编号
@@ -207,6 +252,10 @@
           </label>
           <button type="submit">打开教室签到屏</button>
         </form>
+        <div class="setup-actions">
+          <button class="ghost-button" id="installAppFromSetup" type="button" hidden>安装到桌面</button>
+        </div>
+        <p class="binding-note" id="bindingNote">绑定信息只保存在本机浏览器，不会自动同步到其他教室电脑。</p>
       </section>
 
       <section class="screen" id="screenPanel" hidden>
@@ -222,6 +271,11 @@
           <div>
             <h1 id="roomName">教室签到屏</h1>
             <p style="margin-top: 12px; color: #637083">二维码由后端签发，短时有效，过期自动刷新。</p>
+            <div class="screen-actions">
+              <button class="ghost-button" id="installAppButton" type="button" hidden>安装到桌面</button>
+              <button class="ghost-button" id="fullscreenButton" type="button">全屏显示</button>
+              <button class="danger-button" id="resetBindingButton" type="button">重新绑定教室</button>
+            </div>
           </div>
           <div>
             <div class="meta-row">
@@ -248,15 +302,72 @@
 
     <script src="vendor/qrcode.min.js"></script>
     <script>
+      const BINDING_STORAGE_KEY = "school-classroom-screen-binding-v1";
       const params = new URLSearchParams(window.location.search);
-      const roomId = params.get("roomId") || "";
-      const displayKey = params.get("displayKey") || "";
       const setupPanel = document.querySelector("#setupPanel");
       const screenPanel = document.querySelector("#screenPanel");
+      let deferredInstallPrompt = null;
       const state = {
+        binding: null,
         expiresAt: null,
         refreshTimer: null,
       };
+
+      function bindingFromQuery() {
+        const roomId = params.get("roomId") || "";
+        const displayKey = params.get("displayKey") || "";
+        return roomId && displayKey ? { roomId, displayKey } : null;
+      }
+
+      function loadStoredBinding() {
+        try {
+          const raw = window.localStorage.getItem(BINDING_STORAGE_KEY);
+          if (!raw) return null;
+          const parsed = JSON.parse(raw);
+          if (!parsed?.roomId || !parsed?.displayKey) return null;
+          return {
+            roomId: String(parsed.roomId),
+            displayKey: String(parsed.displayKey),
+          };
+        } catch (error) {
+          return null;
+        }
+      }
+
+      function saveBinding(binding) {
+        window.localStorage.setItem(BINDING_STORAGE_KEY, JSON.stringify(binding));
+      }
+
+      function clearBinding() {
+        window.localStorage.removeItem(BINDING_STORAGE_KEY);
+      }
+
+      function applyBindingToForm(binding) {
+        document.querySelector("#roomIdInput").value = binding?.roomId || "";
+        document.querySelector("#displayKeyInput").value = binding?.displayKey || "";
+      }
+
+      function setInstallButtonsVisible(visible) {
+        document.querySelector("#installAppButton").hidden = !visible;
+        document.querySelector("#installAppFromSetup").hidden = !visible;
+      }
+
+      async function registerClassroomApp() {
+        if (!("serviceWorker" in navigator)) return;
+        try {
+          await navigator.serviceWorker.register("/classroom-sw.js");
+        } catch (error) {
+          console.warn("教室大屏 PWA 注册失败", error);
+        }
+      }
+
+      async function promptInstall() {
+        if (!deferredInstallPrompt) return;
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice.catch(() => null);
+        deferredInstallPrompt = null;
+        setInstallButtonsVisible(false);
+      }
 
       function formatClock(date) {
         return date.toLocaleString("zh-CN", {
@@ -292,12 +403,18 @@
 
       async function refreshQr() {
         window.clearTimeout(state.refreshTimer);
+        if (!state.binding?.roomId || !state.binding?.displayKey) {
+          showSetup();
+          return;
+        }
         const status = document.querySelector("#statusText");
         try {
           status.textContent = "正在刷新";
           status.className = "status warning";
           const response = await fetch(
-            `/api/classrooms/${encodeURIComponent(roomId)}/dynamic-qr?displayKey=${encodeURIComponent(displayKey)}`,
+            `/api/classrooms/${encodeURIComponent(state.binding.roomId)}/dynamic-qr?displayKey=${encodeURIComponent(
+              state.binding.displayKey,
+            )}`,
           );
           const data = await response.json();
           if (!response.ok) throw new Error(data.error?.message || "二维码签发失败");
@@ -318,22 +435,93 @@
         }
       }
 
+      function showSetup(binding = loadStoredBinding()) {
+        window.clearTimeout(state.refreshTimer);
+        state.expiresAt = null;
+        state.binding = null;
+        applyBindingToForm(binding);
+        document.querySelector("#bindingNote").textContent = binding?.roomId
+          ? `本机曾绑定 ${binding.roomId}，可直接打开或改为其他教室。`
+          : "绑定信息只保存在本机浏览器，不会自动同步到其他教室电脑。";
+        setupPanel.hidden = false;
+        screenPanel.hidden = true;
+      }
+
+      function showScreen(binding) {
+        state.binding = binding;
+        saveBinding(binding);
+        setupPanel.hidden = true;
+        screenPanel.hidden = false;
+        refreshQr();
+      }
+
       document.querySelector("#setupForm").addEventListener("submit", (event) => {
         event.preventDefault();
         const nextRoomId = document.querySelector("#roomIdInput").value.trim();
         const nextDisplayKey = document.querySelector("#displayKeyInput").value.trim();
         if (!nextRoomId || !nextDisplayKey) return;
-        window.location.href = `classroom.html?roomId=${encodeURIComponent(nextRoomId)}&displayKey=${encodeURIComponent(nextDisplayKey)}`;
+        showScreen({ roomId: nextRoomId, displayKey: nextDisplayKey });
+      });
+
+      document.querySelector("#installAppButton").addEventListener("click", promptInstall);
+      document.querySelector("#installAppFromSetup").addEventListener("click", promptInstall);
+
+      document.querySelector("#fullscreenButton").addEventListener("click", async () => {
+        try {
+          if (!document.fullscreenElement) {
+            await document.documentElement.requestFullscreen();
+          }
+        } catch (error) {
+          const status = document.querySelector("#statusText");
+          status.textContent = "浏览器未允许全屏";
+          status.className = "status warning";
+        }
+      });
+
+      document.querySelector("#resetBindingButton").addEventListener("click", () => {
+        if (!window.confirm("要解除本机教室绑定并重新选择教室吗？")) return;
+        clearBinding();
+        showSetup();
+      });
+
+      window.addEventListener("beforeinstallprompt", (event) => {
+        event.preventDefault();
+        deferredInstallPrompt = event;
+        setInstallButtonsVisible(true);
+      });
+
+      window.addEventListener("appinstalled", () => {
+        deferredInstallPrompt = null;
+        setInstallButtonsVisible(false);
+      });
+
+      window.addEventListener("online", () => {
+        if (state.binding) refreshQr();
+      });
+
+      window.addEventListener("offline", () => {
+        const status = document.querySelector("#statusText");
+        status.textContent = "网络离线";
+        status.className = "status warning";
       });
 
       window.setInterval(updateClock, 1000);
       updateClock();
+      registerClassroomApp();
 
-      if (!roomId || !displayKey) {
-        setupPanel.hidden = false;
+      const queryBinding = bindingFromQuery();
+      const storedBinding = loadStoredBinding();
+      const initialBinding = queryBinding || storedBinding;
+
+      if (queryBinding) {
+        saveBinding(queryBinding);
+        window.history.replaceState({}, document.title, "classroom.html");
+      }
+
+      if (!initialBinding) {
+        showSetup();
       } else {
-        screenPanel.hidden = false;
-        refreshQr();
+        showScreen(initialBinding);
       }
     </script>
   </body>

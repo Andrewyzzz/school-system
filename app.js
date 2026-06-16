@@ -170,6 +170,8 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     return {
       id: `${grade.code}C${roomNumber}`,
       name: `${grade.name} ${index + 1} 班`,
+      classType: "regular",
+      displayOrder: index + 1,
       room: roomName,
       roomId: `${grade.code}R${roomNumber}`,
     };
@@ -182,6 +184,11 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     gradeName: grade.name,
     weekStart: division.weekStart,
     classCount: division.classCount,
+    classStructure: {
+      regularCount: classes.length,
+      experimentalCount: 0,
+      totalCount: classes.length,
+    },
     classes,
     rooms: classes.map((schoolClass) => ({
       id: schoolClass.roomId,
@@ -2740,6 +2747,130 @@ function resetCourseDraftAfterConfigChange() {
   };
 }
 
+function classStructureFromConfig(config = state.schedulingConfig) {
+  const classRows = config.classes || [];
+  const inferredRegularCount = classRows.filter((schoolClass) => schoolClass.classType !== "experimental").length;
+  const inferredExperimentalCount = classRows.filter((schoolClass) => schoolClass.classType === "experimental").length;
+  return {
+    regularCount: Number(config.classStructure?.regularCount ?? inferredRegularCount),
+    experimentalCount: Number(config.classStructure?.experimentalCount ?? inferredExperimentalCount),
+    totalCount: Number(config.classStructure?.totalCount ?? classRows.length),
+  };
+}
+
+function classStructurePreviewHtml(config, regularCount, experimentalCount) {
+  const tags = [];
+  for (let index = 1; index <= regularCount; index += 1) {
+    tags.push(`<span class="class-structure-tag">${escapeHtml(`${config.gradeName} ${index} 班`)}</span>`);
+  }
+  for (let index = 1; index <= experimentalCount; index += 1) {
+    tags.push(`<span class="class-structure-tag experimental">${escapeHtml(`${config.gradeName}实验${index}班`)}</span>`);
+  }
+  return tags.length ? tags.join("") : `<span>至少保留 1 个普通班或实验班</span>`;
+}
+
+function updateClassStructurePreview() {
+  const config = state.schedulingConfig;
+  const regularCount = Number.parseInt(document.querySelector("#regularClassCountInput")?.value || "0", 10);
+  const experimentalCount = Number.parseInt(document.querySelector("#experimentalClassCountInput")?.value || "0", 10);
+  const safeRegularCount = Number.isFinite(regularCount) ? Math.max(regularCount, 0) : 0;
+  const safeExperimentalCount = Number.isFinite(experimentalCount) ? Math.max(experimentalCount, 0) : 0;
+  const preview = document.querySelector("#classStructurePreview");
+  if (preview) {
+    preview.innerHTML = classStructurePreviewHtml(config, safeRegularCount, safeExperimentalCount);
+  }
+}
+
+function applyLocalClassStructure(regularCount, experimentalCount) {
+  const config = state.schedulingConfig;
+  const classes = [];
+  const rooms = [];
+  const pushClass = (classType, index, displayOrder) => {
+    const suffix = classType === "experimental" ? `E${String(index).padStart(2, "0")}` : String(index).padStart(2, "0");
+    const classId = `${config.gradeId}-${suffix}`;
+    const roomId = `${config.gradeId}-room-${suffix}`;
+    const name = classType === "experimental" ? `${config.gradeName}实验${index}班` : `${config.gradeName} ${index} 班`;
+    const room = classType === "experimental" ? `${config.gradeName}实验${index}班教室` : `${config.gradeName}-${suffix}`;
+    classes.push({
+      id: classId,
+      name,
+      classType,
+      displayOrder,
+      room,
+      roomId,
+    });
+    rooms.push({ id: roomId, name: room, sourceClassId: classId });
+  };
+  for (let index = 1; index <= regularCount; index += 1) pushClass("regular", index, index);
+  for (let index = 1; index <= experimentalCount; index += 1) {
+    pushClass("experimental", index, regularCount + index);
+  }
+  config.classes = classes;
+  config.rooms = rooms;
+  config.classCount = classes.length;
+  config.classStructure = {
+    regularCount,
+    experimentalCount,
+    totalCount: classes.length,
+  };
+  config.subjects = (config.subjects || []).map((subject) => ({
+    ...subject,
+    teacherIds: [],
+    classTeacherIds: {},
+  }));
+  state.selectedSchedulingClassId = classes[0]?.id || "";
+  resetCourseDraftAfterConfigChange();
+}
+
+async function saveAdminClassStructure() {
+  const regularCount = Number.parseInt(document.querySelector("#regularClassCountInput").value || "0", 10);
+  const experimentalCount = Number.parseInt(document.querySelector("#experimentalClassCountInput").value || "0", 10);
+  if (!Number.isFinite(regularCount) || regularCount < 0 || regularCount > 30) {
+    showToast("普通班数量需在 0-30 之间");
+    return;
+  }
+  if (!Number.isFinite(experimentalCount) || experimentalCount < 0 || experimentalCount > 10) {
+    showToast("实验班数量需在 0-10 之间");
+    return;
+  }
+  if (regularCount + experimentalCount < 1) {
+    showToast("当前年级至少保留 1 个班");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/class-structure", {
+        method: "POST",
+        body: {
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          regularCount,
+          experimentalCount,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      showToast("班级结构已保存，请重新配置老师并生成排课");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "班级结构保存失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  applyLocalClassStructure(regularCount, experimentalCount);
+  showToast("班级结构已保存到本地演示");
+  render();
+}
+
 async function saveAdminCourseRules() {
   const rules = collectCourseRulesFromForm();
   if (!rules.some((rule) => rule.enabled && rule.weeklyLessons > 0)) {
@@ -4137,6 +4268,16 @@ function renderAdminScheduling() {
 
   document.querySelector("#adminDivisionSelect").innerHTML = schedulingDivisionOptions(config.divisionId);
   document.querySelector("#adminGradeSelect").innerHTML = schedulingGradeOptions(config.divisionId, config.gradeId);
+  const classStructure = classStructureFromConfig(config);
+  document.querySelector("#regularClassCountInput").value = classStructure.regularCount;
+  document.querySelector("#experimentalClassCountInput").value = classStructure.experimentalCount;
+  document.querySelector("#classStructureHelp").textContent =
+    `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；实验班会作为独立班级参与老师配置和排课。`;
+  document.querySelector("#classStructurePreview").innerHTML = classStructurePreviewHtml(
+    config,
+    classStructure.regularCount,
+    classStructure.experimentalCount,
+  );
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
     `当前为${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
@@ -4145,7 +4286,7 @@ function renderAdminScheduling() {
       .map((subject) => subject.name)
       .join("、")} ${config.subjects.length} 门课。`;
   document.querySelector("#subjectConfigHelp").textContent =
-    `${config.divisionName}${config.gradeName}按班级逐科指定老师，输入老师姓名、工号或编号完成匹配后再生成排课。`;
+    `${config.divisionName}${config.gradeName}直接按班级逐科指定老师，空格子不会参与排课，全部匹配后才能生成。`;
   document.querySelector("#courseRulesHelp").textContent =
     `${config.divisionName}${config.gradeName}可配置开设课程、周课时和每节时长，保存后重新生成排课时生效。`;
   document.querySelector("#courseRulesStatus").textContent =
@@ -4163,7 +4304,6 @@ function renderAdminScheduling() {
   document.querySelector("#constraintSubjectSelect").innerHTML = scheduleConstraintSubjectOptions(config);
   document.querySelector("#constraintPeriodSelect").innerHTML = scheduleConstraintPeriodOptions(config);
   document.querySelector("#scheduleConstraintList").innerHTML = adminScheduleConstraintList(config);
-  document.querySelector("#selectedTeacherPoolSummary").innerHTML = adminSelectedTeacherPoolSummary(config);
   document.querySelector("#subjectConfigList").innerHTML = adminSubjectConfigItem(config);
   renderTeacherRulePanel(config);
   const missingTeacherAssignments = missingClassSubjectTeacherAssignments(config);
@@ -4190,6 +4330,7 @@ function renderAdminScheduling() {
   document.querySelector("#confirmSchedule").disabled =
     schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
   document.querySelector("#saveCourseRules").disabled = schedulingBackendState.loading;
+  document.querySelector("#saveClassStructure").disabled = schedulingBackendState.loading;
   document.querySelector("#addGradeCourse").disabled = schedulingBackendState.loading;
   document.querySelector("#toggleCourseEditMode").disabled = schedulingBackendState.loading;
   document.querySelector("#addScheduleConstraint").disabled =
@@ -4826,7 +4967,7 @@ function subjectClassTeacherIds(subject, classId) {
   if (Array.isArray(classIds) && classIds.length) {
     return Array.from(new Set(classIds.map(String).filter(Boolean)));
   }
-  return Array.from(new Set((subject.teacherIds || []).map(String).filter(Boolean)));
+  return [];
 }
 
 function teacherInputValue(teacher) {
@@ -4981,16 +5122,6 @@ async function saveClassSubjectTeacherAssignments() {
   } catch (error) {
     showToast(error.message || "任课配置保存失败");
   }
-}
-
-function selectedSubjectTeacherCount(subjectId) {
-  return document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]:checked`).length;
-}
-
-function updateSubjectTeacherSelectionCount(subjectId) {
-  const count = selectedSubjectTeacherCount(subjectId);
-  const countNode = document.querySelector(`[data-assignment-selected-count="${subjectId}"]`);
-  if (countNode) countNode.textContent = `${count} 位已选`;
 }
 
 function courseRuleForbiddenPeriodsValue(rule) {
@@ -5239,65 +5370,6 @@ function adminScheduleConstraintList(config) {
     : `<div class="empty-state">暂无自定义硬约束</div>`;
 }
 
-function adminSelectedTeacherPoolSummary(config) {
-  const totalCells = (config.classes || []).length * (config.subjects || []).length;
-  const missing = missingClassSubjectTeacherAssignments(config);
-  const assignedCells = Math.max(totalCells - missing.length, 0);
-  const rows = config.subjects
-    .map((subject) => {
-      const assignedClasses = (config.classes || []).filter((schoolClass) =>
-        classSubjectTeacher(subject, schoolClass.id),
-      );
-      const selectedTeachers = Array.from(
-        new Map(
-          assignedClasses
-            .map((schoolClass) => classSubjectTeacher(subject, schoolClass.id))
-            .filter(Boolean)
-            .map((teacher) => [teacher.id, teacher]),
-        ).values(),
-      );
-      const missingClassNames = (config.classes || [])
-        .filter((schoolClass) => !classSubjectTeacher(subject, schoolClass.id))
-        .map((schoolClass) => schoolClass.name);
-      const teacherTags = selectedTeachers.length
-        ? selectedTeachers
-            .map(
-              (teacher) => `
-                <span class="teacher-pool-summary-tag">
-                  ${escapeHtml(teacher.name)}
-                  <small>${escapeHtml(teacher.employeeNo || teacher.id)}</small>
-                </span>
-              `,
-            )
-            .join("")
-        : `<span class="teacher-pool-summary-empty">暂无任课老师</span>`;
-
-      return `
-        <article class="teacher-pool-summary-row">
-          <div class="teacher-pool-summary-subject">
-            <strong>${escapeHtml(subject.name)}</strong>
-            <span>已配置 ${assignedClasses.length}/${(config.classes || []).length} 个班 · ${selectedTeachers.length} 位老师</span>
-            ${
-              missingClassNames.length
-                ? `<span class="teacher-pool-summary-warning">缺少：${escapeHtml(missingClassNames.slice(0, 4).join("、"))}${missingClassNames.length > 4 ? " 等" : ""}</span>`
-                : ""
-            }
-          </div>
-          <div class="teacher-pool-summary-tags">${teacherTags}</div>
-        </article>
-      `;
-    })
-    .join("");
-
-  return `
-    <div class="teacher-pool-summary-head">
-      <strong>任课配置进度</strong>
-      <span>${escapeHtml(config.divisionName)}${escapeHtml(config.gradeName)} · ${assignedCells}/${totalCells || 0} 个格子已匹配${missing.length ? ` · ${missing.length} 个待补齐` : " · 可生成排课"}</span>
-    </div>
-    <div class="teacher-pool-summary-list">${rows}</div>
-  `;
-}
-
 function adminSubjectConfigItem(config) {
   const subjects = config.subjects || [];
   const classes = config.classes || [];
@@ -5325,8 +5397,8 @@ function adminSubjectConfigItem(config) {
     <article class="subject-config-item teacher-assignment-matrix-card">
       <div class="subject-config-head">
         <div>
-          <strong>班级任课老师指定表</strong>
-          <span>按班级逐科指定老师，输入姓名、工号或教师 ID 后自动匹配。</span>
+          <strong>班级老师指定表</strong>
+          <span>每个格子代表一个班的一门课，默认留空；输入姓名、工号或教师 ID 后自动匹配。</span>
         </div>
         <div class="subject-config-meta">
           <span>${classes.length} 个班级</span>
@@ -5394,9 +5466,9 @@ function adminSubjectConfigItem(config) {
         </table>
       </div>
       <div class="subject-config-actions">
-        <span>排课时每个班级科目只使用该格子匹配到的老师。</span>
+        <span>排课时只使用每个格子里保存的老师；空格子会阻止生成，避免系统自动替你分配。</span>
         <div class="subject-config-buttons">
-          <button class="mini-button primary" data-save-teacher-assignment-matrix type="button">保存全部任课配置</button>
+          <button class="mini-button primary" data-save-teacher-assignment-matrix type="button">保存班级老师</button>
         </div>
       </div>
     </article>
@@ -7306,26 +7378,6 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const selectAllAssignmentButton = event.target.closest("[data-select-all-assignment]");
-  if (selectAllAssignmentButton) {
-    const subjectId = selectAllAssignmentButton.dataset.selectAllAssignment;
-    document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]`).forEach((input) => {
-      input.checked = true;
-    });
-    updateSubjectTeacherSelectionCount(subjectId);
-    return;
-  }
-
-  const clearAssignmentButton = event.target.closest("[data-clear-assignment]");
-  if (clearAssignmentButton) {
-    const subjectId = clearAssignmentButton.dataset.clearAssignment;
-    document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]`).forEach((input) => {
-      input.checked = false;
-    });
-    updateSubjectTeacherSelectionCount(subjectId);
-    return;
-  }
-
   if (event.target.closest("#toggleCourseEditMode")) {
     courseRulesEditMode = !courseRulesEditMode;
     renderAdminScheduling();
@@ -7341,44 +7393,6 @@ document.addEventListener("click", async (event) => {
   const deleteGradeCourseButton = event.target.closest("[data-delete-grade-course]");
   if (deleteGradeCourseButton) {
     await deleteAdminGradeCourse(deleteGradeCourseButton.dataset.deleteGradeCourse);
-    return;
-  }
-
-  const saveAssignmentButton = event.target.closest("[data-save-assignment]");
-  if (saveAssignmentButton) {
-    if (!backendMode() || currentRole() !== "admin") {
-      showToast("请使用后端行政账号保存任课关系");
-      return;
-    }
-    const subjectId = saveAssignmentButton.dataset.saveAssignment;
-    const teacherIds = Array.from(
-      document.querySelectorAll(`[data-assignment-teacher-option="${subjectId}"]:checked`),
-    ).map((input) => input.value);
-    if (!teacherIds.length) {
-      showToast("请至少选择 1 位任课老师");
-      return;
-    }
-    try {
-      await apiRequest("/api/scheduling/teacher-assignments", {
-        method: "POST",
-        body: {
-          stageId: state.schedulingConfig.stageId,
-          grade: state.schedulingConfig.grade,
-          subjectId,
-          teacherIds,
-        },
-      });
-      showToast("任课关系已保存，重新生成排课时生效");
-      await loadBackendSchedulingContext();
-    } catch (error) {
-      showToast(error.message || "任课关系保存失败");
-    }
-    return;
-  }
-
-  const assignmentTeacherOption = event.target.closest("[data-assignment-teacher-option]");
-  if (assignmentTeacherOption) {
-    updateSubjectTeacherSelectionCount(assignmentTeacherOption.dataset.assignmentTeacherOption);
     return;
   }
 
@@ -7414,6 +7428,7 @@ document.querySelector("#quickScan").addEventListener("click", async (event) => 
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
+document.querySelector("#saveClassStructure").addEventListener("click", saveAdminClassStructure);
 document.querySelector("#saveCourseRules").addEventListener("click", saveAdminCourseRules);
 document.querySelector("#addGradeCourse").addEventListener("click", addAdminGradeCourse);
 document.querySelector("#addScheduleConstraint").addEventListener("click", addAdminScheduleConstraint);
@@ -7662,6 +7677,9 @@ document.querySelector("#adminGradeSelect").addEventListener("change", async (ev
     render();
   }
 });
+
+document.querySelector("#regularClassCountInput").addEventListener("input", updateClassStructurePreview);
+document.querySelector("#experimentalClassCountInput").addEventListener("input", updateClassStructurePreview);
 
 document.querySelector("#adminClassSelect").addEventListener("change", (event) => {
   state.selectedSchedulingClassId = event.target.value;

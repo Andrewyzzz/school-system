@@ -12,9 +12,10 @@ import {
   queryNotifications,
   reviewTeacherPayrollDetail,
   revokeSession,
+  updateTeacherAssignment,
   validatePhase1Readiness,
 } from "../server/storage.js";
-import { generateScheduleDraft, publishScheduleDraft } from "../server/scheduling.js";
+import { generateScheduleDraft, publishScheduleDraft, updateGradeClassStructure } from "../server/scheduling.js";
 
 function actor(db, username) {
   const account = db.accounts.find((item) => item.username === username);
@@ -33,6 +34,31 @@ function prepareCompletedMonth(db, teacherId, month = "2026-06") {
   });
 }
 
+function configureClassTeachers(db, { stageId, grade }, actorAccount) {
+  const activeClasses = db.classes.filter(
+    (schoolClass) => schoolClass.stageId === stageId && Number(schoolClass.grade) === Number(grade) && schoolClass.active,
+  );
+  db.subjects.forEach((subject) => {
+    const teachers = db.teachers.filter(
+      (item) => item.status === "active" && item.stageId === stageId && item.primarySubjectId === subject.id,
+    );
+    if (!teachers.length) return;
+    const classTeacherIds = Object.fromEntries(
+      activeClasses.map((schoolClass, index) => [schoolClass.id, [teachers[index % teachers.length].id]]),
+    );
+    updateTeacherAssignment(
+      db,
+      {
+        stageId,
+        grade,
+        subjectId: subject.id,
+        classTeacherIds,
+      },
+      actorAccount,
+    );
+  });
+}
+
 const db = createInitialData({ teacherCount: 1000 });
 const teacher = db.teachers[0];
 const teacherAccount = db.accounts.find((account) => account.teacherId === teacher.id);
@@ -40,6 +66,39 @@ const admin = actor(db, "admin");
 const finance = actor(db, "finance");
 
 assert.equal(db.accounts.filter((account) => account.role === "teacher").length >= 1000, true);
+
+const classStructureResult = updateGradeClassStructure(
+  db,
+  {
+    stageId: "primary",
+    grade: 1,
+    regularCount: 8,
+    experimentalCount: 2,
+  },
+  admin,
+);
+assert.equal(classStructureResult.config.classStructure.regularCount, 8);
+assert.equal(classStructureResult.config.classStructure.experimentalCount, 2);
+assert.equal(classStructureResult.config.classes.length, 10);
+assert.equal(
+  classStructureResult.config.classes.filter((schoolClass) => schoolClass.classType === "experimental").length,
+  2,
+);
+
+assert.throws(
+  () =>
+    generateScheduleDraft(
+      db,
+      {
+        divisionId: "elementary",
+        gradeId: "elementary-g1",
+      },
+      admin,
+    ),
+  /请先补齐任课老师配置/,
+);
+
+configureClassTeachers(db, { stageId: "primary", grade: 1 }, admin);
 
 const schedule = generateScheduleDraft(
   db,

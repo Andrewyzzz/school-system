@@ -642,6 +642,82 @@ h2 {
   margin-bottom: 0;
 }
 
+.class-structure-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.class-structure-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.class-structure-copy strong {
+  font-size: 16px;
+}
+
+.class-structure-copy span,
+.class-structure-preview {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.class-structure-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 150px)) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.class-structure-controls .field-label {
+  margin-bottom: 0;
+}
+
+.class-structure-controls .field-label span {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.compact-button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.class-structure-preview {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.class-structure-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid rgba(0, 32, 104, 0.14);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  padding: 2px 7px;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.class-structure-tag.experimental {
+  border-color: rgba(188, 0, 12, 0.24);
+  background: var(--action-soft);
+  color: var(--action-dark);
+}
+
 .schedule-adjust-panel,
 .schedule-change-panel {
   margin-bottom: 16px;
@@ -1725,8 +1801,8 @@ h2 {
 
 .weekly-calendar {
   --time-gutter: 64px;
-  --day-column-width: 148px;
-  --hour-height: 72px;
+  --day-column-width: 196px;
+  --hour-height: 128px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1856,16 +1932,18 @@ h2 {
   position: absolute;
   left: 8px;
   right: 8px;
-  min-height: 46px;
+  height: auto !important;
+  min-height: 104px;
   border: 1px solid rgba(0, 32, 104, 0.16);
   border-left: 4px solid var(--primary);
   border-radius: 8px;
   background: #fff;
   box-shadow: 0 8px 18px rgba(0, 32, 104, 0.09);
-  padding: 7px 8px;
+  padding: 8px 10px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: 2px;
+  gap: 4px;
   overflow: hidden;
 }
 
@@ -1885,26 +1963,42 @@ h2 {
 .weekly-calendar-event span,
 .weekly-calendar-event small {
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.25;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.weekly-calendar-event-time {
+  grid-column: 1;
+  color: var(--primary);
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .weekly-calendar-event strong {
-  font-size: 13px;
-  line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  grid-column: 1 / -1;
+  font-size: 15px;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .weekly-calendar-event span,
 .weekly-calendar-event small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  grid-column: 1 / -1;
+}
+
+.weekly-calendar-event span {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.weekly-calendar-event small {
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .weekly-calendar-event-action {
+  grid-column: 1;
   margin-top: 2px;
   display: flex;
   justify-content: flex-start;
@@ -3377,6 +3471,19 @@ td {
 
   .admin-schedule-selectors {
     grid-template-columns: 1fr;
+  }
+
+  .class-structure-card,
+  .class-structure-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .class-structure-controls .compact-field {
+    max-width: none;
+  }
+
+  .compact-button {
+    width: 100%;
   }
 
   .schedule-adjust-grid {

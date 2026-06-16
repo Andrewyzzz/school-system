@@ -19,6 +19,7 @@ import {
   publishScheduleDraft,
   regenerateUnlockedScheduleAssignments,
   setScheduleAssignmentLock,
+  updateGradeClassStructure,
   updateGradeCourseRules,
   updateTeacherScheduleRule,
 } from "./scheduling.js";
@@ -68,6 +69,7 @@ const MIME_TYPES = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
   ".png": "image/png",
@@ -474,6 +476,16 @@ async function handleApi(req, res, db, url) {
         config: buildSchedulingConfig(db, options),
         draft: findScheduleDraft(db, options),
       });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/class-structure") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = updateGradeClassStructure(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
       return;
     }
 

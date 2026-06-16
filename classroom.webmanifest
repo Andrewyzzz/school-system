@@ -1,0 +1,19 @@
+{
+  "name": "富源课堂签到码",
+  "short_name": "课堂签到码",
+  "description": "教室电脑专用动态签到二维码屏",
+  "start_url": "/classroom.html",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#f4f6f8",
+  "theme_color": "#002068",
+  "icons": [
+    {
+      "src": "/assets/school-logo.jpeg",
+      "sizes": "512x512",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

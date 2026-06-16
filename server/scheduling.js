@@ -389,7 +389,6 @@ function schedulingSubjects(db, division, grade) {
       );
       const configuredTeachers = assignmentTeachers(db, division, grade, rule.subjectId);
       const availableTeachers = activeSubjectTeachers(db, division.stageId, rule.subjectId);
-      const teachers = configuredTeachers;
       const classTeacherIds = {};
       db.classes
         .filter(
@@ -400,11 +399,7 @@ function schedulingSubjects(db, division, grade) {
         )
         .forEach((schoolClass, index) => {
           const configuredIds = teacherIdsForAssignment(assignment, schoolClass.id);
-          classTeacherIds[schoolClass.id] = configuredIds.length
-            ? configuredIds
-            : teachers.length
-              ? [teachers[index % teachers.length].id]
-              : [];
+          classTeacherIds[schoolClass.id] = configuredIds;
         });
       const teacherIds = Array.from(new Set(Object.values(classTeacherIds).flat()));
       return subject
@@ -434,10 +429,27 @@ function schedulingClasses(db, division, grade) {
       return {
         id: schoolClass.id,
         name: schoolClass.name,
+        classType: schoolClass.classType || (String(schoolClass.name || "").includes("实验") ? "experimental" : "regular"),
+        displayOrder: Number(schoolClass.displayOrder || 0),
         room: room?.name || schoolClass.roomId,
         roomId: schoolClass.roomId,
       };
     });
+}
+
+function gradeClassStructure(classes = []) {
+  const activeClasses = classes.filter((schoolClass) => schoolClass.active !== false);
+  const regularCount = activeClasses.filter(
+    (schoolClass) => (schoolClass.classType || (String(schoolClass.name || "").includes("实验") ? "experimental" : "regular")) !== "experimental",
+  ).length;
+  const experimentalCount = activeClasses.filter(
+    (schoolClass) => (schoolClass.classType || (String(schoolClass.name || "").includes("实验") ? "experimental" : "regular")) === "experimental",
+  ).length;
+  return {
+    regularCount,
+    experimentalCount,
+    totalCount: activeClasses.length,
+  };
 }
 
 export function buildSchedulingConfig(db, options = {}) {
@@ -447,6 +459,7 @@ export function buildSchedulingConfig(db, options = {}) {
   const courseRules = schedulingCourseRules(db, division, grade);
   const subjects = schedulingSubjects(db, division, grade);
   const classes = schedulingClasses(db, division, grade);
+  const classStructure = gradeClassStructure(classes);
   const constraints = publicScheduleConstraints(db, division, grade);
   const teacherRules = publicTeacherScheduleRules(db, division, subjects);
 
@@ -458,7 +471,8 @@ export function buildSchedulingConfig(db, options = {}) {
     gradeName: grade.name,
     grade: grade.grade,
     weekStart: division.weekStart,
-    classCount: division.stageId === "high" ? 8 : division.stageId === "middle" ? 8 : 10,
+    classCount: classes.length,
+    classStructure,
     classes,
     rooms: classes.map((schoolClass) => ({
       id: schoolClass.roomId,
@@ -480,6 +494,140 @@ export function buildSchedulingConfig(db, options = {}) {
         name: catalogGrade.name,
       })),
     })),
+  };
+}
+
+function normalizeClassCount(value, fallback, options = {}) {
+  const min = Number.isFinite(options.min) ? options.min : 0;
+  const max = Number.isFinite(options.max) ? options.max : 30;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function classTypeLabel(classType) {
+  return classType === "experimental" ? "实验班" : "普通班";
+}
+
+function buildClassAndRoomRows(division, grade, options = {}) {
+  const regularCount = normalizeClassCount(options.regularCount, 1, { min: 0, max: 30 });
+  const experimentalCount = normalizeClassCount(options.experimentalCount, 0, { min: 0, max: 10 });
+  if (regularCount + experimentalCount < 1) {
+    const error = new Error("当前年级至少保留 1 个班");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const classRows = [];
+  const roomRows = [];
+  const pushClass = (classType, index, displayOrder) => {
+    const suffix = classType === "experimental" ? `E${pad(index)}` : pad(index);
+    const classId = `CLS-${division.stageId}-${grade.grade}-${suffix}`;
+    const roomId = `ROOM-${division.stageId}-${grade.grade}-${suffix}`;
+    const className =
+      classType === "experimental"
+        ? `${grade.name}实验${index}班`
+        : `${grade.name} ${index} 班`;
+    const roomName =
+      classType === "experimental"
+        ? `${division.shortName || division.name}${grade.name}实验${index}班`
+        : `${division.shortName || division.name}${grade.name}-${pad(index)}`;
+    classRows.push({
+      id: classId,
+      stageId: division.stageId,
+      stageName: division.name,
+      grade: grade.grade,
+      name: className,
+      classType,
+      classTypeLabel: classTypeLabel(classType),
+      displayOrder,
+      roomId,
+      active: true,
+    });
+    roomRows.push({
+      id: roomId,
+      stageId: division.stageId,
+      name: roomName,
+      qrCode: `ROOM:${roomId}`,
+      displayKey: `screen-${roomId.toLowerCase()}`,
+      active: true,
+    });
+  };
+
+  for (let index = 1; index <= regularCount; index += 1) {
+    pushClass("regular", index, index);
+  }
+  for (let index = 1; index <= experimentalCount; index += 1) {
+    pushClass("experimental", index, regularCount + index);
+  }
+
+  return { classRows, roomRows, regularCount, experimentalCount };
+}
+
+function pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds) {
+  (db.teacherAssignments || [])
+    .filter((assignment) => assignment.stageId === division.stageId && Number(assignment.grade) === Number(grade.grade))
+    .forEach((assignment) => {
+      if (!assignment.classTeacherIds || typeof assignment.classTeacherIds !== "object" || Array.isArray(assignment.classTeacherIds)) {
+        assignment.classTeacherIds = {};
+      }
+      Object.keys(assignment.classTeacherIds).forEach((classId) => {
+        if (!validClassIds.has(classId)) delete assignment.classTeacherIds[classId];
+      });
+      assignment.teacherIds = Array.from(new Set(Object.values(assignment.classTeacherIds).flat().map(String).filter(Boolean)));
+    });
+}
+
+export function updateGradeClassStructure(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const stageId = String(options.stageId || "").trim();
+  const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const previousClasses = schedulingClasses(db, division, grade);
+  const previousStructure = gradeClassStructure(previousClasses);
+  const { classRows, roomRows, regularCount, experimentalCount } = buildClassAndRoomRows(division, grade, {
+    regularCount: options.regularCount ?? previousStructure.regularCount,
+    experimentalCount: options.experimentalCount ?? previousStructure.experimentalCount,
+  });
+  const scopeClassIds = new Set(
+    (db.classes || [])
+      .filter((schoolClass) => schoolClass.stageId === division.stageId && Number(schoolClass.grade) === Number(grade.grade))
+      .map((schoolClass) => schoolClass.id),
+  );
+  const scopeRoomIds = new Set(
+    (db.rooms || [])
+      .filter((room) => room.stageId === division.stageId && scopeClassIds.has(String(room.id).replace(/^ROOM/, "CLS")))
+      .map((room) => room.id),
+  );
+  classRows.forEach((schoolClass) => scopeRoomIds.add(schoolClass.roomId));
+  db.classes = (db.classes || []).filter(
+    (schoolClass) => !(schoolClass.stageId === division.stageId && Number(schoolClass.grade) === Number(grade.grade)),
+  );
+  db.rooms = (db.rooms || []).filter((room) => !scopeRoomIds.has(room.id));
+  db.classes.push(...classRows);
+  db.rooms.push(...roomRows);
+
+  const validClassIds = new Set(classRows.map((schoolClass) => schoolClass.id));
+  pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds);
+  clearScheduleDraftForScope(db, division, grade);
+  db.scheduleChangeRequests = (db.scheduleChangeRequests || []).filter(
+    (request) => !(request.divisionId === division.id && request.gradeId === grade.id),
+  );
+
+  const now = new Date().toISOString();
+  db.auditLogs.push({
+    action: "grade_class_structure_update",
+    stageId: division.stageId,
+    grade: grade.grade,
+    regularCount,
+    experimentalCount,
+    actorAccountId: actorAccount?.id || "",
+    createdAt: now,
+  });
+  db.meta.updatedAt = now;
+
+  return {
+    config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }),
+    draft: findScheduleDraft(db, { divisionId: division.id, gradeId: grade.id }),
   };
 }
 
