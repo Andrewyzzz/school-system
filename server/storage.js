@@ -278,6 +278,15 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       status: "active",
     },
     {
+      id: "ACC-CLASSROOM",
+      username: "classroom",
+      passwordHash: defaultPasswordHash,
+      role: "classroom",
+      name: "教室大屏",
+      department: "教室终端",
+      status: "active",
+    },
+    {
       id: "ACC-TEACHER-DEMO",
       username: "teacher",
       passwordHash: defaultPasswordHash,
@@ -640,6 +649,14 @@ function normalizeDatabase(db) {
     demoTeacherAccount.name = demoTeacher.name;
     demoTeacherAccount.department = demoTeacher.department || demoTeacher.stageName || "高中部";
     changed = true;
+  }
+
+  if (!(db.accounts || []).some((account) => account.username === "classroom")) {
+    const classroomAccount = (defaults.accounts || []).find((account) => account.username === "classroom");
+    if (classroomAccount) {
+      db.accounts.push(classroomAccount);
+      changed = true;
+    }
   }
 
   (db.rooms || []).forEach((room) => {

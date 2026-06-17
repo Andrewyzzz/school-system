@@ -258,8 +258,8 @@ const initialState = {
       id: "N004",
       audience: "all",
       source: "系统",
-      title: "固定教室码试运行",
-      text: "本 Demo 使用固定教室码模拟扫码，正式产品将由后端进行身份、设备、课表和时间窗口校验。",
+      title: "教室动态码试运行",
+      text: "系统使用教室大屏动态二维码完成扫码考勤，由后端进行身份、设备、课表和时间窗口校验。",
       time: "2026-06-09 10:00",
       level: "info",
     },
@@ -296,6 +296,13 @@ const initialState = {
       name: "周主任",
       title: "行政账号",
       department: "教务行政",
+    },
+    {
+      id: "classroom-screen",
+      role: "classroom",
+      name: "教室大屏",
+      title: "教室屏账号",
+      department: "教室终端",
     },
   ],
   teachers: [
@@ -618,6 +625,7 @@ const loginUsers = [
   { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
   { username: "admin", password: "123456", accountId: "admin-zhou" },
+  { username: "classroom", password: "123456", accountId: "classroom-screen" },
 ];
 
 let state = loadSavedState();
@@ -712,6 +720,13 @@ let schedulingBackendState = {
   loading: false,
   error: "",
 };
+let classroomScreenState = {
+  rooms: [],
+  loading: false,
+  loaded: false,
+  error: "",
+  search: "",
+};
 let draggedScheduleAssignmentId = "";
 
 if (backendSession?.account) {
@@ -799,12 +814,18 @@ const views = {
     title: "异常提醒",
     el: document.querySelector("#warningsView"),
   },
+  classroomScreens: {
+    role: "classroom",
+    title: "教室二维码库",
+    el: document.querySelector("#classroomScreensView"),
+  },
 };
 
 const defaultViewByRole = {
   teacher: "dashboard",
   finance: "finance",
   admin: "adminScheduling",
+  classroom: "classroomScreens",
 };
 
 const lessonTypeLabel = {
@@ -1038,6 +1059,7 @@ function roleTitle(role) {
   if (role === "teacher") return "老师账号";
   if (role === "finance") return "财务账号";
   if (role === "admin") return "行政账号";
+  if (role === "classroom") return "教室屏账号";
   return "系统账号";
 }
 
@@ -1780,9 +1802,9 @@ function salaryRows(teacherId) {
     ["班主任津贴", "月度固定津贴", profile.homeroomAllowance || 0],
     ["名师奖励", "月度奖励项", profile.famousTeacherReward || 0],
     ["合规加班", `${profile.approvedOvertimeHours || 0} 小时 × ${rules.overtimeRate} 元`, salary.overtimeAllowance],
-    ["考勤扣款", "演示扣款项", -salary.attendanceDeduction],
-    ["社保代扣", "演示固定值", -salary.socialInsurance],
-    ["个税代扣", `起征点 ${rules.taxThreshold} 元，演示税率 3%`, -salary.tax],
+    ["考勤扣款", "当前扣款项", -salary.attendanceDeduction],
+    ["社保代扣", "固定代扣", -salary.socialInsurance],
+    ["个税代扣", `起征点 ${rules.taxThreshold} 元，试运行税率 3%`, -salary.tax],
   ];
 }
 
@@ -2867,7 +2889,7 @@ async function saveAdminClassStructure() {
   }
 
   applyLocalClassStructure(regularCount, experimentalCount);
-  showToast("班级结构已保存到本地演示");
+  showToast("班级结构已保存到试运行数据");
   render();
 }
 
@@ -2906,7 +2928,7 @@ async function saveAdminCourseRules() {
   }
 
   applyLocalCourseRules(rules);
-  showToast("课程规则已保存到本地演示");
+  showToast("课程规则已保存到试运行数据");
   render();
 }
 
@@ -3009,7 +3031,7 @@ async function addAdminGradeCourse() {
 
   applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes);
   document.querySelector("#newCourseName").value = "";
-  showToast("课程已添加到本地演示");
+  showToast("课程已添加到试运行数据");
   render();
 }
 
@@ -3104,7 +3126,7 @@ async function addAdminScheduleConstraint() {
     reason,
     active: true,
   });
-  showToast("硬约束已添加到本地演示");
+  showToast("硬约束已添加到试运行数据");
   render();
 }
 
@@ -3764,6 +3786,7 @@ function render() {
   renderFinanceRecords();
   renderSettlement();
   renderWarnings();
+  renderClassroomScreens();
   saveState();
 }
 
@@ -3788,12 +3811,16 @@ function renderShell() {
       ? `${teacher.department} · ${teacher.subject}`
       : role === "finance"
         ? `${account.department} · 薪资结算`
-        : `${account.department} · 排课管理`;
+        : role === "classroom"
+          ? `${account.department} · 动态二维码`
+          : `${account.department} · 排课管理`;
   document.querySelector("#accountSummaryTitle").textContent = account.title;
   document.querySelector("#accountSummaryMeta").textContent =
     role === "teacher"
       ? `${account.name} · ${teacher.department} · ${teacher.subject}`
-      : `${account.name} · ${account.department}`;
+      : role === "classroom"
+        ? `${account.name} · 教室二维码库`
+        : `${account.name} · ${account.department}`;
 
   document.querySelectorAll(".view").forEach((view) => {
     view.classList.remove("is-active");
@@ -3904,7 +3931,6 @@ function renderDashboard() {
   const nextStatus = document.querySelector("#nextLessonStatus");
   const detail = document.querySelector("#nextLessonDetail");
   const scanButton = document.querySelector("#scanNextLesson");
-  const quickScanButton = document.querySelector("#quickScan");
 
   if (!nextLesson) {
     nextStatus.textContent = "今日完成";
@@ -3914,7 +3940,6 @@ function renderDashboard() {
       <p class="muted">当前已完成课时已同步到薪资试算，月末可进入确认流程。</p>
     `;
     scanButton.disabled = true;
-    quickScanButton.disabled = true;
   } else {
     nextStatus.textContent = statusLabel[nextLesson.status];
     nextStatus.className = nextLesson.status === "checkedIn" ? "status-pill locked" : "status-pill";
@@ -3928,12 +3953,8 @@ function renderDashboard() {
       </div>
     `;
     scanButton.disabled = false;
-    quickScanButton.disabled = false;
     scanButton.dataset.id = nextLesson.id;
-    quickScanButton.dataset.id = nextLesson.id;
-    scanButton.dataset.attendanceAction = actionForLesson(nextLesson);
-    quickScanButton.dataset.attendanceAction = actionForLesson(nextLesson);
-    scanButton.innerHTML = `<span aria-hidden="true">✓</span>${actionLabel(actionForLesson(nextLesson))}`;
+    scanButton.innerHTML = `<span aria-hidden="true">⌖</span>去${actionLabel(actionForLesson(nextLesson))}`;
   }
 
   const todayLessons = lessons.filter((lesson) => lesson.date === todayKey());
@@ -4919,7 +4940,7 @@ function renderPersonnelList() {
   ).length;
   document.querySelector("#personnelFilteredCount").textContent = rows.length;
   if (status) {
-    status.textContent = "文件模式演示数据";
+    status.textContent = "文件模式试运行数据";
     status.className = "status-pill";
   }
   table.innerHTML = pageRows.length
@@ -5684,31 +5705,21 @@ function renderScanner() {
     .join("");
 
   const lesson = lessons.find((item) => item.id === state.scannerLessonId);
-  const payload = lesson ? buildQrPayload(lesson) : "";
-  const qrBox = document.querySelector("#qrCodeBox");
-  const payloadText = document.querySelector("#qrPayloadText");
+  const lessonCard = document.querySelector("#scannerLessonCard");
 
   if (!lesson) {
-    payloadText.textContent = "";
-    qrBox.innerHTML = `<div class="empty-state">暂无可生成二维码的课时</div>`;
-  } else if (backendMode() && lesson.source === "backend-api") {
-    const screenPath = classroomScreenPathForLesson(lesson);
-    payloadText.textContent = `${window.location.origin}/${screenPath}`;
-    qrBox.innerHTML = `
-      <div class="empty-state">
-        教室电脑打开动态签到屏<br />
-        <code>${screenPath}</code>
+    lessonCard.innerHTML = `<div class="empty-state">暂无可扫码处理的课时</div>`;
+  } else {
+    const action = actionForLesson(lesson);
+    lessonCard.innerHTML = `
+      <strong>${escapeHtml(actionLabel(action))} · ${escapeHtml(lesson.className)} · ${escapeHtml(lesson.course)}</strong>
+      <div class="detail-grid">
+        <div class="detail-cell"><span>上课时间</span>${escapeHtml(formatDate(lesson.date))} ${escapeHtml(lesson.time)}</div>
+        <div class="detail-cell"><span>教室</span>${escapeHtml(lesson.room)}</div>
+        <div class="detail-cell"><span>当前状态</span>${escapeHtml(statusLabel[lesson.status] || lesson.status)}</div>
+        <div class="detail-cell"><span>扫码要求</span>扫描教室电脑实时二维码</div>
       </div>
     `;
-  } else if (typeof qrcode === "function") {
-    payloadText.textContent = payload;
-    const qr = qrcode(0, "M");
-    qr.addData(payload);
-    qr.make();
-    qrBox.innerHTML = qr.createSvgTag(6, 1);
-  } else {
-    payloadText.textContent = payload;
-    qrBox.innerHTML = `<div class="empty-state">二维码生成库未加载</div>`;
   }
 
   document.querySelector("#lastScanResult").textContent = state.lastScanText || "暂无";
@@ -6020,11 +6031,11 @@ function renderFinanceDashboard() {
   const financeApiStatus = document.querySelector("#financeApiStatus");
   const financePageInfo = document.querySelector("#financeTeacherPageInfo");
   if (financeApiStatus) {
-    financeApiStatus.textContent = "本地演示数据";
+    financeApiStatus.textContent = "试运行数据";
     financeApiStatus.className = "status-pill";
   }
   if (financePageInfo) {
-    financePageInfo.textContent = `本地演示 · 共 ${filteredTeachers.length} 位老师`;
+    financePageInfo.textContent = `试运行数据 · 共 ${filteredTeachers.length} 位老师`;
   }
   document.querySelector("#financePrevPage").disabled = true;
   document.querySelector("#financeNextPage").disabled = true;
@@ -6627,10 +6638,10 @@ function actionCell(lesson) {
     return `<span class="muted">非本人任务</span>`;
   }
   if (lesson.status === "pending" || lesson.status === "scheduled") {
-    return `<button class="mini-button primary" data-attendance-action="checkIn" data-scan="${lesson.id}" type="button">签入</button>`;
+    return `<button class="mini-button primary" data-open-scanner="${lesson.id}" type="button">去签入</button>`;
   }
   if (lesson.status === "checkedIn") {
-    return `<button class="mini-button primary" data-attendance-action="checkOut" data-scan="${lesson.id}" type="button">签出</button>`;
+    return `<button class="mini-button primary" data-open-scanner="${lesson.id}" type="button">去签出</button>`;
   }
   if (lesson.status === "completed") {
     return `<span class="muted">已完成</span>`;
@@ -6676,23 +6687,6 @@ function roomDisplayKeyForDevelopment(roomId) {
   return `screen-${String(roomId || "").toLowerCase()}`;
 }
 
-async function dynamicQrPayloadForLesson(lesson) {
-  if (!backendMode() || !lesson?.roomId) return buildQrPayload(lesson);
-  const result = await apiRequest(
-    `/api/classrooms/${encodeURIComponent(lesson.roomId)}/dynamic-qr?displayKey=${encodeURIComponent(
-      roomDisplayKeyForDevelopment(lesson.roomId),
-    )}`,
-  );
-  return JSON.stringify(result.payload);
-}
-
-function classroomScreenPathForLesson(lesson) {
-  if (!lesson?.roomId) return "";
-  return `classroom.html?roomId=${encodeURIComponent(lesson.roomId)}&displayKey=${encodeURIComponent(
-    roomDisplayKeyForDevelopment(lesson.roomId),
-  )}`;
-}
-
 function lessonWindow(lesson) {
   const [startTime, endTime] = lesson.time.split("-");
   const start = new Date(`${lesson.date}T${startTime}:00+08:00`);
@@ -6714,14 +6708,6 @@ function formatClock(date) {
     hour12: false,
     timeZone: "Asia/Shanghai",
   });
-}
-
-function demoTimeForAction(lesson, action) {
-  const window = lessonWindow(lesson);
-  if (action === "checkOut") {
-    return new Date(window.end.getTime() + 5 * 60 * 1000).toISOString();
-  }
-  return new Date(window.start.getTime() - 5 * 60 * 1000).toISOString();
 }
 
 function actionForLesson(lesson) {
@@ -6886,8 +6872,129 @@ function renderSecurityChecks() {
     .join("");
 }
 
+function classroomDisplayKey(room) {
+  return room.displayKey || roomDisplayKeyForDevelopment(room.id);
+}
+
+function classroomScreenUrl(room) {
+  return `/classroom.html?roomId=${encodeURIComponent(room.id)}&displayKey=${encodeURIComponent(classroomDisplayKey(room))}`;
+}
+
+function localClassroomRooms() {
+  return (state.schedulingConfig.rooms || []).map((room) => ({
+    ...room,
+    stageId: state.schedulingConfig.stageId || state.schedulingConfig.divisionId || "",
+    displayKey: classroomDisplayKey(room),
+  }));
+}
+
+async function loadClassroomRooms() {
+  if (!backendMode() || currentRole() !== "classroom") return;
+  classroomScreenState = { ...classroomScreenState, loading: true, error: "" };
+  renderClassroomScreens();
+  try {
+    const result = await apiRequest("/api/classrooms");
+    classroomScreenState = {
+      ...classroomScreenState,
+      rooms: result.rooms || [],
+      loading: false,
+      loaded: true,
+      error: "",
+    };
+  } catch (error) {
+    classroomScreenState = {
+      ...classroomScreenState,
+      loading: false,
+      loaded: true,
+      error: error.message || "教室列表读取失败",
+    };
+    showToast(classroomScreenState.error);
+  }
+  renderClassroomScreens();
+}
+
+function classroomScreenCard(room) {
+  const url = classroomScreenUrl(room);
+  return `
+    <article class="classroom-screen-card">
+      <header>
+        <div>
+          <strong>${escapeHtml(room.name || room.id)}</strong>
+          <span class="muted">${escapeHtml(room.stageId || "教室")} · ${escapeHtml(room.id)}</span>
+        </div>
+        <span class="tag ${room.active === false ? "exception" : "completed"}">${room.active === false ? "停用" : "可用"}</span>
+      </header>
+      <code>${escapeHtml(url)}</code>
+      <div class="classroom-screen-actions">
+        <a class="mini-button primary" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开大屏</a>
+        <button class="mini-button" data-copy-classroom-url="${escapeHtml(url)}" type="button">复制地址</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderClassroomScreens() {
+  const grid = document.querySelector("#classroomScreenGrid");
+  if (!grid || currentRole() !== "classroom") return;
+
+  if (backendMode() && !classroomScreenState.loaded && !classroomScreenState.loading) {
+    loadClassroomRooms();
+  }
+
+  const rooms = backendMode() ? classroomScreenState.rooms : localClassroomRooms();
+  const search = classroomScreenState.search.trim().toLowerCase();
+  const filteredRooms = rooms.filter((room) => {
+    if (!search) return true;
+    return [room.id, room.name, room.stageId, room.displayKey]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(search));
+  });
+
+  const status = document.querySelector("#classroomScreenStatus");
+  if (status) {
+    if (classroomScreenState.loading) {
+      status.textContent = "读取中";
+      status.className = "status-pill warning";
+    } else if (classroomScreenState.error) {
+      status.textContent = "读取失败";
+      status.className = "status-pill warning";
+    } else {
+      status.textContent = `${filteredRooms.length}/${rooms.length} 间教室`;
+      status.className = "status-pill done";
+    }
+  }
+
+  const searchInput = document.querySelector("#classroomRoomSearch");
+  if (searchInput && searchInput.value !== classroomScreenState.search) {
+    searchInput.value = classroomScreenState.search;
+  }
+
+  if (classroomScreenState.loading) {
+    grid.innerHTML = `<div class="empty-state">正在读取教室二维码库...</div>`;
+    return;
+  }
+  if (classroomScreenState.error) {
+    grid.innerHTML = `<div class="empty-state">${escapeHtml(classroomScreenState.error)}</div>`;
+    return;
+  }
+  grid.innerHTML = filteredRooms.length
+    ? filteredRooms.map(classroomScreenCard).join("")
+    : `<div class="empty-state">没有匹配的教室</div>`;
+}
+
 async function handleDecodedScan(decodedText, options = {}) {
   state.lastScanText = decodedText;
+  const backendLesson = state.lessons.find((item) => item.id === state.scannerLessonId);
+  if (backendMode() && currentRole() === "teacher" && backendLesson?.source === "backend-api") {
+    await recordAttendance(
+      backendLesson.id,
+      options.action || actionForLesson(backendLesson),
+      options.nowText || new Date().toISOString(),
+      decodedText,
+    );
+    return;
+  }
+
   const validation = validateQrPayload(decodedText, options);
   state.lastSecurityChecks = validation.checks;
   state.lastSecurityPassed = validation.ok;
@@ -6905,26 +7012,21 @@ async function handleDecodedScan(decodedText, options = {}) {
 function selectedScannerActionContext() {
   const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
   if (!lesson) {
-    return { action: "checkIn", lessonId: "", nowText: state.demoNow };
+    return { action: "checkIn", lessonId: "", nowText: new Date().toISOString() };
   }
   const action = actionForLesson(lesson);
   return {
     action,
     lessonId: lesson.id,
-    nowText: demoTimeForAction(lesson, action),
+    nowText: new Date().toISOString(),
   };
 }
 
-async function attemptSecureAttendance(id, action = null) {
+function openScannerForLesson(id) {
   const lesson = state.lessons.find((item) => item.id === id);
   if (!lesson) return;
-  const attendanceAction = action || actionForLesson(lesson);
-  const qrPayload = await dynamicQrPayloadForLesson(lesson);
-  await handleDecodedScan(qrPayload, {
-    action: attendanceAction,
-    lessonId: lesson.id,
-    nowText: demoTimeForAction(lesson, attendanceAction),
-  });
+  state.scannerLessonId = lesson.id;
+  switchView("scanner");
 }
 
 async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
@@ -7118,7 +7220,7 @@ function startCameraScanner() {
     return;
   }
   if (!window.isSecureContext && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") {
-    showToast("摄像头需要 HTTPS 或 localhost，请使用手动输入兜底");
+    showToast("摄像头需要 HTTPS 或 localhost，请使用授权输入");
     document.querySelector("#scannerStatus").textContent = "需要 HTTPS";
     document.querySelector("#scannerStatus").className = "status-pill warning";
     return;
@@ -7254,6 +7356,10 @@ async function authenticate(username, password) {
         await loadFinanceTeacherPage({ page: 1 });
         await loadPayrollRules();
       }
+      if (payload.account.role === "classroom") {
+        classroomScreenState = { rooms: [], loading: false, loaded: false, error: "", search: "" };
+        await loadClassroomRooms();
+      }
       await loadBackendNotifications();
       render();
       loginButton.disabled = false;
@@ -7300,6 +7406,10 @@ document.addEventListener("input", (event) => {
   if (assignmentInput) {
     syncClassSubjectTeacherInput(assignmentInput);
   }
+  if (event.target.closest("#classroomRoomSearch")) {
+    classroomScreenState.search = event.target.value;
+    renderClassroomScreens();
+  }
 });
 
 document.addEventListener("click", async (event) => {
@@ -7329,9 +7439,21 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const scanButton = event.target.closest("[data-scan]");
-  if (scanButton) {
-    await attemptSecureAttendance(scanButton.dataset.scan, scanButton.dataset.attendanceAction);
+  const scannerButton = event.target.closest("[data-open-scanner]");
+  if (scannerButton) {
+    openScannerForLesson(scannerButton.dataset.openScanner);
+    return;
+  }
+
+  const copyClassroomUrlButton = event.target.closest("[data-copy-classroom-url]");
+  if (copyClassroomUrlButton) {
+    const url = `${window.location.origin}${copyClassroomUrlButton.dataset.copyClassroomUrl}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast("教室大屏地址已复制");
+    } catch (error) {
+      showToast(url);
+    }
     return;
   }
 
@@ -7417,13 +7539,7 @@ document.querySelector("#logoutButton").addEventListener("click", logout);
 document.querySelector("#topLogoutButton").addEventListener("click", logout);
 
 document.querySelector("#scanNextLesson").addEventListener("click", async (event) => {
-  const lesson = state.lessons.find((item) => item.id === event.currentTarget.dataset.id);
-  await attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
-});
-
-document.querySelector("#quickScan").addEventListener("click", async (event) => {
-  const lesson = state.lessons.find((item) => item.id === event.currentTarget.dataset.id);
-  await attemptSecureAttendance(event.currentTarget.dataset.id, lesson ? actionForLesson(lesson) : null);
+  openScannerForLesson(event.currentTarget.dataset.id);
 });
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
@@ -7462,7 +7578,7 @@ document.querySelector("#resetDemo").addEventListener("click", () => {
   } catch (error) {
     // Storage reset is best-effort.
   }
-  showToast("演示数据已重置");
+  showToast("试运行数据已重置");
   render();
 });
 
@@ -7483,7 +7599,7 @@ document.querySelector("#confirmWorkload").addEventListener("click", async () =>
 
 document.querySelector("#simulateApproval").addEventListener("click", () => {
   if (backendMode()) {
-    showToast("后端模式下需由教务和总校角色审批，当前先禁止老师端模拟审批");
+    showToast("后端模式下需由教务和总校角色审批，当前老师端不能直接审批");
     return;
   }
 
@@ -7746,59 +7862,15 @@ document.addEventListener("drop", async (event) => {
   await moveScheduleAssignmentToSlot(assignmentId, zone.dataset.scheduleDropDate, zone.dataset.scheduleDropPeriod);
 });
 
-document.querySelector("#simulateQrRead").addEventListener("click", async () => {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) return;
-  const action = actionForLesson(lesson);
-  await handleDecodedScan(await dynamicQrPayloadForLesson(lesson), {
-    action,
-    lessonId: lesson.id,
-    nowText: demoTimeForAction(lesson, action),
-  });
-});
-
-document.querySelector("#simulateOutOfWindowQr").addEventListener("click", async () => {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) return;
-  const originalNow = state.demoNow;
-  state.demoNow = "2026-06-09T12:30:00+08:00";
-  await handleDecodedScan(await dynamicQrPayloadForLesson(lesson), {
-    action: actionForLesson(lesson),
-    lessonId: lesson.id,
-    nowText: state.demoNow,
-  });
-  state.demoNow = originalNow;
-});
-
-document.querySelector("#simulateTamperedQr").addEventListener("click", async () => {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) return;
-  const payload = JSON.parse(await dynamicQrPayloadForLesson(lesson));
-  payload.roomId = "ROOM-tampered";
-  payload.roomName = "伪造教室";
-  await handleDecodedScan(JSON.stringify(payload), {
-    action: actionForLesson(lesson),
-    lessonId: lesson.id,
-    nowText: demoTimeForAction(lesson, actionForLesson(lesson)),
-  });
-});
-
-document.querySelector("#copyQrText").addEventListener("click", async () => {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) return;
-  const text = backendMode() && lesson.source === "backend-api" ? classroomScreenPathForLesson(lesson) : buildQrPayload(lesson);
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast("二维码内容已复制");
-  } catch (error) {
-    state.lastScanText = text;
-    showToast("浏览器不允许复制，已显示在最近识别结果");
-    renderScanner();
-  }
-});
-
 document.querySelector("#startScanner").addEventListener("click", startCameraScanner);
 document.querySelector("#stopScanner").addEventListener("click", stopCameraScanner);
+document.querySelector("#refreshClassroomRooms").addEventListener("click", () => {
+  if (backendMode() && currentRole() === "classroom") {
+    loadClassroomRooms();
+  } else {
+    renderClassroomScreens();
+  }
+});
 
 document.querySelector("#financeTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
@@ -7866,5 +7938,8 @@ if (backendMode()) {
     loadBackendSchedulingContext();
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
     loadPayrollRules();
+  }
+  if (currentRole() === "classroom") {
+    loadClassroomRooms();
   }
 }

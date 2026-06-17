@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>富源学校管理系统 - 教师任务与薪资 Demo</title>
+    <title>富源学校管理系统 - 教师任务与薪资</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -17,7 +17,7 @@
           </div>
         </div>
         <div class="login-heading">
-          <p class="eyebrow">本地演示 · 2026 年 6 月</p>
+          <p class="eyebrow">试运行环境 · 2026 年 6 月</p>
           <h1 id="loginTitle">账号登录</h1>
         </div>
         <form class="login-form" id="loginForm">
@@ -31,10 +31,11 @@
             登录
           </button>
         </form>
-        <div class="demo-login-grid" aria-label="演示账号">
+        <div class="demo-login-grid" aria-label="测试账号">
           <button class="ghost-button" data-demo-login="teacher0003" type="button">老师账号</button>
           <button class="ghost-button" data-demo-login="finance" type="button">财务账号</button>
           <button class="ghost-button" data-demo-login="admin" type="button">行政账号</button>
+          <button class="ghost-button" data-demo-login="classroom" type="button">教室屏账号</button>
         </div>
       </div>
     </section>
@@ -45,7 +46,7 @@
           <img class="brand-logo" src="assets/school-logo.jpeg" alt="富源学校校徽" />
           <div>
             <strong>富源学校管理系统</strong>
-            <span>教师课时与薪资 Demo</span>
+            <span>教师课时与薪资</span>
           </div>
         </div>
 
@@ -121,6 +122,10 @@
             <span aria-hidden="true">!</span>
             异常提醒
           </button>
+          <button class="nav-item" data-view="classroomScreens" data-role="classroom" type="button">
+            <span aria-hidden="true">▣</span>
+            教室二维码库
+          </button>
         </nav>
 
         <div class="teacher-card">
@@ -133,24 +138,20 @@
       <main class="main">
         <header class="topbar">
           <div>
-            <p class="eyebrow">本地演示 · 2026 年 6 月</p>
+            <p class="eyebrow">试运行环境 · 2026 年 6 月</p>
             <h1 id="viewTitle">任课老师工作台</h1>
           </div>
           <div class="top-actions">
-            <button class="ghost-button" id="resetDemo" type="button" title="恢复演示数据">
+            <button class="ghost-button" id="resetDemo" type="button" title="恢复试运行数据">
               <span aria-hidden="true">↻</span>
-              重置演示
+              重置数据
             </button>
             <button class="ghost-button top-logout-button" id="topLogoutButton" type="button" title="退出当前账号">
               退出登录
             </button>
-            <button class="ghost-button" data-role-action="teacher" data-view-jump="scanner" type="button" title="打开真实扫码演示">
+            <button class="ghost-button" data-role-action="teacher" data-view-jump="scanner" type="button" title="打开签入/签出入口">
               <span aria-hidden="true">⌖</span>
               签入/签出入口
-            </button>
-            <button class="primary-button" data-role-action="teacher" id="quickScan" type="button" title="模拟教师在教室扫码签入或签出">
-              <span aria-hidden="true">✓</span>
-              模拟签入/签出
             </button>
           </div>
         </header>
@@ -200,11 +201,9 @@
                 <span class="status-pill" id="nextLessonStatus">待签入</span>
               </div>
               <div class="lesson-hero">
-                <div class="qr-visual" aria-label="教室二维码模拟图">
-                  <span></span><span></span><span></span><span></span>
-                  <span></span><span></span><span></span><span></span>
-                  <span></span><span></span><span></span><span></span>
-                  <span></span><span></span><span></span><span></span>
+                <div class="scan-entry-visual" aria-label="签入签出流程">
+                  <strong>扫码</strong>
+                  <span>教室屏动态码</span>
                 </div>
                 <div class="next-lesson-detail" id="nextLessonDetail"></div>
               </div>
@@ -249,7 +248,7 @@
             <div class="panel-heading">
               <div>
                 <h2 id="todayTasksTitle">今日课时任务</h2>
-                <p>演示重点：计划课表、课前签入、课后签出、异常标记、薪资联动。</p>
+                <p>当前范围：计划课表、课前签入、课后签出、异常标记、薪资联动。</p>
               </div>
             </div>
             <div class="table-wrap">
@@ -903,38 +902,19 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <h2 id="scannerTitle">教室动态二维码</h2>
-                  <p>正式签到使用教室电脑实时二维码。老师扫码后由系统按老师账号、动态码、当前时间和课表匹配课时。</p>
+                  <h2 id="scannerTitle">签入/签出入口</h2>
+                  <p>请选择本人课时，然后扫描教室电脑上显示的实时二维码。系统会按老师账号、动态码、当前时间和课表匹配课时。</p>
                 </div>
               </div>
-              <label class="field-label" for="qrLessonSelect">选择要演示的课时</label>
+              <label class="field-label" for="qrLessonSelect">选择本次课时</label>
               <select class="lesson-select" id="qrLessonSelect"></select>
-              <div class="generated-qr" id="qrCodeBox" aria-label="课时二维码"></div>
-              <div class="qr-payload">
-                <span>教室大屏地址或二维码内容</span>
-                <code id="qrPayloadText"></code>
-              </div>
-              <div class="action-row">
-                <button class="primary-button" id="simulateQrRead" type="button">
-                  <span aria-hidden="true">✓</span>
-                  模拟读到此码
-                </button>
-                <button class="ghost-button" id="simulateOutOfWindowQr" type="button">
-                  模拟非上课时间
-                </button>
-                <button class="ghost-button" id="simulateTamperedQr" type="button">
-                  模拟伪造教室码
-                </button>
-                <button class="ghost-button" id="copyQrText" type="button">
-                  复制码内容
-                </button>
-              </div>
+              <div class="scan-lesson-card" id="scannerLessonCard"></div>
             </section>
 
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <h2>摄像头扫码</h2>
+                  <h2>扫描教室二维码</h2>
                   <p>老师用手机扫描教室电脑上持续刷新的二维码，过期码和伪造码会被后端拦截。</p>
                 </div>
                 <span class="status-pill" id="scannerStatus">未启动</span>
@@ -954,12 +934,12 @@
                 </button>
               </div>
               <div class="manual-scan-box">
-                <label class="field-label" for="manualQrText">手动输入兜底</label>
+                <label class="field-label" for="manualQrText">授权输入</label>
                 <textarea
                   class="manual-qr-input"
                   id="manualQrText"
                   rows="3"
-                  placeholder="摄像头权限失败时，可粘贴教室电脑二维码内容"
+                  placeholder="摄像头权限失败且经管理员允许时，可粘贴教室电脑二维码内容"
                 ></textarea>
                 <button class="ghost-button" id="submitManualQr" type="button">
                   提交二维码内容
@@ -968,16 +948,16 @@
             </section>
           </div>
 
-          <section class="panel scanner-note" aria-label="扫码落地说明">
-            <strong>落地时的关键校验</strong>
-            <p>二维码由教室电脑向后端实时获取，扫码后还要校验老师身份、绑定设备、动态码有效期、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
+          <section class="panel scanner-note" aria-label="扫码校验说明">
+            <strong>正式校验规则</strong>
+            <p>二维码由教室电脑向后端实时获取，老师端不生成二维码、不在老师端伪造扫码结果。扫码后由后端校验老师身份、动态码有效期、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
           </section>
 
           <section class="panel security-panel" aria-label="防作弊校验结果">
             <div class="panel-heading">
               <div>
                 <h2>防作弊校验结果</h2>
-                <p>Demo 中由前端模拟，正式产品必须由后端根据固定教室码和当前时间校验。</p>
+                <p>扫码提交后显示系统返回的校验结果；后端负责判定是否计入有效考勤。</p>
               </div>
               <span class="status-pill" id="securitySummary">等待扫码</span>
             </div>
@@ -1036,7 +1016,7 @@
                   确认本月工作量
                 </button>
                 <button class="ghost-button" id="simulateApproval" type="button">
-                  模拟两级审批
+                  两级审批试运行
                 </button>
               </div>
             </section>
@@ -1101,7 +1081,7 @@
             <article class="metric">
               <span>任课老师</span>
               <strong id="financeTeacherCount">0</strong>
-              <small>当前演示样本</small>
+              <small>当前试运行样本</small>
             </article>
             <article class="metric">
               <span>待处理课时</span>
@@ -1121,7 +1101,7 @@
             <article class="metric">
               <span>全校应发</span>
               <strong id="financeGrossTotal">¥0</strong>
-              <small>当前演示工资总额</small>
+              <small>当前试运行工资总额</small>
             </article>
             <article class="metric">
               <span>全校实发</span>
@@ -1166,7 +1146,7 @@
                 <h2 id="financeTitle">老师薪资结算概览</h2>
                 <p>财务账号可以查看不同老师的考勤记录和工资试算，并完成月度结算。</p>
               </div>
-              <span class="status-pill" id="financeApiStatus">本地演示数据</span>
+              <span class="status-pill" id="financeApiStatus">试运行数据</span>
             </div>
             <div class="finance-list-toolbar" aria-label="教师列表筛选">
               <label class="field-label" for="financeStageFilter">
@@ -1366,10 +1346,30 @@
             <div class="panel-heading">
               <div>
                 <h2 id="warningsTitle">异常提醒</h2>
-                <p>本地 Demo 先展示老师维度异常，后续可扩展到教务审计清单。</p>
+                <p>当前版本先展示老师维度异常，后续可扩展到教务审计清单。</p>
               </div>
             </div>
             <div class="warning-list" id="warningList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="classroomScreensView" aria-labelledby="classroomScreensTitle">
+          <section class="panel classroom-screen-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="classroomScreensTitle">教室二维码库</h2>
+                <p>教室电脑专用入口。选择教室后打开大屏页面，第一次绑定后该电脑会记住对应教室。</p>
+              </div>
+              <span class="status-pill" id="classroomScreenStatus">读取中</span>
+            </div>
+            <div class="classroom-toolbar">
+              <label class="field-label" for="classroomRoomSearch">
+                搜索教室
+                <input id="classroomRoomSearch" type="search" placeholder="教室名、教室编号、学部" />
+              </label>
+              <button class="ghost-button" id="refreshClassroomRooms" type="button">刷新教室列表</button>
+            </div>
+            <div class="classroom-screen-grid" id="classroomScreenGrid"></div>
           </section>
         </section>
       </main>

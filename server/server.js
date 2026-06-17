@@ -332,7 +332,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/classrooms") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin", "classroom"]);
       if (!auth) return;
       sendJson(res, 200, { rooms: db.rooms });
       return;
