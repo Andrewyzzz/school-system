@@ -621,6 +621,9 @@ const STORAGE_KEY = "schoolPayrollDemoStateV8";
 const SESSION_KEY = "schoolPayrollDemoSessionV1";
 const API_SESSION_KEY = "schoolPayrollApiSessionV1";
 const SECURITY_SECRET = "school-demo-signing-key";
+const TERM_START_WEEK = "2026-06-15";
+const TERM_WEEK_COUNT = 20;
+const PUBLISHED_LESSON_SOURCES = new Set(["admin-scheduling", "backend-scheduling"]);
 const loginUsers = [
   { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
@@ -863,6 +866,18 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function isPublishedLessonSource(lesson) {
+  return PUBLISHED_LESSON_SOURCES.has(lesson?.source);
+}
+
+function sanitizeProductionState(nextState) {
+  nextState.lessons = (nextState.lessons || []).filter(isPublishedLessonSource);
+  if (!nextState.lessons.some((lesson) => lesson.id === nextState.scannerLessonId)) {
+    nextState.scannerLessonId = nextState.lessons[0]?.id || "";
+  }
+  return nextState;
+}
+
 function buildTeacherImportTemplate() {
   const seed = String(Date.now()).slice(-5);
   return `employeeNo,name,stageId,department,primarySubjectId,title,phone,hiredAt,username,defaultPassword,status
@@ -874,7 +889,7 @@ FY${seed}3,导入老师C,high,高中部,english,高级教师,139${seed}003,2026-
 function loadSavedState() {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return clone(initialState);
+    if (!raw) return sanitizeProductionState(clone(initialState));
     const saved = JSON.parse(raw);
     const selectedDivisionId = saved.selectedSchedulingDivisionId || initialState.selectedSchedulingDivisionId;
     const selectedGradeId = saved.selectedSchedulingGradeId || initialState.selectedSchedulingGradeId;
@@ -896,9 +911,9 @@ function loadSavedState() {
     if (!schedulingConfig.classes.some((schoolClass) => schoolClass.id === nextState.selectedSchedulingClassId)) {
       nextState.selectedSchedulingClassId = schedulingConfig.classes[0]?.id || "";
     }
-    return nextState;
+    return sanitizeProductionState(nextState);
   } catch (error) {
-    return clone(initialState);
+    return sanitizeProductionState(clone(initialState));
   }
 }
 
@@ -3761,6 +3776,14 @@ function payrollStatusTag(status = "preview") {
   return `<span class="tag ${className}">${payrollStatusLabel(status)}</span>`;
 }
 
+function renderStep(name, renderFn) {
+  try {
+    renderFn();
+  } catch (error) {
+    console.error(`渲染失败：${name}`, error);
+  }
+}
+
 function render() {
   renderAuth();
   if (!sessionAccountId) return;
@@ -3770,23 +3793,23 @@ function render() {
   }
 
   renderShell();
-  renderNotices();
-  renderNotificationCenter();
-  renderDashboard();
-  renderTasks();
-  renderSchedule();
-  renderAdminScheduling();
-  renderPersonnelList();
-  renderTeacherImport();
-  renderScanner();
-  renderRecords();
-  renderConfirmation();
-  renderTeacherPayroll();
-  renderFinanceDashboard();
-  renderFinanceRecords();
-  renderSettlement();
-  renderWarnings();
-  renderClassroomScreens();
+  renderStep("通知栏", renderNotices);
+  renderStep("通知中心", renderNotificationCenter);
+  renderStep("老师工作台", renderDashboard);
+  renderStep("课时任务", renderTasks);
+  renderStep("我的课表", renderSchedule);
+  renderStep("行政排课", renderAdminScheduling);
+  renderStep("人员列表", renderPersonnelList);
+  renderStep("教师导入", renderTeacherImport);
+  renderStep("签入签出", renderScanner);
+  renderStep("考勤记录", renderRecords);
+  renderStep("月度确认", renderConfirmation);
+  renderStep("老师总薪资", renderTeacherPayroll);
+  renderStep("财务首页", renderFinanceDashboard);
+  renderStep("老师记录", renderFinanceRecords);
+  renderStep("薪资结算", renderSettlement);
+  renderStep("异常提醒", renderWarnings);
+  renderStep("教室二维码库", renderClassroomScreens);
   saveState();
 }
 
@@ -3912,7 +3935,7 @@ function renderDashboard() {
   const plannedUnits = lessons
     .filter((lesson) => lesson.status !== "exception")
     .reduce((sum, lesson) => sum + lesson.units, 0);
-  const pendingLessons = lessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn");
+  const pendingLessons = lessons.filter((lesson) => ["scheduled", "pending", "checkedIn"].includes(lesson.status));
   const warnings = buildWarnings(teacherId);
   const nextLesson = pendingLessons[0];
 
@@ -3932,7 +3955,16 @@ function renderDashboard() {
   const detail = document.querySelector("#nextLessonDetail");
   const scanButton = document.querySelector("#scanNextLesson");
 
-  if (!nextLesson) {
+  if (!lessons.length) {
+    nextStatus.textContent = "未发布";
+    nextStatus.className = "status-pill warning";
+    detail.innerHTML = `
+      <strong>暂无课程任务</strong>
+      <p class="muted">教务或行政发布课表后，这里才会显示需要签入/签出的课程。</p>
+    `;
+    scanButton.disabled = true;
+    scanButton.innerHTML = `<span aria-hidden="true">✓</span>签入`;
+  } else if (!nextLesson) {
     nextStatus.textContent = "今日完成";
     nextStatus.className = "status-pill done";
     detail.innerHTML = `
@@ -3975,11 +4007,19 @@ function renderTasks() {
 
   document.querySelector("#taskTable").innerHTML = lessons.length
     ? lessons.map(fullTaskRow).join("")
-    : `<tr><td colspan="8"><div class="empty-state">当前筛选条件下没有课时任务</div></td></tr>`;
+    : `<tr><td colspan="8"><div class="empty-state">暂无课程任务，行政发布课表后自动同步到这里</div></td></tr>`;
 }
 
 function availableScheduleWeeks(lessons) {
-  const weeks = Array.from(new Set(lessons.map((lesson) => startOfNaturalWeek(lesson.date)))).sort();
+  const baseWeek = startOfNaturalWeek(TERM_START_WEEK);
+  const baseDate = parseDateKey(baseWeek);
+  const termWeeks = Array.from({ length: TERM_WEEK_COUNT }, (_, index) => formatDateKey(addDays(baseDate, index * 7)));
+  const weeks = Array.from(
+    new Set([
+      ...termWeeks,
+      ...lessons.map((lesson) => startOfNaturalWeek(lesson.date)),
+    ]),
+  ).sort();
   const currentWeek = startOfNaturalWeek(todayKey());
   if (!weeks.includes(currentWeek)) weeks.unshift(currentWeek);
   return weeks;
@@ -4153,11 +4193,16 @@ function renderSchedule() {
   const select = document.querySelector("#scheduleWeekSelect");
   const title = document.querySelector("#scheduleWeekTitle");
   const range = document.querySelector("#scheduleWeekRange");
+  const syncStatus = document.querySelector("#scheduleSyncStatus");
   if (!summary || !grid || !select || !title || !range) return;
 
   const lessons = teacherLessons(currentTeacherId()).sort((a, b) =>
     `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
   );
+  if (syncStatus) {
+    syncStatus.textContent = lessons.length ? "教务已分发" : "等待发布";
+    syncStatus.className = lessons.length ? "status-pill done" : "status-pill warning";
+  }
   const weeks = availableScheduleWeeks(lessons);
   if (!weeks.includes(state.selectedScheduleWeekStart)) {
     state.selectedScheduleWeekStart = weeks[0] || startOfNaturalWeek(todayKey());
@@ -5694,23 +5739,35 @@ function renderScanner() {
     state.scannerLessonId = actionableLesson?.id || lessons[0]?.id || "";
   }
 
-  select.innerHTML = lessons
-    .map(
-      (lesson) => `
+  select.disabled = !lessons.length;
+  select.innerHTML = lessons.length
+    ? lessons
+        .map(
+          (lesson) => `
         <option value="${lesson.id}" ${lesson.id === state.scannerLessonId ? "selected" : ""}>
           ${formatDate(lesson.date)} ${lesson.time} · ${lesson.room} · ${lesson.className} · ${statusLabel[lesson.status]}
         </option>
       `,
-    )
-    .join("");
+        )
+        .join("")
+    : `<option value="">暂无课程任务</option>`;
 
   const lesson = lessons.find((item) => item.id === state.scannerLessonId);
   const lessonCard = document.querySelector("#scannerLessonCard");
+  const startButton = document.querySelector("#startScanner");
 
   if (!lesson) {
     lessonCard.innerHTML = `<div class="empty-state">暂无可扫码处理的课时</div>`;
+    if (startButton) {
+      startButton.disabled = true;
+      startButton.innerHTML = `<span aria-hidden="true">✓</span>签入`;
+    }
   } else {
     const action = actionForLesson(lesson);
+    if (startButton) {
+      startButton.disabled = Boolean(qrScanner);
+      startButton.innerHTML = `<span aria-hidden="true">✓</span>${escapeHtml(actionLabel(action))}`;
+    }
     lessonCard.innerHTML = `
       <strong>${escapeHtml(actionLabel(action))} · ${escapeHtml(lesson.className)} · ${escapeHtml(lesson.course)}</strong>
       <div class="detail-grid">
@@ -5725,7 +5782,7 @@ function renderScanner() {
   document.querySelector("#lastScanResult").textContent = state.lastScanText || "暂无";
   document.querySelector("#scannerStatus").textContent = qrScanner ? "识别中" : "未启动";
   document.querySelector("#scannerStatus").className = qrScanner ? "status-pill done" : "status-pill";
-  document.querySelector("#startScanner").disabled = Boolean(qrScanner);
+  if (startButton && lesson) startButton.disabled = Boolean(qrScanner);
   document.querySelector("#stopScanner").disabled = !qrScanner;
   renderSecurityChecks();
 }
@@ -6773,7 +6830,7 @@ function validateQrPayload(decodedText, options = {}) {
     dynamicPayload
       ? "属于教室电脑实时二维码"
       : staticPayload
-        ? "属于本地固定教室码"
+        ? "属于授权教室码"
         : "不是本系统教室二维码",
   );
 
@@ -6791,7 +6848,7 @@ function validateQrPayload(decodedText, options = {}) {
     dynamicPayload
       ? "动态码签名将由后端验签"
       : signaturePassed
-        ? "固定教室码签名匹配"
+        ? "教室码签名匹配"
         : "签名不匹配，疑似伪造或篡改",
   );
 
@@ -7215,6 +7272,12 @@ async function confirmAndPublishSchedule() {
 }
 
 function startCameraScanner() {
+  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
+  if (!lesson) {
+    showToast("暂无可签入或签出的课程任务");
+    return;
+  }
+  document.querySelector(".scanner-tools")?.setAttribute("open", "");
   if (typeof Html5QrcodeScanner !== "function") {
     showToast("扫码库未加载，无法启动摄像头");
     return;

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>富源学校管理系统 - 教师任务与薪资</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260617-task-cleanup-6" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -201,10 +201,6 @@
                 <span class="status-pill" id="nextLessonStatus">待签入</span>
               </div>
               <div class="lesson-hero">
-                <div class="scan-entry-visual" aria-label="签入签出流程">
-                  <strong>扫码</strong>
-                  <span>教室屏动态码</span>
-                </div>
                 <div class="next-lesson-detail" id="nextLessonDetail"></div>
               </div>
               <div class="action-row">
@@ -898,40 +894,32 @@
         </section>
 
         <section class="view" id="scannerView" aria-labelledby="scannerTitle">
-          <div class="scanner-layout">
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <h2 id="scannerTitle">签入/签出入口</h2>
-                  <p>请选择本人课时，然后扫描教室电脑上显示的实时二维码。系统会按老师账号、动态码、当前时间和课表匹配课时。</p>
-                </div>
+          <section class="panel scanner-action-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="scannerTitle">签入/签出</h2>
+                <p>选择本人课时后按当前状态签入或签出，系统会用教室屏动态码完成后台校验。</p>
               </div>
-              <label class="field-label" for="qrLessonSelect">选择本次课时</label>
-              <select class="lesson-select" id="qrLessonSelect"></select>
-              <div class="scan-lesson-card" id="scannerLessonCard"></div>
-            </section>
-
-            <section class="panel">
-              <div class="panel-heading">
-                <div>
-                  <h2>扫描教室二维码</h2>
-                  <p>老师用手机扫描教室电脑上持续刷新的二维码，过期码和伪造码会被后端拦截。</p>
-                </div>
-                <span class="status-pill" id="scannerStatus">未启动</span>
-              </div>
+              <span class="status-pill" id="scannerStatus">未启动</span>
+            </div>
+            <label class="field-label" for="qrLessonSelect">选择本次课时</label>
+            <select class="lesson-select" id="qrLessonSelect"></select>
+            <div class="scan-lesson-card" id="scannerLessonCard"></div>
+            <div class="scanner-primary-actions">
+              <button class="primary-button" id="startScanner" type="button">
+                <span aria-hidden="true">✓</span>
+                签入
+              </button>
+              <button class="ghost-button" id="stopScanner" type="button" disabled>
+                停止识别
+              </button>
+            </div>
+            <details class="scanner-tools">
+              <summary>扫码识别与授权输入</summary>
               <div class="reader-box" id="reader"></div>
               <div class="scan-result">
                 <span>最近识别结果</span>
                 <strong id="lastScanResult">暂无</strong>
-              </div>
-              <div class="action-row">
-                <button class="primary-button" id="startScanner" type="button">
-                  <span aria-hidden="true">⌖</span>
-                  启动摄像头
-                </button>
-                <button class="ghost-button" id="stopScanner" type="button" disabled>
-                  停止扫码
-                </button>
               </div>
               <div class="manual-scan-box">
                 <label class="field-label" for="manualQrText">授权输入</label>
@@ -945,21 +933,16 @@
                   提交二维码内容
                 </button>
               </div>
-            </section>
-          </div>
-
-          <section class="panel scanner-note" aria-label="扫码校验说明">
-            <strong>正式校验规则</strong>
-            <p>二维码由教室电脑向后端实时获取，老师端不生成二维码、不在老师端伪造扫码结果。扫码后由后端校验老师身份、动态码有效期、当前时间是否命中本人课表、是否在允许签入/签出窗口内、是否重复计薪、是否存在已审批调课记录。</p>
+            </details>
           </section>
 
-          <section class="panel security-panel" aria-label="防作弊校验结果">
+          <section class="panel security-panel" aria-label="系统校验结果">
             <div class="panel-heading">
               <div>
-                <h2>防作弊校验结果</h2>
-                <p>扫码提交后显示系统返回的校验结果；后端负责判定是否计入有效考勤。</p>
+                <h2>系统校验</h2>
+                <p>后端校验老师身份、动态码有效期、课表时间窗口、重复计薪和调课审批状态。</p>
               </div>
-              <span class="status-pill" id="securitySummary">等待扫码</span>
+              <span class="status-pill" id="securitySummary">等待操作</span>
             </div>
             <div class="security-check-list" id="securityCheckList"></div>
           </section>
@@ -1385,6 +1368,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260617-task-cleanup-6"></script>
   </body>
 </html>

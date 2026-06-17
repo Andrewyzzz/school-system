@@ -454,56 +454,11 @@ function normalizeTeacherAssignments(db) {
   return changed;
 }
 
-function createSampleLessons(teachers, classes) {
-  const lessons = [];
-  const weekStart = "2026-06-15";
-  const times = [
-    "08:00-08:40",
-    "08:50-09:30",
-    "10:10-10:50",
-    "11:00-11:40",
-    "14:20-15:00",
-  ];
-
-  teachers.slice(0, 20).forEach((teacher, teacherIndex) => {
-    const subject = SUBJECTS.find((item) => item.id === teacher.primarySubjectId) || SUBJECTS[0];
-    const teacherClasses = classes
-      .filter((item) => item.stageId === teacher.stageId)
-      .slice(teacherIndex % 8, (teacherIndex % 8) + 5);
-
-    teacherClasses.forEach((schoolClass, lessonIndex) => {
-      const date = addDays(weekStart, lessonIndex % 5);
-      const time = times[(teacherIndex + lessonIndex) % times.length];
-      const completed = teacherIndex === 0 && lessonIndex < 2;
-
-      lessons.push({
-        id: `LESSON-${teacher.id}-${pad(lessonIndex + 1, 2)}`,
-        teacherId: teacher.id,
-        classId: schoolClass.id,
-        className: schoolClass.name,
-        subjectId: subject.id,
-        subjectName: subject.name,
-        roomId: schoolClass.roomId,
-        date,
-        time,
-        type: "regular",
-        units: 1,
-        status: completed ? "completed" : "scheduled",
-        checkInAt: completed ? `${date}T${time.slice(0, 5)}:00+08:00` : "",
-        checkOutAt: completed ? `${date}T${time.slice(6)}:00+08:00` : "",
-        source: "seed",
-      });
-    });
-  });
-
-  return lessons;
-}
-
 export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {}) {
   const defaultPasswordHash = hashPassword(DEFAULT_PASSWORD);
   const { classes, rooms } = createClassesAndRooms();
   const { teachers, accounts } = createTeachersAndAccounts(teacherCount, defaultPasswordHash);
-  const lessonInstances = createSampleLessons(teachers, classes);
+  const lessonInstances = [];
   const teacherAssignments = createTeacherAssignments(teachers, classes);
 
   return {
@@ -685,6 +640,22 @@ function normalizeDatabase(db) {
 
   if (!db.meta) {
     db.meta = defaults.meta;
+    changed = true;
+  }
+  if (!db.meta.productionLessonSourceMigrationAt) {
+    const publishedSources = new Set(["backend-scheduling"]);
+    const removedLessonIds = new Set();
+    db.lessonInstances = (db.lessonInstances || []).filter((lesson) => {
+      const keep = publishedSources.has(lesson.source);
+      if (!keep && lesson.id) removedLessonIds.add(lesson.id);
+      return keep;
+    });
+    if (removedLessonIds.size) {
+      db.attendanceRecords = (db.attendanceRecords || []).filter(
+        (record) => !removedLessonIds.has(record.lessonId),
+      );
+    }
+    db.meta.productionLessonSourceMigrationAt = new Date().toISOString();
     changed = true;
   }
   if (!db.meta.schemaVersion || db.meta.schemaVersion < 2) {
