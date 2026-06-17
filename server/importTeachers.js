@@ -1,4 +1,5 @@
 import { hashPassword } from "./auth.js";
+import { defaultTeacherSalaryProfile } from "./payroll.js";
 
 const REQUIRED_COLUMNS = ["employeeNo", "name", "stageId", "department", "primarySubjectId", "username"];
 const OPTIONAL_COLUMNS = ["title", "phone", "hiredAt", "defaultPassword", "status"];
@@ -304,6 +305,16 @@ export function commitTeacherImport(db, csvText = "", actorAccount = null) {
       phone: row.phone,
       status: row.status,
       hiredAt: row.hiredAt || "2026-09-01",
+      salaryProfile: defaultTeacherSalaryProfile(
+        {
+          id: teacherId,
+          stageId: row.stageId,
+          primarySubjectId: row.primarySubjectId,
+          title: row.title || "任课教师",
+          hiredAt: row.hiredAt || "2026-09-01",
+        },
+        teacherNumber - 1,
+      ),
       source: "import",
       createdAt,
     };

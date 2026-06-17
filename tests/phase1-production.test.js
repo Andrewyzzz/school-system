@@ -5,6 +5,7 @@ import {
   createInitialData,
   createNotification,
   createSession,
+  exportPayrollDetails,
   findActiveSession,
   generateTeacherPayrollDetail,
   lockTeacherPayrollDetail,
@@ -160,6 +161,12 @@ assert.equal(workload.confirmation.status, "school_approved");
 
 let payroll = generateTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "generated");
+assert.equal(payroll.salarySchemeVersion, "fuyuan-dedicated-teacher-2026-v1");
+assert.ok(payroll.rows.some((row) => row.name === "考核工资"), "expected assessment salary row");
+assert.ok(payroll.rows.some((row) => row.name === "校龄工资"), "expected seniority salary row");
+assert.ok(payroll.rows.some((row) => row.name === "住房补贴"), "expected housing allowance row");
+assert.ok(payroll.rows.some((row) => row.name === "课时工资"), "expected lesson salary row");
+assert.ok(payroll.lines.every((line) => line.basis), "expected every lesson line to explain basis");
 
 payroll = reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "reviewed");
@@ -167,6 +174,10 @@ assert.equal(payroll.generated.status, "reviewed");
 payroll = lockTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "locked");
 assert.equal(payroll.confirmation.status, "locked");
+
+const exportResult = exportPayrollDetails(db, { month: "2026-06" });
+assert.ok(exportResult.content.includes("规则版本"));
+assert.ok(exportResult.content.includes("考核工资"));
 
 const readiness = validatePhase1Readiness(db);
 assert.equal(readiness.passed, true, JSON.stringify(readiness.checks, null, 2));

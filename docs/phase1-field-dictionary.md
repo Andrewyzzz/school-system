@@ -1,6 +1,6 @@
 # 第一阶段字段字典
 
-更新时间：2026-06-11
+更新时间：2026-06-18
 
 本字段字典用于第一阶段正式开发，覆盖任课老师账号、排课、签入签出、工作内容、薪资明细和财务复核。当前本地 JSON 数据仓库先按这些字段组织，后续切换正式数据库时保持业务含义不变。
 
@@ -32,9 +32,24 @@
 | primarySubjectId | string | 是 | 主授科目 ID |
 | primarySubjectName | string | 是 | 主授科目名称 |
 | title | string | 否 | 任课教师、骨干教师、高级教师等 |
+| salaryProfile | object | 是 | 专任教师工资档案，用于第一阶段工资规则引擎 |
 | phone | string | 否 | 手机号 |
 | status | enum | 是 | `active`、`disabled`、`left` |
 | hiredAt | date | 否 | 入职日期 |
+
+### salaryProfile
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| version | string | 是 | 工资档案版本，例如 `fuyuan-dedicated-teacher-2026-v1` |
+| qualificationGrade | enum | 是 | 职称/学历档：`seniorProfessor`、`seniorTeacher`、`firstOrDoctor`、`secondOrMaster`、`thirdOrBachelor`、`ungradedOrJuniorCollege` |
+| schoolYears | number | 是 | 校龄年数，用于校龄工资阶梯 |
+| assessmentBand | enum | 是 | 考核工资档：`high`、`middle`、`primaryCoreHigh`、`primaryCoreLow`、`primarySpecial` |
+| housingTier | enum | 是 | 住房补贴档：`chief`、`backboneOrGradeHead`、`teacher` |
+| probationRate | number | 是 | 试用期比例，正式员工为 `1` |
+| roles | object | 是 | 班主任、年级主任、备课组长、毕业班等岗位津贴字段 |
+| manualItems | array | 是 | 财务补充项/扣减项，名师津贴、课题奖励第一阶段先在此留痕 |
+| attendanceDeduction | number | 是 | 第一阶段人工考勤扣减金额，完整自动扣款规则进入第三阶段 |
 
 ## 3. 学部 stages
 
@@ -146,6 +161,21 @@
 | basis | string | 是 | 计算口径 |
 | amount | number | 是 | 金额 |
 | payable | boolean | 是 | 是否计薪 |
+
+## 11. 专任教师工资规则 payrollRules.teacherSalaryScheme
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| version | string | 规则版本 |
+| monthlyWeeks | number | 月度课时折算周数，当前为 `4.4` |
+| baseSalaryByQualification | object | 按职称/学历档配置基本工资 |
+| stageLessonRules | object | 按高中、初中、小学配置正课、补课、代课、早晚自习、学科系数 |
+| assessmentSalary | object | 按学段和岗位类别配置考核工资 |
+| postAllowances | object | 按学段配置班主任、年级主任、教研组长、备课组长等教师岗位津贴 |
+| seniorityAllowance | object | 校龄工资阶梯 |
+| housingAllowance | object | 住房补贴档 |
+
+第一阶段工资明细采用 `summarySnapshot` 和 `rowsSnapshot` 留存生成时的规则结果。财务锁定后，后续规则变更不会改写已锁定快照。
 
 ## 索引建议
 

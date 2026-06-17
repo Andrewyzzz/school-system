@@ -2,6 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { hashPassword, hashToken, verifyPassword } from "./auth.js";
+import {
+  calculateDedicatedTeacherPayroll,
+  createDefaultPayrollRules,
+  defaultTeacherSalaryProfile,
+  ensureTeacherSalaryProfile,
+  normalizePayrollRules,
+} from "./payroll.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
@@ -314,6 +321,16 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       primarySubjectId: subject.id,
       primarySubjectName: subject.name,
       title: index % 7 === 0 ? "高级教师" : index % 3 === 0 ? "骨干教师" : "任课教师",
+      salaryProfile: defaultTeacherSalaryProfile(
+        {
+          id: teacherId,
+          stageId: stage.id,
+          primarySubjectId: subject.id,
+          title: index % 7 === 0 ? "高级教师" : index % 3 === 0 ? "骨干教师" : "任课教师",
+          hiredAt: `202${index % 6}-09-01`,
+        },
+        index,
+      ),
       phone: `138${pad(index, 8)}`,
       status: "active",
       hiredAt: `202${index % 6}-09-01`,
@@ -483,18 +500,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     scheduleChangeRequests: [],
     lessonInstances,
     attendanceRecords: [],
-    payrollRules: {
-      baseSalary: 6500,
-      positionSalary: 1500,
-      regular: 80,
-      morning: 50,
-      evening: 50,
-      weekend: 120,
-      makeup: 100,
-      overtime: 60,
-      taxThreshold: 5000,
-      taxRate: 0.03,
-    },
+    payrollRules: createDefaultPayrollRules(),
     scheduleDrafts: [],
     workloadConfirmations: [],
     payrollDetails: [],
@@ -625,18 +631,28 @@ function normalizeDatabase(db) {
     }
   });
 
-  db.payrollRules = {
-    ...defaults.payrollRules,
-    ...(db.payrollRules || {}),
-  };
-  ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime", "taxThreshold", "taxRate"].forEach(
-    (key) => {
-      if (!Number.isFinite(Number(db.payrollRules[key]))) {
-        db.payrollRules[key] = defaults.payrollRules[key];
-        changed = true;
-      }
-    },
+  const normalizedPayrollRules = normalizePayrollRules(db.payrollRules || defaults.payrollRules);
+  if (JSON.stringify(db.payrollRules || null) !== JSON.stringify(normalizedPayrollRules)) {
+    db.payrollRules = normalizedPayrollRules;
+    changed = true;
+  }
+
+  (db.teachers || []).forEach((teacher, index) => {
+    if (ensureTeacherSalaryProfile(teacher, index + 1)) {
+      changed = true;
+    }
+  });
+
+  const currentSalarySchemeVersion = db.payrollRules?.teacherSalaryScheme?.version || "";
+  const beforePayrollDetailCount = (db.payrollDetails || []).length;
+  db.payrollDetails = (db.payrollDetails || []).filter(
+    (detail) =>
+      detail.status === "locked" ||
+      detail.summarySnapshot?.salarySchemeVersion === currentSalarySchemeVersion,
   );
+  if (db.payrollDetails.length !== beforePayrollDetailCount) {
+    changed = true;
+  }
 
   if (!db.meta) {
     db.meta = defaults.meta;
@@ -1229,7 +1245,7 @@ export function queryPersonnel(db, query = {}) {
 
 export function updatePayrollRules(db, rules = {}, actorAccount = null) {
   const allowedKeys = ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime", "taxThreshold", "taxRate"];
-  const nextRules = { ...db.payrollRules };
+  const nextRules = normalizePayrollRules(db.payrollRules);
   allowedKeys.forEach((key) => {
     if (rules[key] === undefined || rules[key] === "") return;
     const value = Number(rules[key]);
@@ -1240,7 +1256,7 @@ export function updatePayrollRules(db, rules = {}, actorAccount = null) {
     }
     nextRules[key] = key === "taxRate" ? value : Math.round(value * 100) / 100;
   });
-  db.payrollRules = nextRules;
+  db.payrollRules = normalizePayrollRules(nextRules);
   db.auditLogs.push({
     action: "payroll_rules_update",
     actorAccountId: actorAccount?.id || "",
@@ -1571,43 +1587,13 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   const lessons = db.lessonInstances
     .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-
-  const lines = lessons.map((lesson) => {
-    const rate = db.payrollRules[lesson.type] || db.payrollRules.regular;
-    const payable = lesson.status === "completed";
-    return {
-      lessonId: lesson.id,
-      date: lesson.date,
-      time: lesson.time,
-      className: lesson.className,
-      subjectName: lesson.subjectName,
-      room: lessonRoomName(db, lesson),
-      type: lesson.type,
-      units: lesson.units,
-      rate,
-      status: lesson.status,
-      amount: payable ? lesson.units * rate : 0,
-      payable,
-    };
-  });
-
-  const baseSalary = Number(db.payrollRules.baseSalary || 6500);
-  const positionSalary = Number(db.payrollRules.positionSalary || 0);
-  const lessonAmount = lines.reduce((sum, line) => sum + line.amount, 0);
-  const grossPay = baseSalary + positionSalary + lessonAmount;
-  const tax = Math.max(grossPay - db.payrollRules.taxThreshold, 0) * db.payrollRules.taxRate;
-
-  return {
+  return calculateDedicatedTeacherPayroll({
     teacher,
+    lessons,
     month,
-    baseSalary,
-    positionSalary,
-    lessonAmount,
-    grossPay,
-    tax: Math.round(tax * 100) / 100,
-    netPay: Math.round((grossPay - tax) * 100) / 100,
-    lines,
-  };
+    payrollRules: db.payrollRules,
+    getRoomName: (lesson) => lessonRoomName(db, lesson),
+  });
 }
 
 function ensurePayrollDetails(db) {
@@ -1633,23 +1619,11 @@ function assertWorkloadSchoolApproved(db, teacherId, month = "2026-06") {
 function buildPayrollRows(db, payroll, workload) {
   if (!payroll || !workload) return [];
   return [
-    {
-      name: "基本工资",
-      basis: "任课教师固定基础项",
-      amount: payroll.baseSalary,
-      category: "fixed",
-    },
-    {
-      name: "岗位工资",
-      basis: "岗位定级后自动匹配",
-      amount: payroll.positionSalary || 0,
-      category: "fixed",
-    },
-    ...workload.categories.map((category) => ({
-      name: category.label,
-      basis: `${category.units} 节 × ${category.rate} 元`,
-      amount: category.amount,
-      category: "lesson",
+    ...(payroll.components || []).map((component) => ({
+      name: component.name,
+      basis: component.basis,
+      amount: component.amount,
+      category: component.category,
     })),
     {
       name: "个税代扣",
@@ -1681,6 +1655,7 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
           lockedAt: generated.lockedAt || "",
           lockedByName: generated.lockedByName || "",
           summarySnapshot: generated.summarySnapshot,
+          rowsSnapshot: generated.rowsSnapshot,
         }
       : null,
   };
@@ -1712,8 +1687,14 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     generatedByAccountId: actorAccount?.id || "",
     generatedByName: actorAccount?.name || "",
     summarySnapshot: {
+      salarySchemeVersion: detail.salarySchemeVersion,
       baseSalary: detail.baseSalary,
+      assessmentSalary: detail.assessmentSalary || 0,
+      senioritySalary: detail.senioritySalary || 0,
+      housingAllowance: detail.housingAllowance || 0,
       positionSalary: detail.positionSalary || 0,
+      supplementalAmount: detail.supplementalAmount || 0,
+      deductionAmount: detail.deductionAmount || 0,
       lessonAmount: detail.lessonAmount,
       grossPay: detail.grossPay,
       tax: detail.tax,
@@ -1898,7 +1879,30 @@ export function exportPayrollDetails(db, options = {}) {
       .toLowerCase()
       .includes(search);
   });
-  const headers = ["月份", "工号", "姓名", "学部", "年级", "科目", "状态", "基本工资", "岗位工资", "课时津贴", "应发", "个税", "实发", "可计薪课时", "待处理", "异常"];
+  const headers = [
+    "月份",
+    "工号",
+    "姓名",
+    "学部",
+    "年级",
+    "科目",
+    "状态",
+    "规则版本",
+    "基本工资",
+    "考核工资",
+    "校龄工资",
+    "住房补贴",
+    "岗位津贴",
+    "课时工资",
+    "补充项",
+    "扣减项",
+    "应发",
+    "个税",
+    "实发",
+    "可计薪课时",
+    "待处理",
+    "异常",
+  ];
   const rows = details.map((detail) => {
     const teacher = findTeacher(db, detail.teacherId);
     const summary = detail.summarySnapshot || {};
@@ -1910,9 +1914,15 @@ export function exportPayrollDetails(db, options = {}) {
       teacher ? gradeCoverageText(db, teacher) : "",
       teacher?.primarySubjectName || "",
       detail.status,
+      summary.salarySchemeVersion || "",
       summary.baseSalary || 0,
+      summary.assessmentSalary || 0,
+      summary.senioritySalary || 0,
+      summary.housingAllowance || 0,
       summary.positionSalary || 0,
       summary.lessonAmount || 0,
+      summary.supplementalAmount || 0,
+      summary.deductionAmount || 0,
       summary.grossPay || 0,
       summary.tax || 0,
       summary.netPay || 0,
@@ -1943,6 +1953,40 @@ function workloadDescription(type, rate) {
   if (type === "weekend") return `签入签出完成后按每节 ${rate} 元计入补课补贴`;
   if (type === "makeup") return `签入签出完成后按每节 ${rate} 元计入补课津贴`;
   return `签入签出完成后按每节 ${rate} 元计入课时津贴`;
+}
+
+function payrollLineCategories(lines = []) {
+  const categoryMap = new Map();
+  lines
+    .filter((line) => line.payable)
+    .forEach((line) => {
+      const key = `${line.type || "regular"}:${line.ruleName || ""}`;
+      const current = categoryMap.get(key) || {
+        type: line.type || "regular",
+        label: line.ruleName || workloadTypeLabel(line.type),
+        units: 0,
+        amount: 0,
+        basisSet: new Set(),
+      };
+      current.units += Number(line.units || 0);
+      current.amount += Number(line.amount || 0);
+      if (line.basis) current.basisSet.add(line.basis);
+      categoryMap.set(key, current);
+    });
+
+  return Array.from(categoryMap.values()).map((category) => {
+    const rate = category.units ? Math.round((category.amount / category.units) * 100) / 100 : 0;
+    return {
+      type: category.type,
+      label: category.label,
+      units: Math.round(category.units * 100) / 100,
+      rate,
+      amount: Math.round(category.amount * 100) / 100,
+      description: category.basisSet.size
+        ? Array.from(category.basisSet).join("；")
+        : workloadDescription(category.type, rate),
+    };
+  });
 }
 
 function ensureWorkloadConfirmations(db) {
@@ -1983,37 +2027,29 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
     .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const payroll = teacherPayrollPreview(db, teacherId, month);
-
-  const categories = ["regular", "morning", "evening", "weekend", "makeup"].map((type) => {
-    const rate = db.payrollRules[type] || db.payrollRules.regular;
-    const completed = lessons.filter((lesson) => lesson.type === type && lesson.status === "completed");
-    const units = completed.reduce((sum, lesson) => sum + lesson.units, 0);
-    return {
-      type,
-      label: workloadTypeLabel(type),
-      units,
-      rate,
-      amount: units * rate,
-      description: workloadDescription(type, rate),
-    };
-  });
+  const categories = payrollLineCategories(payroll?.lines || []);
 
   const payableLines = lessons
     .filter((lesson) => lesson.status === "completed")
-    .map((lesson) => ({
-      lessonId: lesson.id,
-      date: lesson.date,
-      time: lesson.time,
-      className: lesson.className,
-      subjectName: lesson.subjectName,
-      room: lessonRoomName(db, lesson),
-      type: lesson.type,
-      units: lesson.units,
-      status: lesson.status,
-      checkInAt: lesson.checkInAt || "",
-      checkOutAt: lesson.checkOutAt || "",
-      amount: lesson.units * (db.payrollRules[lesson.type] || db.payrollRules.regular),
-    }));
+    .map((lesson) => {
+      const payrollLine = (payroll?.lines || []).find((line) => line.lessonId === lesson.id);
+      return {
+        lessonId: lesson.id,
+        date: lesson.date,
+        time: lesson.time,
+        className: lesson.className,
+        subjectName: lesson.subjectName,
+        room: lessonRoomName(db, lesson),
+        type: lesson.type,
+        units: lesson.units,
+        status: lesson.status,
+        checkInAt: lesson.checkInAt || "",
+        checkOutAt: lesson.checkOutAt || "",
+        amount: payrollLine?.amount || 0,
+        ruleName: payrollLine?.ruleName || workloadTypeLabel(lesson.type),
+        basis: payrollLine?.basis || "",
+      };
+    });
   const pendingLines = lessons
     .filter((lesson) => ["scheduled", "pending", "checkedIn"].includes(lesson.status))
     .map((lesson) => ({
