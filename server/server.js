@@ -55,7 +55,9 @@ import {
   teacherMonthlyWorkload,
   teacherPayrollDetail,
   teacherPayrollPreview,
+  unlockTeacherPayrollDetail,
   updatePayrollRules,
+  updateTeacherSalaryProfile,
   updateTeacherAssignment,
   validatePhase1Readiness,
 } from "./storage.js";
@@ -713,6 +715,18 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
+      if (req.method === "PATCH" && parts[3] === "salary-profile") {
+        if (!["finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或系统管理员可以维护教师工资档案");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const teacher = updateTeacherSalaryProfile(db, teacherId, body.salaryProfile || body, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { teacher });
+        return;
+      }
+
       if (req.method === "GET" && parts[3] === "payroll") {
         if (markMissingCheckOutExceptions(db)) {
           await saveDatabase(db);
@@ -757,6 +771,20 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const month = String(body.month || url.searchParams.get("month") || "2026-06");
         const result = lockTeacherPayrollDetail(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "unlock") {
+        if (!["finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或系统管理员可以解锁薪资");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const reason = String(body.reason || "").trim();
+        const result = unlockTeacherPayrollDetail(db, teacherId, month, reason, auth.account);
         await saveDatabase(db);
         sendJson(res, 200, result);
         return;

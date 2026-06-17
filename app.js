@@ -2224,6 +2224,15 @@ async function loadPayrollRules() {
 }
 
 function payrollRulesFromInputs() {
+  let teacherSalaryScheme = null;
+  const schemeInput = document.querySelector("#ruleTeacherSchemeJson");
+  if (schemeInput?.value?.trim()) {
+    try {
+      teacherSalaryScheme = JSON.parse(schemeInput.value);
+    } catch (error) {
+      throw new Error(`专任教师工资规则 JSON 格式错误：${error.message}`);
+    }
+  }
   return {
     baseSalary: Number(document.querySelector("#ruleBaseSalary").value || 0),
     positionSalary: Number(document.querySelector("#rulePositionSalary").value || 0),
@@ -2234,6 +2243,7 @@ function payrollRulesFromInputs() {
     makeup: Number(document.querySelector("#ruleMakeup").value || 0),
     taxThreshold: Number(document.querySelector("#ruleTaxThreshold").value || 0),
     taxRate: Number(document.querySelector("#ruleTaxRate").value || 0),
+    ...(teacherSalaryScheme ? { teacherSalaryScheme } : {}),
   };
 }
 
@@ -2267,6 +2277,97 @@ async function saveBackendPayrollRules() {
       error: error.message || "薪资规则保存失败",
     };
     showToast(payrollRuleState.error);
+  }
+  render();
+}
+
+function salaryProfileFromInputs() {
+  let manualItems = [];
+  const manualItemsInput = document.querySelector("#salaryManualItemsJson");
+  if (manualItemsInput?.value?.trim()) {
+    try {
+      manualItems = JSON.parse(manualItemsInput.value);
+      if (!Array.isArray(manualItems)) throw new Error("补充项必须是数组");
+    } catch (error) {
+      throw new Error(`财务补充项 JSON 格式错误：${error.message}`);
+    }
+  }
+
+  return {
+    qualificationGrade: document.querySelector("#salaryQualificationGrade")?.value || "thirdOrBachelor",
+    schoolYears: Number(document.querySelector("#salarySchoolYears")?.value || 0),
+    assessmentBand: document.querySelector("#salaryAssessmentBand")?.value || "high",
+    housingTier: document.querySelector("#salaryHousingTier")?.value || "teacher",
+    probationRate: Number(document.querySelector("#salaryProbationRate")?.value || 1),
+    attendanceDeduction: Number(document.querySelector("#salaryAttendanceDeduction")?.value || 0),
+    roles: {
+      homeroom: Boolean(document.querySelector("#salaryRoleHomeroom")?.checked),
+      homeroomStudentCount: Number(document.querySelector("#salaryHomeroomStudentCount")?.value || 0),
+      gradeHead: Boolean(document.querySelector("#salaryRoleGradeHead")?.checked),
+      deputyGradeHead: Boolean(document.querySelector("#salaryRoleDeputyGradeHead")?.checked),
+      teachingResearchLeader: Boolean(document.querySelector("#salaryRoleTeachingResearchLeader")?.checked),
+      lessonPrepLeader: Boolean(document.querySelector("#salaryRoleLessonPrepLeader")?.checked),
+      graduatingClass: Boolean(document.querySelector("#salaryRoleGraduatingClass")?.checked),
+      eliteClass: Boolean(document.querySelector("#salaryRoleEliteClass")?.checked),
+      qingbeiClass: Boolean(document.querySelector("#salaryRoleQingbeiClass")?.checked),
+    },
+    manualItems,
+  };
+}
+
+async function saveBackendTeacherSalaryProfile() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
+    showToast("请使用后端财务账号维护教师工资档案");
+    return;
+  }
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    await apiRequest(`/api/teachers/${teacherId}/salary-profile`, {
+      method: "PATCH",
+      body: { salaryProfile: salaryProfileFromInputs() },
+    });
+    resetFinanceTeacherDetailState();
+    financeTeacherPage.loaded = false;
+    await loadFinanceTeacherDetail(teacherId, { generatePayroll: false });
+    showToast("教师工资档案已保存，未锁定薪资需重新生成");
+  } catch (error) {
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      error: error.message || "工资档案保存失败",
+    };
+    showToast(financeTeacherDetailState.error);
+  }
+  render();
+}
+
+async function unlockBackendPayroll() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  const reason = window.prompt("请输入解锁原因，系统会保留原锁定快照和操作记录。", "财务更正后重新核算");
+  if (reason === null) return;
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  renderSettlement();
+  try {
+    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/unlock`, {
+      method: "POST",
+      body: { month: "2026-06", reason },
+    });
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      loaded: true,
+      error: "",
+      payroll,
+      payrollGenerated: true,
+    };
+    financeTeacherPage.loaded = false;
+    showToast("工资已解锁，请重新生成、复核并锁定");
+  } catch (error) {
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资解锁失败" };
+    showToast(financeTeacherDetailState.error);
   }
   render();
 }
@@ -6336,7 +6437,9 @@ function renderSettlement() {
   document.querySelector("#approveSchoolWorkload").disabled = true;
   document.querySelector("#batchGeneratePayroll").disabled = true;
   document.querySelector("#exportPayrollCsv").disabled = true;
+  document.querySelector("#unlockTeacherPayroll").disabled = true;
   renderPayrollRulesPanel();
+  renderSalaryProfilePanel(null);
   document.querySelector("#settlementSalaryTable").innerHTML = salaryRows(teacherId)
     .map(
       ([name, basis, amount]) => `
@@ -6368,8 +6471,10 @@ function renderBackendSettlement() {
     document.querySelector("#approveSchoolWorkload").disabled = true;
     document.querySelector("#batchGeneratePayroll").disabled = currentRole() !== "finance";
     document.querySelector("#exportPayrollCsv").disabled = currentRole() !== "finance";
+    document.querySelector("#unlockTeacherPayroll").disabled = true;
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
     renderPayrollRulesPanel();
+    renderSalaryProfilePanel(null);
     return;
   }
   ensureFinanceTeacherDetail(teacherId, { generatePayroll: true });
@@ -6390,6 +6495,7 @@ function renderBackendSettlement() {
   const schoolButton = document.querySelector("#approveSchoolWorkload");
   const batchButton = document.querySelector("#batchGeneratePayroll");
   const exportButton = document.querySelector("#exportPayrollCsv");
+  const unlockButton = document.querySelector("#unlockTeacherPayroll");
   const table = document.querySelector("#settlementSalaryTable");
 
   if (financeTeacherDetailState.loading && !payroll) {
@@ -6404,7 +6510,9 @@ function renderBackendSettlement() {
     schoolButton.disabled = true;
     batchButton.disabled = true;
     exportButton.disabled = true;
+    unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端生成该老师薪资明细...</div></td></tr>`;
+    renderSalaryProfilePanel(null);
     return;
   }
 
@@ -6420,7 +6528,9 @@ function renderBackendSettlement() {
     schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
+    unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+    renderSalaryProfilePanel(null);
     return;
   }
 
@@ -6436,10 +6546,13 @@ function renderBackendSettlement() {
     schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
+    unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">请选择老师生成薪资明细</div></td></tr>`;
+    renderSalaryProfilePanel(null);
     return;
   }
 
+  renderSalaryProfilePanel(payroll);
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
@@ -6455,6 +6568,7 @@ function renderBackendSettlement() {
   button.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "reviewed" || confirmationStatus !== "school_approved";
   batchButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   exportButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
+  unlockButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "locked";
   table.innerHTML = (payroll.rows || [])
     .map(
       (row) => `
@@ -6495,11 +6609,75 @@ function renderPayrollRulesPanel() {
     const input = document.querySelector(selector);
     if (input && document.activeElement !== input) input.value = value ?? 0;
   });
+  const schemeInput = document.querySelector("#ruleTeacherSchemeJson");
+  if (schemeInput && document.activeElement !== schemeInput) {
+    schemeInput.value = JSON.stringify(rules.teacherSalaryScheme || {}, null, 2);
+  }
   const saveButton = document.querySelector("#savePayrollRules");
   if (saveButton) {
     saveButton.disabled = payrollRuleState.loading || !backendMode() || currentRole() !== "finance";
     saveButton.textContent = payrollRuleState.loading ? "保存中" : "保存规则";
   }
+}
+
+function setInputValue(selector, value) {
+  const input = document.querySelector(selector);
+  if (input && document.activeElement !== input) input.value = value ?? "";
+}
+
+function setCheckboxValue(selector, value) {
+  const input = document.querySelector(selector);
+  if (input) input.checked = Boolean(value);
+}
+
+function renderSalaryProfilePanel(payroll) {
+  const profile = payroll?.teacher?.salaryProfile || payroll?.salaryProfile || null;
+  const saveButton = document.querySelector("#saveTeacherSalaryProfile");
+  if (saveButton) {
+    saveButton.disabled = !backendMode() || currentRole() !== "finance" || !profile || financeTeacherDetailState.loading;
+    saveButton.textContent = financeTeacherDetailState.loading ? "保存中" : "保存档案";
+  }
+
+  if (!profile) {
+    [
+      "#salaryQualificationGrade",
+      "#salarySchoolYears",
+      "#salaryAssessmentBand",
+      "#salaryHousingTier",
+      "#salaryProbationRate",
+      "#salaryHomeroomStudentCount",
+      "#salaryAttendanceDeduction",
+      "#salaryManualItemsJson",
+    ].forEach((selector) => setInputValue(selector, selector === "#salaryManualItemsJson" ? "[]" : ""));
+    [
+      "#salaryRoleHomeroom",
+      "#salaryRoleGradeHead",
+      "#salaryRoleDeputyGradeHead",
+      "#salaryRoleTeachingResearchLeader",
+      "#salaryRoleLessonPrepLeader",
+      "#salaryRoleGraduatingClass",
+      "#salaryRoleEliteClass",
+      "#salaryRoleQingbeiClass",
+    ].forEach((selector) => setCheckboxValue(selector, false));
+    return;
+  }
+
+  setInputValue("#salaryQualificationGrade", profile.qualificationGrade || "thirdOrBachelor");
+  setInputValue("#salarySchoolYears", profile.schoolYears || 0);
+  setInputValue("#salaryAssessmentBand", profile.assessmentBand || "high");
+  setInputValue("#salaryHousingTier", profile.housingTier || "teacher");
+  setInputValue("#salaryProbationRate", profile.probationRate ?? 1);
+  setInputValue("#salaryHomeroomStudentCount", profile.roles?.homeroomStudentCount || 0);
+  setInputValue("#salaryAttendanceDeduction", profile.attendanceDeduction || 0);
+  setInputValue("#salaryManualItemsJson", JSON.stringify(profile.manualItems || [], null, 2));
+  setCheckboxValue("#salaryRoleHomeroom", profile.roles?.homeroom);
+  setCheckboxValue("#salaryRoleGradeHead", profile.roles?.gradeHead);
+  setCheckboxValue("#salaryRoleDeputyGradeHead", profile.roles?.deputyGradeHead);
+  setCheckboxValue("#salaryRoleTeachingResearchLeader", profile.roles?.teachingResearchLeader);
+  setCheckboxValue("#salaryRoleLessonPrepLeader", profile.roles?.lessonPrepLeader);
+  setCheckboxValue("#salaryRoleGraduatingClass", profile.roles?.graduatingClass);
+  setCheckboxValue("#salaryRoleEliteClass", profile.roles?.eliteClass);
+  setCheckboxValue("#salaryRoleQingbeiClass", profile.roles?.qingbeiClass);
 }
 
 function renderWarnings() {
@@ -7976,6 +8154,8 @@ document.querySelector("#approveSchoolWorkload").addEventListener("click", () =>
 document.querySelector("#batchGeneratePayroll").addEventListener("click", batchGenerateBackendPayroll);
 document.querySelector("#exportPayrollCsv").addEventListener("click", exportBackendPayrollCsv);
 document.querySelector("#savePayrollRules").addEventListener("click", saveBackendPayrollRules);
+document.querySelector("#unlockTeacherPayroll").addEventListener("click", unlockBackendPayroll);
+document.querySelector("#saveTeacherSalaryProfile").addEventListener("click", saveBackendTeacherSalaryProfile);
 
 document.querySelector("#submitManualQr").addEventListener("click", async () => {
   const text = document.querySelector("#manualQrText").value.trim();

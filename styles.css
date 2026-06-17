@@ -3033,6 +3033,53 @@ td {
   background: #fff;
 }
 
+.payroll-rule-grid select {
+  min-height: 42px;
+}
+
+.full-field {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.config-textarea {
+  width: 100%;
+  min-height: 168px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.config-textarea.small {
+  min-height: 96px;
+}
+
+.salary-profile-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.checkbox-grid.salary-role-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px 12px;
+  margin-top: 12px;
+}
+
+.salary-role-grid label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  color: var(--muted);
+}
+
 .warning-item {
   min-height: 86px;
   padding: 14px 16px;
@@ -3147,6 +3194,11 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .salary-profile-grid,
+  .checkbox-grid.salary-role-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .compact-field {
     max-width: none;
   }
@@ -3191,6 +3243,8 @@ td {
   .pay-preview,
   .salary-total,
   .payroll-rule-grid,
+  .salary-profile-grid,
+  .checkbox-grid.salary-role-grid,
   .confirm-steps {
     grid-template-columns: 1fr;
   }

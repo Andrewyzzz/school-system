@@ -6,6 +6,7 @@ import {
   calculateDedicatedTeacherPayroll,
   createDefaultPayrollRules,
   defaultTeacherSalaryProfile,
+  deepMerge,
   ensureTeacherSalaryProfile,
   normalizePayrollRules,
 } from "./payroll.js";
@@ -1256,14 +1257,96 @@ export function updatePayrollRules(db, rules = {}, actorAccount = null) {
     }
     nextRules[key] = key === "taxRate" ? value : Math.round(value * 100) / 100;
   });
+  if (rules.teacherSalaryScheme && typeof rules.teacherSalaryScheme === "object" && !Array.isArray(rules.teacherSalaryScheme)) {
+    nextRules.teacherSalaryScheme = deepMerge(nextRules.teacherSalaryScheme, {
+      ...rules.teacherSalaryScheme,
+      settlementMode: "actualCompletedLessons",
+    });
+  }
   db.payrollRules = normalizePayrollRules(nextRules);
-  db.auditLogs.push({
+  const invalidatedCount = invalidateOpenPayrollDetails(db, () => true);
+  appendAuditLog(db, {
     action: "payroll_rules_update",
     actorAccountId: actorAccount?.id || "",
-    createdAt: new Date().toISOString(),
+    actorName: actorAccount?.name || "",
+    invalidatedCount,
   });
-  db.meta.updatedAt = new Date().toISOString();
   return db.payrollRules;
+}
+
+function booleanValue(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["1", "true", "yes", "是", "y"].includes(String(value).trim().toLowerCase());
+}
+
+function numberValue(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizeManualItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item, index) => ({
+      name: String(item?.name || `补充项 ${index + 1}`).trim(),
+      amount: Math.round(numberValue(item?.amount, 0) * 100) / 100,
+      basis: String(item?.basis || "财务补充项").trim(),
+      category: String(item?.category || (numberValue(item?.amount, 0) < 0 ? "deduction" : "supplement")).trim(),
+    }))
+    .filter((item) => item.name && item.amount);
+}
+
+function normalizeSalaryProfilePatch(patch = {}, current = {}) {
+  const next = { ...patch };
+  ["schoolYears", "probationRate", "attendanceDeduction"].forEach((key) => {
+    if (next[key] !== undefined) next[key] = numberValue(next[key], current[key] || 0);
+  });
+  if (next.manualItems !== undefined) next.manualItems = normalizeManualItems(next.manualItems);
+  if (next.roles && typeof next.roles === "object" && !Array.isArray(next.roles)) {
+    const currentRoles = current.roles || {};
+    const rolePatch = { ...next.roles };
+    Object.keys(rolePatch).forEach((key) => {
+      if (key === "homeroomStudentCount") {
+        rolePatch[key] = numberValue(rolePatch[key], currentRoles[key] || 0);
+      } else {
+        rolePatch[key] = booleanValue(rolePatch[key], currentRoles[key] || false);
+      }
+    });
+    next.roles = rolePatch;
+  }
+  return next;
+}
+
+export function updateTeacherSalaryProfile(db, teacherId, profilePatch = {}, actorAccount = null) {
+  const teacher = findTeacher(db, teacherId);
+  if (!teacher) {
+    const error = new Error("教师不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  ensureTeacherSalaryProfile(teacher);
+  const previousProfile = teacher.salaryProfile || {};
+  const nextProfile = deepMerge(
+    previousProfile,
+    normalizeSalaryProfilePatch(profilePatch, previousProfile),
+  );
+  teacher.salaryProfile = nextProfile;
+  ensureTeacherSalaryProfile(teacher);
+
+  const invalidatedCount = invalidateOpenPayrollDetails(db, (detail) => detail.teacherId === teacherId);
+  appendAuditLog(db, {
+    action: "teacher_salary_profile_update",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    invalidatedCount,
+  });
+  return {
+    ...teacher,
+    invalidatedPayrollCount: invalidatedCount,
+  };
 }
 
 export function queryTeacherAssignments(db, options = {}) {
@@ -1605,6 +1688,13 @@ function findTeacherPayrollDetail(db, teacherId, month = "2026-06") {
   return ensurePayrollDetails(db).find((item) => item.teacherId === teacherId && item.month === month);
 }
 
+function invalidateOpenPayrollDetails(db, predicate = () => true) {
+  const details = ensurePayrollDetails(db);
+  const before = details.length;
+  db.payrollDetails = details.filter((detail) => detail.status === "locked" || !predicate(detail));
+  return before - db.payrollDetails.length;
+}
+
 function assertWorkloadSchoolApproved(db, teacherId, month = "2026-06") {
   const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
   if (!["school_approved", "locked"].includes(confirmation?.status)) {
@@ -1654,6 +1744,10 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
           reviewedByName: generated.reviewedByName || "",
           lockedAt: generated.lockedAt || "",
           lockedByName: generated.lockedByName || "",
+          unlockedAt: generated.unlockedAt || "",
+          unlockedByName: generated.unlockedByName || "",
+          unlockReason: generated.unlockReason || "",
+          unlockHistory: generated.unlockHistory || [],
           summarySnapshot: generated.summarySnapshot,
           rowsSnapshot: generated.rowsSnapshot,
         }
@@ -1803,6 +1897,64 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
   return teacherPayrollDetail(db, teacherId, month);
 }
 
+export function unlockTeacherPayrollDetail(db, teacherId, month = "2026-06", reason = "", actorAccount = null) {
+  const target = findTeacherPayrollDetail(db, teacherId, month);
+  if (!target) {
+    const error = new Error("本月薪资明细不存在，无法解锁");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (target.status !== "locked") {
+    const error = new Error("只有已锁定的薪资可以解锁");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const unlockEntry = {
+    unlockedAt: now,
+    unlockedByAccountId: actorAccount?.id || "",
+    unlockedByName: actorAccount?.name || "",
+    reason: String(reason || "财务更正后重新核算").trim(),
+    previousSummarySnapshot: target.summarySnapshot,
+    previousRowsSnapshot: target.rowsSnapshot,
+  };
+
+  target.status = "generated";
+  target.reviewedAt = "";
+  target.reviewedByAccountId = "";
+  target.reviewedByName = "";
+  target.lockedAt = "";
+  target.lockedByAccountId = "";
+  target.lockedByName = "";
+  target.unlockedAt = now;
+  target.unlockedByAccountId = actorAccount?.id || "";
+  target.unlockedByName = actorAccount?.name || "";
+  target.unlockReason = unlockEntry.reason;
+  target.unlockHistory = [...(target.unlockHistory || []), unlockEntry];
+  target.updatedAt = now;
+
+  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  if (confirmation?.status === "locked") {
+    confirmation.status = "school_approved";
+    confirmation.stage = 2;
+    confirmation.lockedAt = "";
+    confirmation.lockedByAccountId = "";
+    confirmation.lockedByName = "";
+    confirmation.updatedAt = now;
+  }
+
+  appendAuditLog(db, {
+    action: "payroll_unlock",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+    reason: unlockEntry.reason,
+  });
+  return teacherPayrollDetail(db, teacherId, month);
+}
+
 export function generatePayrollBatch(db, options = {}, actorAccount = null) {
   const month = String(options.month || "2026-06");
   const teacherIds = Array.isArray(options.teacherIds)
@@ -1896,6 +2048,8 @@ export function exportPayrollDetails(db, options = {}) {
     "课时工资",
     "补充项",
     "扣减项",
+    "补充项明细",
+    "扣减项明细",
     "应发",
     "个税",
     "实发",
@@ -1906,6 +2060,12 @@ export function exportPayrollDetails(db, options = {}) {
   const rows = details.map((detail) => {
     const teacher = findTeacher(db, detail.teacherId);
     const summary = detail.summarySnapshot || {};
+    const snapshotRows = Array.isArray(detail.rowsSnapshot) ? detail.rowsSnapshot : [];
+    const describeSnapshotRows = (category) =>
+      snapshotRows
+        .filter((row) => row.category === category && row.name !== "个税代扣")
+        .map((row) => `${row.name}:${row.amount}`)
+        .join("；");
     return [
       month,
       teacher?.employeeNo || detail.teacherId,
@@ -1923,6 +2083,8 @@ export function exportPayrollDetails(db, options = {}) {
       summary.lessonAmount || 0,
       summary.supplementalAmount || 0,
       summary.deductionAmount || 0,
+      describeSnapshotRows("supplement"),
+      describeSnapshotRows("deduction"),
       summary.grossPay || 0,
       summary.tax || 0,
       summary.netPay || 0,

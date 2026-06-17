@@ -14,6 +14,7 @@ export const DEFAULT_PAYROLL_RULES = {
   taxRate: 0.03,
   teacherSalaryScheme: {
     version: SCHEME_VERSION,
+    settlementMode: "actualCompletedLessons",
     monthlyWeeks: 4.4,
     baseSalaryByQualification: {
       seniorProfessor: 3520,
@@ -160,7 +161,7 @@ function roundMoney(value) {
   return Math.round((Number(value) || 0) * MONEY_PRECISION) / MONEY_PRECISION;
 }
 
-function deepMerge(defaults, overrides) {
+export function deepMerge(defaults, overrides) {
   if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return clone(defaults);
   const merged = clone(defaults);
   Object.entries(overrides).forEach(([key, value]) => {
@@ -337,7 +338,7 @@ function rateFromGradeMap(map = {}, grade = null, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
-function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits }) {
+function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable = false }) {
   const stageId = lesson.stageId || teacher.stageId;
   const subjectId = lesson.subjectId || teacher.primarySubjectId;
   const grade = Number(lesson.grade || teacher.grade || 0);
@@ -353,7 +354,7 @@ function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits }) {
       const threshold = Number(stageRule.regularThresholdPerWeek || 12);
       const standardUnits = Math.max(0, Math.min(units, threshold - previousUnits));
       const excessUnits = Math.max(0, units - standardUnits);
-      highRegularWeekUnits.set(key, previousUnits + units);
+      if (payable) highRegularWeekUnits.set(key, previousUnits + units);
       const standardRate = Number(stageRule.regularBaseRate || 0) * coefficient;
       const excessRate = Number(stageRule.regularExcessRate || stageRule.regularBaseRate || 0);
       const amount = roundMoney(standardUnits * standardRate + excessUnits * excessRate);
@@ -531,8 +532,8 @@ export function calculateDedicatedTeacherPayroll({
   const sortedLessons = [...lessons].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const highRegularWeekUnits = new Map();
   const lines = sortedLessons.map((lesson) => {
-    const rule = lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits });
     const payable = lesson.status === "completed";
+    const rule = lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable });
     return {
       lessonId: lesson.id,
       date: lesson.date,
@@ -562,7 +563,7 @@ export function calculateDedicatedTeacherPayroll({
   ].filter((component) => component.amount);
   const lessonComponent = {
     name: "课时工资",
-    basis: `按专任教师工资方案、课型、学段、学科系数和 ${scheme.monthlyWeeks} 周月度口径汇总`,
+    basis: "按实际完成课次、课型、学段、学科系数和高中超课时规则汇总",
     amount: lessonAmount,
     category: "lesson",
   };

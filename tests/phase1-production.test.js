@@ -13,7 +13,9 @@ import {
   queryNotifications,
   reviewTeacherPayrollDetail,
   revokeSession,
+  unlockTeacherPayrollDetail,
   updateTeacherAssignment,
+  updateTeacherSalaryProfile,
   validatePhase1Readiness,
 } from "../server/storage.js";
 import { generateScheduleDraft, publishScheduleDraft, updateGradeClassStructure } from "../server/scheduling.js";
@@ -166,7 +168,54 @@ assert.ok(payroll.rows.some((row) => row.name === "考核工资"), "expected ass
 assert.ok(payroll.rows.some((row) => row.name === "校龄工资"), "expected seniority salary row");
 assert.ok(payroll.rows.some((row) => row.name === "住房补贴"), "expected housing allowance row");
 assert.ok(payroll.rows.some((row) => row.name === "课时工资"), "expected lesson salary row");
+assert.ok(
+  payroll.rows.find((row) => row.name === "课时工资")?.basis.includes("实际完成课次"),
+  "lesson salary should use actual completed lessons",
+);
 assert.ok(payroll.lines.every((line) => line.basis), "expected every lesson line to explain basis");
+
+payroll = reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
+assert.equal(payroll.generated.status, "reviewed");
+
+payroll = lockTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
+assert.equal(payroll.generated.status, "locked");
+assert.equal(payroll.confirmation.status, "locked");
+assert.throws(
+  () => generateTeacherPayrollDetail(db, teacher.id, "2026-06", finance),
+  /本月薪资已锁定/,
+);
+
+payroll = unlockTeacherPayrollDetail(db, teacher.id, "2026-06", "生产验收：更正教师工资档案", finance);
+assert.equal(payroll.generated.status, "generated");
+assert.equal(payroll.confirmation.status, "school_approved");
+assert.ok(payroll.generated.unlockHistory.length >= 1);
+
+const profileUpdate = updateTeacherSalaryProfile(
+  db,
+  teacher.id,
+  {
+    schoolYears: 6,
+    roles: {
+      homeroom: true,
+      homeroomStudentCount: 40,
+    },
+    manualItems: [
+      {
+        name: "测试补充项",
+        amount: 100,
+        basis: "生产验收补充项",
+        category: "supplement",
+      },
+    ],
+  },
+  finance,
+);
+assert.equal(profileUpdate.invalidatedPayrollCount, 1);
+
+payroll = generateTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
+assert.equal(payroll.generated.status, "generated");
+assert.ok(payroll.rows.some((row) => row.name === "班主任津贴"), "expected updated salary profile to affect payroll");
+assert.ok(payroll.rows.some((row) => row.name === "测试补充项"), "expected manual salary item to affect payroll");
 
 payroll = reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "reviewed");
@@ -178,6 +227,7 @@ assert.equal(payroll.confirmation.status, "locked");
 const exportResult = exportPayrollDetails(db, { month: "2026-06" });
 assert.ok(exportResult.content.includes("规则版本"));
 assert.ok(exportResult.content.includes("考核工资"));
+assert.ok(exportResult.content.includes("测试补充项"));
 
 const readiness = validatePhase1Readiness(db);
 assert.equal(readiness.passed, true, JSON.stringify(readiness.checks, null, 2));

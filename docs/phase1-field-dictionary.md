@@ -167,7 +167,8 @@
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | version | string | 规则版本 |
-| monthlyWeeks | number | 月度课时折算周数，当前为 `4.4` |
+| settlementMode | string | 第一阶段固定为 `actualCompletedLessons`，表示按实际完成课次结算 |
+| monthlyWeeks | number | 制度参考字段，当前为 `4.4`；第一阶段不按周课表自动折算课次 |
 | baseSalaryByQualification | object | 按职称/学历档配置基本工资 |
 | stageLessonRules | object | 按高中、初中、小学配置正课、补课、代课、早晚自习、学科系数 |
 | assessmentSalary | object | 按学段和岗位类别配置考核工资 |
@@ -175,7 +176,18 @@
 | seniorityAllowance | object | 校龄工资阶梯 |
 | housingAllowance | object | 住房补贴档 |
 
-第一阶段工资明细采用 `summarySnapshot` 和 `rowsSnapshot` 留存生成时的规则结果。财务锁定后，后续规则变更不会改写已锁定快照。
+第一阶段工资明细采用 `summarySnapshot` 和 `rowsSnapshot` 留存生成时的规则结果。财务锁定后，后续规则变更不会改写已锁定快照；如需更正，必须先解锁、修改规则或教师工资档案、重新生成、复核并再次锁定。
+
+## 12. 薪资解锁记录 payrollDetails.unlockHistory
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| unlockedAt | datetime | 解锁时间 |
+| unlockedByAccountId | string | 解锁人账号 |
+| unlockedByName | string | 解锁人姓名 |
+| reason | string | 解锁原因 |
+| previousSummarySnapshot | object | 解锁前锁定汇总快照 |
+| previousRowsSnapshot | array | 解锁前锁定明细快照 |
 
 ## 索引建议
 

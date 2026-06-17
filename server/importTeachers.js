@@ -1,8 +1,30 @@
 import { hashPassword } from "./auth.js";
-import { defaultTeacherSalaryProfile } from "./payroll.js";
+import { deepMerge, defaultTeacherSalaryProfile } from "./payroll.js";
 
 const REQUIRED_COLUMNS = ["employeeNo", "name", "stageId", "department", "primarySubjectId", "username"];
-const OPTIONAL_COLUMNS = ["title", "phone", "hiredAt", "defaultPassword", "status"];
+const OPTIONAL_COLUMNS = [
+  "title",
+  "phone",
+  "hiredAt",
+  "defaultPassword",
+  "status",
+  "qualificationGrade",
+  "schoolYears",
+  "assessmentBand",
+  "housingTier",
+  "probationRate",
+  "homeroom",
+  "homeroomStudentCount",
+  "gradeHead",
+  "deputyGradeHead",
+  "teachingResearchLeader",
+  "lessonPrepLeader",
+  "graduatingClass",
+  "eliteClass",
+  "qingbeiClass",
+  "attendanceDeduction",
+  "manualItemsJson",
+];
 const ALL_COLUMNS = [...REQUIRED_COLUMNS, ...OPTIONAL_COLUMNS];
 
 function parseCsvLine(line) {
@@ -75,6 +97,60 @@ function uniqueValues(values) {
 function validateDate(value) {
   if (!value) return true;
   return /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function booleanValue(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  return ["1", "true", "yes", "是", "y"].includes(String(value).trim().toLowerCase());
+}
+
+function numberValue(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function parseManualItemsJson(value, row, errors) {
+  const text = normalizeText(value);
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) throw new Error("manualItemsJson 必须是数组");
+    return parsed;
+  } catch (error) {
+    errors.push({
+      rowNumber: row.rowNumber,
+      field: "manualItemsJson",
+      message: `manualItemsJson 必须是 JSON 数组：${error.message}`,
+    });
+    return [];
+  }
+}
+
+function salaryProfileFromRow(row, baseTeacher, errors) {
+  const defaults = defaultTeacherSalaryProfile(baseTeacher);
+  const patch = {
+    qualificationGrade: normalizeText(row.qualificationGrade) || defaults.qualificationGrade,
+    schoolYears: numberValue(row.schoolYears, defaults.schoolYears),
+    assessmentBand: normalizeText(row.assessmentBand) || defaults.assessmentBand,
+    housingTier: normalizeText(row.housingTier) || defaults.housingTier,
+    probationRate: numberValue(row.probationRate, defaults.probationRate),
+    attendanceDeduction: numberValue(row.attendanceDeduction, defaults.attendanceDeduction),
+    roles: {
+      homeroom: booleanValue(row.homeroom, defaults.roles.homeroom),
+      homeroomStudentCount: numberValue(row.homeroomStudentCount, defaults.roles.homeroomStudentCount),
+      gradeHead: booleanValue(row.gradeHead, defaults.roles.gradeHead),
+      deputyGradeHead: booleanValue(row.deputyGradeHead, defaults.roles.deputyGradeHead),
+      teachingResearchLeader: booleanValue(row.teachingResearchLeader, defaults.roles.teachingResearchLeader),
+      lessonPrepLeader: booleanValue(row.lessonPrepLeader, defaults.roles.lessonPrepLeader),
+      graduatingClass: booleanValue(row.graduatingClass, defaults.roles.graduatingClass),
+      eliteClass: booleanValue(row.eliteClass, defaults.roles.eliteClass),
+      qingbeiClass: booleanValue(row.qingbeiClass, defaults.roles.qingbeiClass),
+    },
+    manualItems: parseManualItemsJson(row.manualItemsJson, row, errors),
+  };
+  return deepMerge(defaults, patch);
 }
 
 function pad(number, length = 4) {
@@ -171,6 +247,22 @@ export function previewTeacherImport(db, csvText = "", options = {}) {
       username: normalizeText(row.username),
       defaultPassword: normalizeText(row.defaultPassword) || "123456",
       status: normalizeText(row.status) || "active",
+      qualificationGrade: normalizeText(row.qualificationGrade),
+      schoolYears: normalizeText(row.schoolYears),
+      assessmentBand: normalizeText(row.assessmentBand),
+      housingTier: normalizeText(row.housingTier),
+      probationRate: normalizeText(row.probationRate),
+      homeroom: normalizeText(row.homeroom),
+      homeroomStudentCount: normalizeText(row.homeroomStudentCount),
+      gradeHead: normalizeText(row.gradeHead),
+      deputyGradeHead: normalizeText(row.deputyGradeHead),
+      teachingResearchLeader: normalizeText(row.teachingResearchLeader),
+      lessonPrepLeader: normalizeText(row.lessonPrepLeader),
+      graduatingClass: normalizeText(row.graduatingClass),
+      eliteClass: normalizeText(row.eliteClass),
+      qingbeiClass: normalizeText(row.qingbeiClass),
+      attendanceDeduction: normalizeText(row.attendanceDeduction),
+      manualItemsJson: normalizeText(row.manualItemsJson),
     };
 
     REQUIRED_COLUMNS.forEach((column) => {
@@ -255,6 +347,18 @@ export function previewTeacherImport(db, csvText = "", options = {}) {
       }
     }
 
+    normalized.salaryProfile = salaryProfileFromRow(
+      normalized,
+      {
+        id: "",
+        stageId: normalized.stageId,
+        primarySubjectId: normalized.primarySubjectId,
+        title: normalized.title,
+        hiredAt: normalized.hiredAt || "2026-09-01",
+      },
+      errors,
+    );
+
     return normalized;
   });
 
@@ -305,16 +409,7 @@ export function commitTeacherImport(db, csvText = "", actorAccount = null) {
       phone: row.phone,
       status: row.status,
       hiredAt: row.hiredAt || "2026-09-01",
-      salaryProfile: defaultTeacherSalaryProfile(
-        {
-          id: teacherId,
-          stageId: row.stageId,
-          primarySubjectId: row.primarySubjectId,
-          title: row.title || "任课教师",
-          hiredAt: row.hiredAt || "2026-09-01",
-        },
-        teacherNumber - 1,
-      ),
+      salaryProfile: row.salaryProfile,
       source: "import",
       createdAt,
     };
