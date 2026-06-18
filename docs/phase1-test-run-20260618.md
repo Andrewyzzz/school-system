@@ -3,23 +3,25 @@
 测试日期：2026-06-18  
 测试人：Codex  
 代码版本：`f09ed2a Add phase one test cases`  
-测试范围：部署检查、本地自动化回归、本地页面冒烟、接口冒烟、第一阶段 P0 主流程抽测。  
-结论：本地自动化回归通过；本地页面和接口主要角色链路可用；生产部署未完成，原因是当前工具环境无法获得 SSH 外部执行权限；当前运行库 readiness 失败，原因是没有已发布课表数据。
+测试范围：部署检查、本地自动化回归、本地页面冒烟、接口冒烟、生产接口冒烟、第一阶段 P0 主流程抽测。
+结论：最新代码已部署到生产服务器，服务器本机健康检查通过；本地自动化回归通过；本地页面和接口主要角色链路可用；生产域名 DNS 当前解析到 `198.18.0.20/198.18.0.19`，未解析到服务器 `47.76.189.5`，导致正常公网访问失败；强制解析到 `47.76.189.5` 后生产 HTTPS 健康检查通过；生产 readiness 失败，原因是没有已发布课表和已锁定工资数据。
 
 ## 1. 部署执行结果
 
 | 项目 | 结果 | 说明 |
 | --- | --- | --- |
 | 本地代码状态 | 通过 | 工作区开始时干净，最新提交为 `f09ed2a410d65975b96b77e25accee4c81799274` |
-| 生产站点 DNS 检查 | 阻塞 | 普通沙盒 `curl https://fuyuanschool.org/api/health` 返回 `Could not resolve host`，属于沙盒网络限制 |
-| SSH 生产部署 | 阻塞 | 两次申请外部 SSH 部署权限均因审批超时未执行；普通 SSH 返回 `Operation not permitted` |
-| 生产代码拉取 | 未执行 | 需要 SSH 权限后进入 `/opt/school-system` 执行 `git pull --ff-only origin main` |
-| 生产服务重启 | 未执行 | 需要 SSH 权限后执行 `systemctl restart school-system` |
-| 生产健康检查 | 未执行 | 需要部署后执行 `https://fuyuanschool.org/api/health` |
+| 生产站点 DNS 检查 | 不通过 | `fuyuanschool.org` 解析到 `198.18.0.20`，`www.fuyuanschool.org` 解析到 `198.18.0.19`，不是服务器 `47.76.189.5` |
+| SSH 生产部署 | 通过 | 用户明确允许后，成功登录服务器执行部署 |
+| 生产代码拉取 | 通过 | `/opt/school-system` 从 `650b0d0` fast-forward 到 `f9632e2` |
+| 生产服务重启 | 通过 | `systemctl restart school-system` 后 `systemctl is-active school-system` 返回 `active` |
+| 生产本机健康检查 | 通过 | 服务器内 `curl http://127.0.0.1:4173/api/health` 返回 `status=ok` |
+| 生产公网强制解析健康检查 | 通过 | `curl --resolve fuyuanschool.org:443:47.76.189.5 https://fuyuanschool.org/api/health` 返回 `status=ok` |
+| 生产正常域名访问 | 不通过 | 正常 DNS 解析错误，浏览器打开 `https://fuyuanschool.org` 返回 `ERR_CONNECTION_CLOSED` |
 
-### 1.1 待执行生产部署命令
+### 1.1 已执行生产部署命令
 
-有服务器权限后执行：
+已在服务器执行：
 
 ```bash
 ssh -i /Users/yyzzz/Downloads/school_system.pem root@47.76.189.5
@@ -33,7 +35,17 @@ node --check server/importTeachers.js
 systemctl restart school-system
 systemctl is-active school-system
 curl -sS http://127.0.0.1:4173/api/health
-curl -sS https://fuyuanschool.org/api/health
+curl --resolve fuyuanschool.org:443:47.76.189.5 -sS https://fuyuanschool.org/api/health
+```
+
+部署结果：
+
+```text
+before: 650b0d0
+after: f9632e2
+school-system: active
+local health: ok
+forced HTTPS health: ok
 ```
 
 ## 2. 自动化回归结果
@@ -101,6 +113,20 @@ curl -sS https://fuyuanschool.org/api/health
 | 老师本人接口 | 通过 | `/api/teachers/me` 返回 200，老师为 `李明` |
 | 第一阶段 readiness | 不通过 | `passed=false`，失败项见问题 `BUG-20260618-002` |
 
+## 4.1 生产接口冒烟测试
+
+生产测试因 DNS 解析错误无法直接使用 `https://fuyuanschool.org`，本轮使用 `curl --resolve fuyuanschool.org:443:47.76.189.5` 强制解析到服务器公网 IP 执行。
+
+| 用例 | 结果 | 实际结果 |
+| --- | --- | --- |
+| 生产健康检查 | 通过 | `status=ok`，`teacherCount=1000`，`accountCount=1004`，`seedVersion=phase1-20260611` |
+| 生产财务登录 | 通过 | `finance / 123456` 登录成功，返回 token |
+| 生产教师分页 | 通过 | 总教师数 `1000`，第 1 条为 `李明` |
+| 生产薪资规则 | 通过 | `teacherSalaryScheme.settlementMode=actualCompletedLessons`，版本 `fuyuan-dedicated-teacher-2026-v1` |
+| 生产 readiness | 不通过 | `schedule_conflict=false`、`teacher_schedule=false`、`payroll_lock=false` |
+| 生产首页 HTML | 通过 | 强制解析后首页 HTML 正常返回 |
+| 生产教室二维码页 HTML | 通过 | 强制解析后 `classroom.html` 正常返回二维码相关页面内容 |
+
 readiness 失败项：
 
 ```json
@@ -149,29 +175,30 @@ readiness 失败项：
 
 ## 6. 已发现问题
 
-### BUG-20260618-001 生产部署未完成
+### BUG-20260618-001 生产域名 DNS 解析错误
 
 | 字段 | 内容 |
 | --- | --- |
 | 严重级别 | P0 阻塞 |
-| 模块 | 部署 / 生产环境 |
-| 现象 | 工具环境无法直接执行 SSH 部署；两次外部执行权限审批超时，普通 SSH 返回 `Operation not permitted` |
-| 影响 | 最新版本尚未确认部署到 `https://fuyuanschool.org`，无法开始线上生产测试 |
-| 期望 | 获得 SSH 执行权限，或由维护人员手动在服务器执行部署命令 |
-| 下一步 | 用户明确允许 SSH 部署命令后继续执行，或手动部署后通知 Codex 继续线上验收 |
+| 模块 | DNS / 生产环境 |
+| 现象 | `fuyuanschool.org` 解析到 `198.18.0.20`，`www.fuyuanschool.org` 解析到 `198.18.0.19`；浏览器打开生产域名返回 `ERR_CONNECTION_CLOSED` |
+| 影响 | 普通用户无法通过 `https://fuyuanschool.org` 访问系统；手机扫码和生产页面测试无法按真实域名继续 |
+| 期望 | `fuyuanschool.org` 和 `www.fuyuanschool.org` 都解析到服务器公网 IP `47.76.189.5` |
+| 已验证 | 强制解析到 `47.76.189.5` 后，HTTPS 证书、首页、接口、教室页均可正常返回 |
+| 下一步 | 到 Namecheap DNS 配置中修改 A 记录：`@ -> 47.76.189.5`，`www -> 47.76.189.5` 或 `www CNAME @`，等待 DNS 生效后复测 |
 
-### BUG-20260618-002 当前运行库 readiness 失败：未发布课表
+### BUG-20260618-002 生产 readiness 失败：未发布课表且未锁定工资
 
 | 字段 | 内容 |
 | --- | --- |
 | 严重级别 | P0 |
-| 模块 | 数据初始化 / 行政排课 / readiness |
-| 现象 | `/api/phase1/readiness` 返回 `passed=false`，失败项为 `schedule_conflict` 和 `teacher_schedule` |
-| 复现 | 本地服务 4185 登录财务后调用 `/api/phase1/readiness` |
-| 实际结果 | 当前发布课次为 0；老师端课表无已发布课程 |
-| 预期结果 | 试运行环境应至少有一套已发布无冲突课表，readiness 应通过 |
-| 初步判断 | 自动化脚本在内存中会生成并发布课表，但当前运行库没有初始化发布课表；需要提供试运行初始化动作或在后台完成一次排课发布 |
-| 建议 | 增加“生成试运行排课数据”脚本，或在部署后由行政账号完成配置、生成、发布，再运行 readiness |
+| 模块 | 数据初始化 / 行政排课 / 薪资锁定 / readiness |
+| 现象 | `/api/phase1/readiness` 返回 `passed=false`，失败项为 `schedule_conflict`、`teacher_schedule`、`payroll_lock` |
+| 复现 | 使用生产强制解析登录财务后调用 `/api/phase1/readiness` |
+| 实际结果 | 当前发布课次为 0；已生成工资 0 份，已锁定工资 0 份 |
+| 预期结果 | 试运行环境应至少有一套已发布无冲突课表，并至少有已生成/已锁定的样例工资数据，readiness 应通过 |
+| 初步判断 | 自动化脚本在内存中会生成、发布、锁定，但生产运行库没有初始化主流程样例数据 |
+| 建议 | 增加“生成试运行验收数据”脚本，或由行政完成一次配置、生成、发布，再由老师确认、教务/总校审批、财务生成并锁定一名老师工资 |
 
 ### BUG-20260618-003 手机端课表仍偏周视图，不是单日时间线
 
@@ -209,8 +236,8 @@ readiness 失败项：
 
 ## 7. 下一步计划
 
-1. 获得 SSH 部署权限后，把 `f09ed2a` 部署到生产服务器。
-2. 部署后执行：
+1. 修正 Namecheap DNS：`@` 和 `www` 指向 `47.76.189.5`。
+2. DNS 生效后执行：
 
 ```bash
 curl -sS https://fuyuanschool.org/api/health
@@ -223,7 +250,6 @@ curl -sS https://fuyuanschool.org/api/health
    - `/api/phase1/readiness`。
    - 教室二维码页。
    - 手机 HTTPS 摄像头扫码。
-4. 处理 `BUG-20260618-002`：给试运行环境初始化一套发布课表，或让行政完成一次配置、生成、发布。
+4. 处理 `BUG-20260618-002`：给试运行环境初始化一套发布课表和一条已锁定工资，或让行政/老师/财务完成一次真实主流程。
 5. 处理 `BUG-20260618-003`：移动端课表改成真正单日时间线。
 6. 处理 `BUG-20260618-004`：隐藏教室二维码 JSON 原文。
-
