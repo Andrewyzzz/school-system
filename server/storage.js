@@ -839,6 +839,12 @@ export function findTeacher(db, teacherId) {
   return db.teachers.find((teacher) => teacher.id === teacherId);
 }
 
+function publicTeacherIdentity(teacher) {
+  if (!teacher) return null;
+  const { salaryProfile, ...publicTeacher } = teacher;
+  return publicTeacher;
+}
+
 export function publicAccount(account, db) {
   const teacher = account.teacherId ? findTeacher(db, account.teacherId) : null;
   return {
@@ -848,7 +854,7 @@ export function publicAccount(account, db) {
     name: account.name,
     department: account.department,
     teacherId: account.teacherId || null,
-    teacher,
+    teacher: account.role === "teacher" ? publicTeacherIdentity(teacher) : teacher,
     mustChangePassword: Boolean(account.mustChangePassword),
   };
 }

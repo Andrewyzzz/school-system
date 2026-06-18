@@ -6477,7 +6477,7 @@ function renderBackendSettlement() {
     renderSalaryProfilePanel(null);
     return;
   }
-  ensureFinanceTeacherDetail(teacherId, { generatePayroll: true });
+  ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
   if (!payrollRuleState.loaded && !payrollRuleState.loading) {
     loadPayrollRules();
   }
@@ -6502,7 +6502,7 @@ function renderBackendSettlement() {
     document.querySelector("#settlementGrossSalary").textContent = "读取中";
     document.querySelector("#settlementTaxSalary").textContent = "读取中";
     document.querySelector("#settlementNetSalary").textContent = "读取中";
-    status.textContent = "正在生成薪资明细";
+    status.textContent = "正在读取薪资明细";
     status.className = "status-pill";
     button.disabled = true;
     reviewButton.disabled = true;
@@ -6511,7 +6511,7 @@ function renderBackendSettlement() {
     batchButton.disabled = true;
     exportButton.disabled = true;
     unlockButton.disabled = true;
-    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端生成该老师薪资明细...</div></td></tr>`;
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端读取该老师薪资明细...</div></td></tr>`;
     renderSalaryProfilePanel(null);
     return;
   }
@@ -6547,7 +6547,7 @@ function renderBackendSettlement() {
     batchButton.disabled = false;
     exportButton.disabled = false;
     unlockButton.disabled = true;
-    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">请选择老师生成薪资明细</div></td></tr>`;
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">暂无该老师薪资明细，可先批量生成本月薪资。</div></td></tr>`;
     renderSalaryProfilePanel(null);
     return;
   }
@@ -7730,7 +7730,7 @@ document.addEventListener("click", async (event) => {
     state.selectedFinanceTeacherId = financeSettleButton.dataset.financeSettle;
     resetFinanceTeacherDetailState();
     if (backendMode()) {
-      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     }
     switchView("settlement");
     return;
@@ -7887,7 +7887,7 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
       await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
     }
     if (state.activeView === "settlement" && state.selectedFinanceTeacherId) {
-      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     }
     return;
   }
@@ -8128,7 +8128,7 @@ document.querySelector("#settlementTeacherSelect").addEventListener("change", as
   state.selectedFinanceTeacherId = event.target.value;
   resetFinanceTeacherDetailState();
   if (backendMode() && ["finance", "admin"].includes(currentRole())) {
-    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: true });
+    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     return;
   }
   renderSettlement();

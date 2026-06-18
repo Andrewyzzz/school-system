@@ -10,6 +10,7 @@ import {
   generateTeacherPayrollDetail,
   lockTeacherPayrollDetail,
   markNotificationRead,
+  publicAccount,
   queryNotifications,
   reviewTeacherPayrollDetail,
   revokeSession,
@@ -69,6 +70,8 @@ const admin = actor(db, "admin");
 const finance = actor(db, "finance");
 
 assert.equal(db.accounts.filter((account) => account.role === "teacher").length >= 1000, true);
+const teacherPublicAccount = publicAccount(teacherAccount, db);
+assert.equal("salaryProfile" in teacherPublicAccount.teacher, false);
 
 const classStructureResult = updateGradeClassStructure(
   db,

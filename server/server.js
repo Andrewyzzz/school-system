@@ -142,21 +142,47 @@ function teacherIdFromPath(parts) {
   return parts.length >= 3 ? parts[2] : "";
 }
 
+function teacherIdentityOnly(teacher) {
+  if (!teacher) return null;
+  const { salaryProfile, ...publicTeacher } = teacher;
+  return publicTeacher;
+}
+
 function teacherPayrollSummaryOnly(payroll) {
   if (!payroll) return null;
   return {
-    teacher: payroll.teacher,
+    teacher: teacherIdentityOnly(payroll.teacher),
     month: payroll.month,
     netPay: payroll.netPay || 0,
-    generated: payroll.generated || null,
-    confirmation: payroll.confirmation || null,
+    generated: payroll.generated
+      ? {
+          id: payroll.generated.id,
+          status: payroll.generated.status,
+          generatedAt: payroll.generated.generatedAt,
+          reviewedAt: payroll.generated.reviewedAt,
+          lockedAt: payroll.generated.lockedAt,
+        }
+      : null,
+    confirmation: payroll.confirmation
+      ? {
+          id: payroll.confirmation.id,
+          teacherId: payroll.confirmation.teacherId,
+          month: payroll.confirmation.month,
+          status: payroll.confirmation.status,
+          stage: payroll.confirmation.stage,
+          confirmedAt: payroll.confirmation.confirmedAt,
+          academicApprovedAt: payroll.confirmation.academicApprovedAt,
+          schoolApprovedAt: payroll.confirmation.schoolApprovedAt,
+          lockedAt: payroll.confirmation.lockedAt,
+        }
+      : null,
   };
 }
 
 function teacherWorkloadWithoutSalaryDetails(workload) {
   if (!workload) return null;
   return {
-    teacher: workload.teacher,
+    teacher: teacherIdentityOnly(workload.teacher),
     month: workload.month,
     generatedAt: workload.generatedAt,
     summary: {
@@ -605,7 +631,7 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["teacher"]);
       if (!auth) return;
       const teacher = findTeacher(db, auth.account.teacherId);
-      sendJson(res, 200, { teacher });
+      sendJson(res, 200, { teacher: teacherIdentityOnly(teacher) });
       return;
     }
 
@@ -626,7 +652,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts.length === 3) {
-        sendJson(res, 200, { teacher });
+        sendJson(res, 200, { teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher });
         return;
       }
 
@@ -638,7 +664,7 @@ async function handleApi(req, res, db, url) {
             ? requestedWeekStart
             : availableWeeks[0]?.weekStart || "2026-06-15";
         sendJson(res, 200, {
-          teacher,
+          teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher,
           weekStart,
           availableWeeks,
           lessons: teacherLessonsForWeek(db, teacherId, weekStart),
