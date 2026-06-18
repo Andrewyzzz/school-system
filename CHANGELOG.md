@@ -2,6 +2,29 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-18 - 记录第一阶段部署与测试执行结果
+
+- 类型：测试 / 文档
+- 影响范围：部署验收 / 第一阶段测试记录 / README
+- 提交：随本次提交
+- 部署：生产部署未完成，SSH 外部执行权限被工具环境阻塞
+- 验证：
+  - `node --check app.js`
+  - `node --check server/payroll.js`
+  - `node --check server/storage.js`
+  - `node --check server/server.js`
+  - `node --check server/importTeachers.js`
+  - `node tests/phase1-production.test.js`
+  - `git diff --check`
+- 内容：
+  - 新增 `docs/phase1-test-run-20260618.md`，记录本轮部署尝试、自动化回归、本地页面冒烟、接口冒烟和已发现问题。
+  - 记录生产部署阻塞：当前工具环境无法执行 SSH，外部执行权限两次审批超时，普通 SSH 被沙盒拦截。
+  - 记录本地 readiness 失败问题：当前运行库没有已发布课表，导致“无冲突课表”和“老师端课表发布”检查失败。
+  - 记录手机端课表仍偏周视图、教室二维码页显示 JSON 原文、摄像头扫码待真机验证等问题。
+  - 在 `README.md` 第一阶段文档入口中加入本轮测试执行记录。
+- 注意事项：
+  - 下一步需要获得 SSH 权限后完成生产部署，并在 `https://fuyuanschool.org` 重新执行线上测试。
+
 ## 2026-06-18 - 新增第一阶段详细测试案例
 
 - 类型：文档 / 测试
