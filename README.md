@@ -115,6 +115,7 @@ http://127.0.0.1:4173/api/health
 - 教师导入 CSV 模板：`templates/teacher-import-template.csv`
 - 数据库迁移方案：`docs/database-migration-plan.md`
 - 第一阶段试运行操作手册：`docs/phase1-trial-run-guide.md`
+- 第一阶段详细测试案例：`docs/phase1-test-cases.md`
 - 第一阶段已知问题清单：`docs/phase1-known-issues.md`
 - 第一阶段上线验收清单：`docs/phase1-acceptance-checklist.md`
 
