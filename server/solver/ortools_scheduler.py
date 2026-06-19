@@ -272,6 +272,112 @@ def select_candidate_specs(candidate_specs, candidate_limit):
     return selected
 
 
+def solver_diagnostic(severity, key, title, text, details=None):
+    return {
+        "severity": severity,
+        "key": key,
+        "title": title,
+        "text": text,
+        "details": details or {},
+    }
+
+
+def candidate_task_report(task, candidate_specs):
+    teacher_ids = sorted({candidate["teacherId"] for candidate in candidate_specs})
+    day_indexes = sorted({int(candidate["slot"]["dayIndex"]) for candidate in candidate_specs})
+    periods = sorted({int(candidate["slot"]["period"]) for candidate in candidate_specs})
+    return {
+        "taskId": task["id"],
+        "classId": task["classId"],
+        "className": task["className"],
+        "subjectId": task["subjectId"],
+        "subjectName": task["subjectName"],
+        "candidateCount": len(candidate_specs),
+        "teacherCount": len(teacher_ids),
+        "teacherIds": teacher_ids[:8],
+        "dayIndexes": day_indexes,
+        "periods": periods,
+    }
+
+
+def build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidate_counts, config):
+    diagnostics = []
+    if not task_reports:
+        return diagnostics
+
+    constrained_tasks = sorted(task_reports, key=lambda item: item["candidateCount"])[:5]
+    min_candidate_count = constrained_tasks[0]["candidateCount"] if constrained_tasks else 0
+    if min_candidate_count == 0:
+        zero_count = sum(1 for item in task_reports if item["candidateCount"] == 0)
+        sample = "、".join(
+            f"{item['className']}{item['subjectName']}" for item in constrained_tasks if item["candidateCount"] == 0
+        )
+        diagnostics.append(
+            solver_diagnostic(
+                "error",
+                "cp_sat_zero_candidate_tasks",
+                f"{zero_count} 个课时任务没有候选",
+                f"{sample or '部分课程'}在老师、时间、课程禁排和占用规则过滤后没有可用候选。",
+                {"zeroCandidateCount": zero_count, "tasks": constrained_tasks},
+            )
+        )
+    else:
+        sample = "、".join(
+            f"{item['className']}{item['subjectName']}({item['candidateCount']} 个)"
+            for item in constrained_tasks[:3]
+        )
+        diagnostics.append(
+            solver_diagnostic(
+                "warning" if min_candidate_count <= 3 else "info",
+                "cp_sat_tight_candidate_tasks",
+                "候选最少课时任务",
+                f"{sample} 的可选空间最紧，若求解较慢或质量不佳，优先放宽这些课程的限制。",
+                {"tasks": constrained_tasks},
+            )
+        )
+
+    teachers_by_id = {teacher["id"]: teacher for teacher in config.get("teachers") or []}
+    teacher_density = []
+    for teacher_id, demand in teacher_task_demand.items():
+        if demand <= 0:
+            continue
+        candidate_count = teacher_candidate_counts.get(teacher_id, 0)
+        teacher_density.append(
+            {
+                "teacherId": teacher_id,
+                "teacherName": (teachers_by_id.get(teacher_id) or {}).get("name") or teacher_id,
+                "demand": demand,
+                "candidateCount": candidate_count,
+                "density": candidate_count / max(demand, 1),
+            }
+        )
+
+    tight_teachers = sorted(teacher_density, key=lambda item: (item["density"], item["candidateCount"]))[:5]
+    if tight_teachers:
+        sample = "、".join(
+            f"{item['teacherName']}({item['candidateCount']}候选/{item['demand']}需求)"
+            for item in tight_teachers[:3]
+        )
+        diagnostics.append(
+            solver_diagnostic(
+                "warning" if tight_teachers[0]["density"] < 5 else "info",
+                "cp_sat_tight_teachers",
+                "老师资源紧张度",
+                f"{sample}，这些老师的可用候选相对较少，可能成为排课瓶颈。",
+                {"teachers": tight_teachers},
+            )
+        )
+
+    return diagnostics
+
+
+def configure_solver(cp_model, seconds, workers):
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = max(float(seconds or 1), 1.0)
+    solver.parameters.num_search_workers = int(workers or 8)
+    return solver
+
+
 def solve(payload):
     try:
         from ortools.sat.python import cp_model
@@ -348,10 +454,15 @@ def solve(payload):
     objective_terms = []
     candidate_limit = int(options.get("candidateLimit") or 64)
     subjects_by_id = {subject["id"]: subject for subject in config.get("subjects") or []}
+    task_reports = []
+    teacher_task_demand = {}
+    teacher_candidate_counts = {}
 
     for task_index, task in enumerate(tasks):
         task_vars[task_index] = []
         candidate_specs = []
+        for teacher_id in task.get("teacherIds") or []:
+            teacher_task_demand[teacher_id] = teacher_task_demand.get(teacher_id, 0) + 1
         for slot in slots:
             if (task["classId"], slot["slotKey"]) in class_busy:
                 continue
@@ -383,6 +494,10 @@ def solve(payload):
                     }
                 )
 
+        task_reports.append(candidate_task_report(task, candidate_specs))
+        for candidate_spec in candidate_specs:
+            teacher_id = candidate_spec["teacherId"]
+            teacher_candidate_counts[teacher_id] = teacher_candidate_counts.get(teacher_id, 0) + 1
         candidate_specs.sort(key=lambda item: item["cost"])
         candidate_specs = select_candidate_specs(candidate_specs, candidate_limit)
 
@@ -417,6 +532,12 @@ def solve(payload):
                 "ok": False,
                 "error": "CP_SAT_INFEASIBLE",
                 "message": f"{task['className']} {task['subjectName']} 没有可用老师/时段候选",
+                "diagnostics": build_solver_diagnostics(
+                    task_reports,
+                    teacher_task_demand,
+                    teacher_candidate_counts,
+                    config,
+                ),
             }
         model.Add(sum(task_vars[task_index]) == 1)
 
@@ -528,23 +649,97 @@ def solve(payload):
             if variables:
                 model.Add(sum(variables) + fixed_count <= max_consecutive_lessons)
 
-    if objective_terms:
+    diagnostics = build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidate_counts, config)
+    time_limit_seconds = float(options.get("timeLimitSeconds") or 10)
+    workers = int(options.get("workers") or 8)
+    two_stage = options.get("twoStage", True) is not False
+    phase = "single_stage"
+    phase1_status_name = ""
+    phase2_status_name = ""
+    phase1_time_seconds = 0
+    phase2_time_seconds = 0
+    status_name = "UNKNOWN"
+    objective_value = 0
+    best_objective_bound = 0
+    branches = 0
+    conflicts = 0
+
+    if objective_terms and two_stage:
+        phase1_limit = float(options.get("feasibilityTimeLimitSeconds") or min(max(time_limit_seconds * 0.35, 5), 20))
+        phase1_limit = min(phase1_limit, max(time_limit_seconds - 1, 1))
+        phase1_solver = configure_solver(cp_model, phase1_limit, workers)
+        phase1_status = phase1_solver.Solve(model)
+        phase1_status_name = phase1_solver.StatusName(phase1_status)
+        phase1_time_seconds = phase1_solver.WallTime()
+
+        if phase1_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return {
+                "ok": False,
+                "error": "CP_SAT_NO_FEASIBLE_SOLUTION",
+                "status": phase1_status_name,
+                "phase": "feasibility",
+                "phase1Status": phase1_status_name,
+                "message": "CP-SAT 硬约束阶段未找到可行课表",
+                "diagnostics": diagnostics,
+                "wallTimeMs": round((time.time() - started) * 1000),
+            }
+
+        hint_count = 0
+        for variables in task_vars.values():
+            for variable in variables:
+                model.AddHint(variable, 1 if phase1_solver.BooleanValue(variable) else 0)
+                hint_count += 1
+
         model.Minimize(sum(objective_terms))
+        phase2_limit = max(time_limit_seconds - phase1_time_seconds, 1)
+        phase2_solver = configure_solver(cp_model, phase2_limit, workers)
+        phase2_status = phase2_solver.Solve(model)
+        phase2_status_name = phase2_solver.StatusName(phase2_status)
+        phase2_time_seconds = phase2_solver.WallTime()
 
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = float(options.get("timeLimitSeconds") or 10)
-    solver.parameters.num_search_workers = int(options.get("workers") or 8)
-    status = solver.Solve(model)
-    status_name = solver.StatusName(status)
+        if phase2_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            solver = phase2_solver
+            phase = "optimized"
+            status_name = phase2_status_name
+            objective_value = phase2_solver.ObjectiveValue()
+            best_objective_bound = phase2_solver.BestObjectiveBound()
+        else:
+            solver = phase1_solver
+            phase = "feasible_only"
+            status_name = phase1_status_name
+            diagnostics.append(
+                solver_diagnostic(
+                    "warning",
+                    "cp_sat_optimization_not_finished",
+                    "软约束优化未完成",
+                    "硬约束已找到可行课表，但第二阶段未在时间限制内完成优化，当前返回第一阶段可行解。",
+                    {"phase2Status": phase2_status_name, "hintCount": hint_count},
+                )
+            )
+        branches = solver.NumBranches()
+        conflicts = solver.NumConflicts()
+    else:
+        if objective_terms:
+            model.Minimize(sum(objective_terms))
+        solver = configure_solver(cp_model, time_limit_seconds, workers)
+        status = solver.Solve(model)
+        status_name = solver.StatusName(status)
 
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return {
-            "ok": False,
-            "error": "CP_SAT_NO_SOLUTION",
-            "status": status_name,
-            "message": "CP-SAT 未在限制时间内找到可行课表",
-            "wallTimeMs": round((time.time() - started) * 1000),
-        }
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return {
+                "ok": False,
+                "error": "CP_SAT_NO_SOLUTION",
+                "status": status_name,
+                "phase": "single_stage",
+                "message": "CP-SAT 未在限制时间内找到可行课表",
+                "diagnostics": diagnostics,
+                "wallTimeMs": round((time.time() - started) * 1000),
+            }
+        if objective_terms:
+            objective_value = solver.ObjectiveValue()
+            best_objective_bound = solver.BestObjectiveBound()
+        branches = solver.NumBranches()
+        conflicts = solver.NumConflicts()
 
     assignments = list(locked_assignments)
     for var_index, candidate in candidates_by_var.items():
@@ -556,12 +751,18 @@ def solve(payload):
     return {
         "ok": True,
         "status": status_name,
+        "phase": phase,
+        "phase1Status": phase1_status_name,
+        "phase2Status": phase2_status_name,
         "assignments": assignments,
-        "objectiveValue": solver.ObjectiveValue() if objective_terms else 0,
-        "bestObjectiveBound": solver.BestObjectiveBound() if objective_terms else 0,
-        "solveTimeSeconds": solver.WallTime(),
-        "branches": solver.NumBranches(),
-        "conflicts": solver.NumConflicts(),
+        "objectiveValue": objective_value,
+        "bestObjectiveBound": best_objective_bound,
+        "solveTimeSeconds": round((time.time() - started), 4),
+        "phase1SolveTimeSeconds": phase1_time_seconds,
+        "phase2SolveTimeSeconds": phase2_time_seconds,
+        "branches": branches,
+        "conflicts": conflicts,
+        "diagnostics": diagnostics,
         "wallTimeMs": round((time.time() - started) * 1000),
     }
 

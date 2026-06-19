@@ -2,6 +2,27 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-19 - 增强 CP-SAT 两阶段求解与发布保护
+
+- 类型：功能 / 算法 / 测试 / 文档
+- 影响范围：行政排课 / OR-Tools CP-SAT / 发布校验 / 前端诊断摘要
+- 提交：待提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/scheduling.js`
+  - `node --check tests/phase1-production.test.js`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/python-cache python3 -m py_compile server/solver/ortools_scheduler.py`
+  - `node tests/phase1-production.test.js`
+- 内容：
+  - OR-Tools CP-SAT 改为两阶段求解：第一阶段先找硬约束可行解，第二阶段基于第一阶段 hint 优化软约束目标。
+  - 求解器新增候选最少课时、老师资源紧张度等诊断信息，CP-SAT 失败或 fallback 时可回传到草稿诊断。
+  - 后端发布课表时新增完整性保护：未排完的草稿不能发布。
+  - 行政端排课摘要显示硬约束阶段、优化阶段状态；未排完草稿在页面显示“禁止发布”并禁用确认按钮。
+  - 测试补充 CP-SAT 阶段状态和未排完草稿禁止发布的保护用例。
+- 注意事项：
+  - 还未实现专用教室容量诊断、未排课惩罚变量、启发式 fallback warm start 和前端独立预检面板。
+
 ## 2026-06-19 - 启动最高标准排课引擎升级
 
 - 类型：功能 / 算法 / 测试 / 文档

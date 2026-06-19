@@ -122,6 +122,10 @@ const schedule = generateScheduleDraft(
 assert.equal(schedule.draft.conflicts.length, 0);
 assert.notEqual(schedule.draft.precheck.status, "blocked");
 assert.ok(schedule.draft.precheck.checks.length >= 1);
+if (schedule.draft.solver.algorithm === "ortools-cp-sat") {
+  assert.ok(schedule.draft.solver.phase1Status, "CP-SAT 应返回硬约束阶段状态");
+  assert.ok(schedule.draft.solver.phase === "optimized" || schedule.draft.solver.phase === "feasible_only");
+}
 
 const impossibleDb = createInitialData({ teacherCount: 1000 });
 const impossibleAdmin = actor(impossibleDb, "admin");
@@ -157,6 +161,23 @@ assert.throws(
     ),
   /排课前预检未通过/,
 );
+const draftToProtect = db.scheduleDrafts.find(
+  (draft) => draft.divisionId === "elementary" && draft.gradeId === "elementary-g1",
+);
+assert.ok(draftToProtect, "expected schedule draft");
+const originalAssignments = draftToProtect.assignments.slice();
+const originalGeneratedCount = draftToProtect.generatedLessonCount;
+const originalUnassignedCount = draftToProtect.unassignedCount;
+draftToProtect.assignments = draftToProtect.assignments.slice(0, -1);
+draftToProtect.generatedLessonCount = draftToProtect.assignments.length;
+draftToProtect.unassignedCount = 1;
+assert.throws(
+  () => publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin),
+  /未排完/,
+);
+draftToProtect.assignments = originalAssignments;
+draftToProtect.generatedLessonCount = originalGeneratedCount;
+draftToProtect.unassignedCount = originalUnassignedCount;
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
 const peLessonsByClassDay = new Map();

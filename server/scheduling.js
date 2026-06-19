@@ -2025,6 +2025,32 @@ function assertSchedulePrecheckPasses(precheck) {
   throw error;
 }
 
+function normalizeScheduleDiagnostic(diagnostic, index = 0, prefix = "diagnostic") {
+  const severity = ["error", "warning", "info", "ok"].includes(diagnostic?.severity)
+    ? diagnostic.severity
+    : "warning";
+  return {
+    severity,
+    key: diagnostic?.key || `${prefix}_${index}`,
+    title: diagnostic?.title || "排课诊断",
+    text: diagnostic?.text || diagnostic?.message || "求解器返回了一条排课诊断信息。",
+    details: diagnostic?.details || {},
+  };
+}
+
+function mergeScheduleDiagnostics(...diagnosticGroups) {
+  const merged = [];
+  const seen = new Set();
+  diagnosticGroups.flat().filter(Boolean).forEach((diagnostic, index) => {
+    const normalized = normalizeScheduleDiagnostic(diagnostic, index);
+    const key = normalized.key || `${normalized.title}:${normalized.text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push(normalized);
+  });
+  return merged;
+}
+
 function generateHeuristicScheduleSolution(config, options = {}) {
   const lockedAssignments = (options.lockedAssignments || [])
     .filter((assignment) => assignment.locked)
@@ -2116,6 +2142,12 @@ function solveScheduleWithOrTools(config, options = {}) {
       timeLimitSeconds: Number(options.cpSatTimeLimitSeconds || options.solver?.cpSatTimeLimitSeconds || 30),
       workers: Number(options.cpSatWorkers || options.solver?.cpSatWorkers || 8),
       candidateLimit: Number(options.cpSatCandidateLimit || options.solver?.cpSatCandidateLimit || 300),
+      twoStage: options.cpSatTwoStage ?? options.solver?.cpSatTwoStage ?? true,
+      feasibilityTimeLimitSeconds: Number(
+        options.cpSatFeasibilityTimeLimitSeconds ||
+          options.solver?.cpSatFeasibilityTimeLimitSeconds ||
+          0,
+      ),
     },
   };
 
@@ -2157,12 +2189,18 @@ function solveScheduleWithOrTools(config, options = {}) {
     return {
       ok: false,
       error: parsed.error || "CP_SAT_FAILED",
+      status: parsed.status || "UNKNOWN",
+      phase: parsed.phase || "",
+      diagnostics: parsed.diagnostics || [],
       message: parsed.message || "OR-Tools 求解器未返回可用课表",
     };
   }
 
   const requiredCount = requiredScheduleLessonCount(config);
-  const diagnostics = options.precheck?.checks || buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments });
+  const diagnostics = mergeScheduleDiagnostics(
+    options.precheck?.checks || buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments }),
+    parsed.diagnostics || [],
+  );
   const assignments = (parsed.assignments || []).sort((a, b) =>
     `${a.classId} ${a.date} ${a.period}`.localeCompare(`${b.classId} ${b.date} ${b.period}`),
   );
@@ -2176,9 +2214,14 @@ function solveScheduleWithOrTools(config, options = {}) {
       algorithm: "ortools-cp-sat",
       description: "Google OR-Tools CP-SAT 约束规划求解器",
       status: parsed.status || "UNKNOWN",
+      phase: parsed.phase || "single_stage",
+      phase1Status: parsed.phase1Status || "",
+      phase2Status: parsed.phase2Status || "",
       objectiveValue: Number(parsed.objectiveValue || 0),
       bestObjectiveBound: Number(parsed.bestObjectiveBound || 0),
       solveTimeSeconds: Number(parsed.solveTimeSeconds || 0),
+      phase1SolveTimeSeconds: Number(parsed.phase1SolveTimeSeconds || 0),
+      phase2SolveTimeSeconds: Number(parsed.phase2SolveTimeSeconds || 0),
       branches: Number(parsed.branches || 0),
       conflicts: Number(parsed.conflicts || 0),
       wallTimeMs: Number(parsed.wallTimeMs || 0),
@@ -2210,7 +2253,12 @@ export function generateScheduleSolution(config, options = {}) {
     fallback.meta.fallbackFrom = "ortools-cp-sat";
     fallback.meta.fallbackReason = cpSatResult.error;
     fallback.meta.fallbackMessage = cpSatResult.message;
-    fallback.meta.diagnostics = options.precheck?.checks || buildScheduleDiagnostics(config, options);
+    fallback.meta.fallbackStatus = cpSatResult.status || "";
+    fallback.meta.fallbackPhase = cpSatResult.phase || "";
+    fallback.meta.diagnostics = mergeScheduleDiagnostics(
+      options.precheck?.checks || buildScheduleDiagnostics(config, options),
+      cpSatResult.diagnostics || [],
+    );
   }
   return fallback;
 }
@@ -2618,6 +2666,17 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   if (Number(draft.requiredLessonCount || 0) !== requiredCount) {
     const error = new Error("课程规则已变更，请重新生成排课草稿后再发布");
     error.statusCode = 400;
+    throw error;
+  }
+
+  const unassignedCount = Math.max(
+    Number(draft.unassignedCount || 0),
+    requiredCount - Number(draft.assignments?.length || 0),
+  );
+  if (unassignedCount > 0) {
+    const error = new Error(`排课草稿还有 ${unassignedCount} 节未排完，不能发布`);
+    error.statusCode = 400;
+    error.details = { unassignedCount };
     throw error;
   }
 

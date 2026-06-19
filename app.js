@@ -1393,9 +1393,16 @@ function scheduleSolverSummaryText(draft) {
     return `已通过：当前课表无内部冲突，并已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
   }
   if (solver.algorithm === "ortools-cp-sat") {
-    return `OR-Tools CP-SAT：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，状态 ${solver.status || "UNKNOWN"}，目标值 ${solver.objectiveValue || 0}，求解 ${Number(solver.solveTimeSeconds || 0).toFixed(2)} 秒；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+    const stageText =
+      solver.phase1Status || solver.phase2Status
+        ? `，硬约束 ${solver.phase1Status || "UNKNOWN"} / 优化 ${solver.phase2Status || "未执行"}`
+        : "";
+    return `OR-Tools CP-SAT：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，状态 ${solver.status || "UNKNOWN"}${stageText}，目标值 ${solver.objectiveValue || 0}，求解 ${Number(solver.solveTimeSeconds || 0).toFixed(2)} 秒；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
   }
-  return `高级约束搜索：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，搜索 ${solver.attemptsRun || 0} 轮/${solver.totalNodes || 0} 个节点，评分 ${solver.score || 0}；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+  const fallbackText = solver.fallbackFrom
+    ? `，由 ${solver.fallbackFrom} 兜底，原因 ${solver.fallbackReason || "未返回"}`
+    : "";
+  return `高级约束搜索：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，搜索 ${solver.attemptsRun || 0} 轮/${solver.totalNodes || 0} 个节点，评分 ${solver.score || 0}${fallbackText}；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
 }
 
 function buildSubjectQueueFromCounters(classIndex, counters) {
@@ -4474,12 +4481,26 @@ function renderAdminScheduling() {
   document.querySelector("#subjectConfigList").innerHTML = adminSubjectConfigItem(config);
   renderTeacherRulePanel(config);
   const missingTeacherAssignments = missingClassSubjectTeacherAssignments(config);
+  const unassignedCount = Math.max(
+    Number(draft.unassignedCount || 0),
+    Number(draft.requiredLessonCount || requiredScheduleLessonCount()) - Number(assignments.length || 0),
+  );
+  const completionWarningHtml =
+    assignments.length > 0 && unassignedCount > 0
+      ? `<article class="warning-item diagnostic-item">
+          <header>
+            <strong>课表尚未排完</strong>
+            <span class="tag exception">禁止发布</span>
+          </header>
+          <p>当前还有 ${unassignedCount} 节课未排入课表，请调整课程、老师或硬约束后重新生成。</p>
+        </article>`
+      : "";
   document.querySelector("#conflictList").innerHTML =
     assignments.length === 0
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
       : conflicts.length
         ? conflicts.map(conflictItem).join("")
-        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${scheduleDiagnosticsHtml(draft)}`;
+        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${completionWarningHtml}${scheduleDiagnosticsHtml(draft)}`;
   document.querySelector("#adminClassSelect").innerHTML = config.classes
     .map(
       (schoolClass) => `
@@ -4495,7 +4516,11 @@ function renderAdminScheduling() {
 
   document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0;
   document.querySelector("#confirmSchedule").disabled =
-    schedulingBackendState.loading || assignments.length === 0 || conflicts.length > 0 || draft.status === "published";
+    schedulingBackendState.loading ||
+    assignments.length === 0 ||
+    conflicts.length > 0 ||
+    unassignedCount > 0 ||
+    draft.status === "published";
   document.querySelector("#saveCourseRules").disabled = schedulingBackendState.loading;
   document.querySelector("#saveClassStructure").disabled = schedulingBackendState.loading;
   document.querySelector("#addGradeCourse").disabled = schedulingBackendState.loading;
