@@ -20,7 +20,9 @@ import {
   validatePhase1Readiness,
 } from "../server/storage.js";
 import {
+  approveScheduleChangeRequest,
   adjustScheduleAssignment,
+  createScheduleChangeRequest,
   generateScheduleDraft,
   listScheduleVersions,
   publishScheduleDraft,
@@ -70,6 +72,45 @@ function configureClassTeachers(db, { stageId, grade }, actorAccount) {
       actorAccount,
     );
   });
+}
+
+function addDays(dateKey, offset) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + offset));
+  return date.toISOString().slice(0, 10);
+}
+
+function findChangeRequestCandidate(db, config, lesson) {
+  const weekDates = Array.from({ length: 5 }, (_, index) => addDays(config.weekStart, index));
+  const periods = config.periods || [];
+  const currentLessons = db.lessonInstances.filter(
+    (item) =>
+      item.source === "backend-scheduling" &&
+      item.divisionId === lesson.divisionId &&
+      item.gradeId === lesson.gradeId &&
+      item.id !== lesson.id &&
+      item.status !== "cancelled",
+  );
+  for (const date of weekDates) {
+    for (const period of periods) {
+      if (date === lesson.date && Number(period.period) === Number(lesson.period)) continue;
+      const occupied = currentLessons.some(
+        (item) =>
+          item.date === date &&
+          Number(item.period) === Number(period.period) &&
+          (item.classId === lesson.classId || item.teacherId === lesson.teacherId || item.roomId === lesson.roomId),
+      );
+      if (!occupied) {
+        return {
+          teacherId: lesson.teacherId,
+          date,
+          period: period.period,
+          roomId: lesson.roomId,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 const db = createInitialData({ teacherCount: 1000 });
@@ -279,6 +320,31 @@ assert.ok(
     .every((lesson) => lesson.scheduleVersionId === firstPublishedVersionId),
   "回滚后老师端课表、签到和薪资数据源应切换到目标版本",
 );
+const lessonForChange = db.lessonInstances.find(
+  (lesson) => lesson.source === "backend-scheduling" && lesson.divisionId === "elementary" && lesson.gradeId === "elementary-g1",
+);
+assert.ok(lessonForChange, "expected current published lesson for schedule change request");
+const changeCandidate = findChangeRequestCandidate(db, rolledBack.config, lessonForChange);
+assert.ok(changeCandidate, "expected a free slot for schedule change request");
+const changeRequestResult = createScheduleChangeRequest(
+  db,
+  {
+    divisionId: "elementary",
+    gradeId: "elementary-g1",
+    assignmentId: lessonForChange.scheduleAssignmentId,
+    ...changeCandidate,
+    reason: "生产验收：回滚后调课审批链路",
+  },
+  admin,
+);
+assert.equal(changeRequestResult.request.status, "pending");
+assert.equal(changeRequestResult.request.from.date, lessonForChange.date);
+const approvedChange = approveScheduleChangeRequest(db, { requestId: changeRequestResult.request.id }, admin);
+assert.equal(approvedChange.request.status, "approved");
+assert.equal(approvedChange.lesson.changeRequestId, changeRequestResult.request.id);
+assert.equal(approvedChange.lesson.date, changeCandidate.date);
+assert.equal(approvedChange.lesson.period, changeCandidate.period);
+assert.ok(db.auditLogs.some((entry) => entry.action === "schedule_change_request_approve" && entry.requestId === changeRequestResult.request.id));
 
 const token = "phase1-production-session-token";
 createSession(db, admin, token, { userAgent: "phase1-test" });

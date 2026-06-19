@@ -3040,7 +3040,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   );
 
   const draft = {
-    id: `DRAFT-ROLLBACK-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    id: targetVersion.draftId || `DRAFT-ROLLBACK-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
     status: "published",
     divisionId: targetVersion.divisionId,
     gradeId: targetVersion.gradeId,
