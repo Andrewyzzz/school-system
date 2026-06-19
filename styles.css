@@ -2109,6 +2109,16 @@ h2 {
   background: #f6f9ff;
 }
 
+.schedule-slot-drop.is-drop-ok {
+  border-color: #16a34a;
+  background: #f0fdf4;
+}
+
+.schedule-slot-drop.is-drop-blocked {
+  border-color: #e11d48;
+  background: #fff1f2;
+}
+
 .schedule-slot-label {
   display: flex;
   align-items: center;
@@ -2116,6 +2126,24 @@ h2 {
   gap: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.schedule-slot-label em {
+  min-width: 52px;
+  min-height: 22px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 800;
+  text-align: right;
+}
+
+.schedule-slot-drop.is-drop-ok .schedule-slot-label em {
+  color: #166534;
+}
+
+.schedule-slot-drop.is-drop-blocked .schedule-slot-label em {
+  color: #be123c;
 }
 
 .schedule-slot-label strong,

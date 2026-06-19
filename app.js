@@ -1565,6 +1565,20 @@ function localSubjectRuleViolation(subjectId, slot, assignments = [], classId = 
   return null;
 }
 
+function localRoomRuleViolation(subjectId, room) {
+  const subject = localSubjectRuleFor(subjectId);
+  const requiredRoomType = normalizeScheduleRoomType(subject?.requiredRoomType || "homeroom");
+  const actualRoomType = normalizeScheduleRoomType(room?.roomType || "homeroom");
+  if (requiredRoomType !== actualRoomType) {
+    return {
+      type: "room-type",
+      title: `${subject?.name || subjectId} 教室类型不匹配`,
+      text: `${subject?.name || subjectId} 需要${scheduleRoomTypeText(requiredRoomType)}，不能安排到${room?.name || "该教室"}（${scheduleRoomTypeText(actualRoomType)}）。`,
+    };
+  }
+  return null;
+}
+
 function slotKeyFor(date, period) {
   return `${date}-${period}`;
 }
@@ -1605,6 +1619,7 @@ function normalizeLockedLocalAssignment(assignment) {
     time: assignment.time || period?.time || "",
     roomId: room?.id || assignment.roomId || schoolClass?.roomId || "",
     room: room?.name || assignment.room || schoolClass?.room || "",
+    roomType: room?.roomType || assignment.roomType || "homeroom",
     locked: true,
   };
 }
@@ -1642,29 +1657,33 @@ function generateScheduleAssignments(options = {}) {
 
     subjectQueue.forEach((subject) => {
       let best = null;
+      const candidateRooms = localRoomsForSubject(subject, schoolClass);
+      if (!candidateRooms.length) return;
 
       slots.forEach((slot) => {
         if (classBusy.get(schoolClass.id).has(slot.slotKey)) return;
-        const busyRooms = roomBusy.get(schoolClass.roomId) || new Set();
-        if (busyRooms.has(slot.slotKey)) return;
         if (localScheduleConstraintViolation(subject.id, slot)) return;
         if (localSubjectRuleViolation(subject.id, slot, assignments, schoolClass.id)) return;
         const sameSubjectDayCount = countClassSubjectOnDay(assignments, schoolClass.id, subject.id, slot.date);
 
-        subject.teacherIds.forEach((teacherId) => {
-          const busySlots = teacherBusy.get(teacherId) || new Set();
-          if (busySlots.has(slot.slotKey)) return;
+        candidateRooms.forEach((room) => {
+          const busyRooms = roomBusy.get(room.id) || new Set();
+          if (busyRooms.has(slot.slotKey)) return;
+          subject.teacherIds.forEach((teacherId) => {
+            const busySlots = teacherBusy.get(teacherId) || new Set();
+            if (busySlots.has(slot.slotKey)) return;
 
-          const load = teacherLoad.get(teacherId) || 0;
-          const score =
-            load * 12 +
-            sameSubjectDayCount * 8 +
-            subjectRulePreferencePenalty(subject, slot.period) +
-            slot.period +
-            slot.dayIndex * 0.25;
-          if (!best || score < best.score) {
-            best = { slot, teacherId, score };
-          }
+            const load = teacherLoad.get(teacherId) || 0;
+            const score =
+              load * 12 +
+              sameSubjectDayCount * 8 +
+              subjectRulePreferencePenalty(subject, slot.period) +
+              slot.period +
+              slot.dayIndex * 0.25;
+            if (!best || score < best.score) {
+              best = { slot, teacherId, room, score };
+            }
+          });
         });
       });
 
@@ -1688,15 +1707,16 @@ function generateScheduleAssignments(options = {}) {
         dayIndex: best.slot.dayIndex,
         period: best.slot.period,
         time: best.slot.time,
-        room: schoolClass.room,
-        roomId: schoolClass.roomId,
+        room: best.room.name,
+        roomId: best.room.id,
+        roomType: best.room.roomType || "homeroom",
       };
 
       assignments.push(assignment);
       classBusy.get(schoolClass.id).add(best.slot.slotKey);
       if (!teacherBusy.has(best.teacherId)) teacherBusy.set(best.teacherId, new Set());
       teacherBusy.get(best.teacherId).add(best.slot.slotKey);
-      markBusy(roomBusy, schoolClass.roomId, best.slot.slotKey);
+      markBusy(roomBusy, best.room.id, best.slot.slotKey);
       teacherLoad.set(best.teacherId, (teacherLoad.get(best.teacherId) || 0) + 1);
     });
   });
@@ -1750,6 +1770,14 @@ function validateScheduleConflicts(assignments) {
         type: subjectRuleViolation.type,
         title: subjectRuleViolation.title,
         text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${subjectRuleViolation.text}`,
+      });
+    }
+    const roomRuleViolation = localRoomRuleViolation(assignment.subjectId, roomById(assignment.roomId));
+    if (roomRuleViolation) {
+      conflicts.push({
+        type: roomRuleViolation.type,
+        title: roomRuleViolation.title,
+        text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${roomRuleViolation.text}`,
       });
     }
   });
@@ -3393,6 +3421,17 @@ function roomById(roomId) {
   return (state.schedulingConfig.rooms || []).find((room) => room.id === roomId) || null;
 }
 
+function localRoomsForSubject(subject, schoolClass) {
+  const requiredRoomType = normalizeScheduleRoomType(subject?.requiredRoomType || "homeroom");
+  if (requiredRoomType === "homeroom") {
+    const room = roomById(schoolClass?.roomId);
+    return room ? [room] : [];
+  }
+  return (state.schedulingConfig.rooms || []).filter(
+    (room) => normalizeScheduleRoomType(room.roomType || "homeroom") === requiredRoomType,
+  );
+}
+
 async function adjustBackendSchedule() {
   const assignmentId = document.querySelector("#adminAssignmentSelect").value;
   const teacherId = document.querySelector("#adminAssignmentTeacherSelect").value;
@@ -3453,6 +3492,11 @@ function adjustLocalSchedule() {
     showToast("请选择有效的节次和教室");
     return;
   }
+  const roomRuleViolation = localRoomRuleViolation(assignment.subjectId, room);
+  if (roomRuleViolation) {
+    showToast(roomRuleViolation.text || roomRuleViolation.title);
+    return;
+  }
 
   const violation = localScheduleConstraintViolation(assignment.subjectId, {
     date,
@@ -3485,6 +3529,7 @@ function adjustLocalSchedule() {
   assignment.time = period.time;
   assignment.roomId = room.id;
   assignment.room = room.name;
+  assignment.roomType = room.roomType || "homeroom";
   assignment.adjustedAt = formatDateTimeMinute();
   state.schedulingDraft.conflicts = validateScheduleConflicts(state.schedulingDraft.assignments || []);
   state.selectedScheduleAssignmentId = assignmentId;
@@ -3754,6 +3799,11 @@ async function approveScheduleChangeRequest(requestId) {
 async function moveScheduleAssignmentToSlot(assignmentId, date, period) {
   const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
   if (!assignment) return;
+  const preview = previewScheduleDrop(assignmentId, date, period);
+  if (!preview.ok) {
+    showToast(preview.message);
+    return;
+  }
   if (state.schedulingDraft.status === "published") {
     showToast("已发布课表请走调课/代课审批");
     return;
@@ -3792,6 +3842,106 @@ async function moveScheduleAssignmentToSlot(assignmentId, date, period) {
   document.querySelector("#adminAssignmentDateSelect").value = date;
   document.querySelector("#adminAssignmentPeriodSelect").value = String(period);
   adjustLocalSchedule();
+}
+
+function previewScheduleDrop(assignmentId, date, periodValue) {
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment) {
+    return { ok: false, message: "未找到要移动的课节" };
+  }
+  if (state.schedulingDraft.status === "published") {
+    return { ok: false, message: "已发布课表请走调课/代课审批" };
+  }
+  if (assignment.locked) {
+    return { ok: false, message: "该课节已锁定，先解锁再拖拽调整" };
+  }
+
+  const periodNumber = Number.parseInt(periodValue, 10);
+  const period = state.schedulingConfig.periods.find((item) => Number(item.period) === periodNumber);
+  const dayIndex = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5).indexOf(date);
+  const room = roomById(assignment.roomId);
+  if (!period || dayIndex < 0) {
+    return { ok: false, message: "目标日期或节次无效" };
+  }
+  if (!room) {
+    return { ok: false, message: "当前课节教室无效，请先在调整面板选择教室" };
+  }
+
+  const slot = { date, dayIndex, period: period.period, time: period.time };
+  const constraintViolation = localScheduleConstraintViolation(assignment.subjectId, slot);
+  if (constraintViolation) {
+    return {
+      ok: false,
+      message: `${constraintViolation.subjectName || assignment.subjectName} 不能出现在 ${scheduleConstraintDayText(constraintViolation.dayIndexes)} ${scheduleConstraintPeriodText(constraintViolation.periods)}`,
+    };
+  }
+  const subjectRuleViolation = localSubjectRuleViolation(
+    assignment.subjectId,
+    slot,
+    (state.schedulingDraft.assignments || []).filter((item) => item.id !== assignment.id),
+    assignment.classId,
+  );
+  if (subjectRuleViolation) {
+    return { ok: false, message: subjectRuleViolation.text || subjectRuleViolation.title };
+  }
+  const roomRuleViolation = localRoomRuleViolation(assignment.subjectId, room);
+  if (roomRuleViolation) {
+    return { ok: false, message: roomRuleViolation.text || roomRuleViolation.title };
+  }
+
+  const proposedAssignments = (state.schedulingDraft.assignments || []).map((item) =>
+    item.id === assignment.id
+      ? {
+          ...item,
+          date,
+          dayIndex,
+          period: period.period,
+          time: period.time,
+          roomType: room.roomType || item.roomType || "homeroom",
+        }
+      : item,
+  );
+  const conflicts = validateScheduleConflicts(proposedAssignments).filter((conflict) =>
+    String(conflict.text || conflict.title || "").includes(assignment.className) ||
+    String(conflict.text || conflict.title || "").includes(assignment.teacherName) ||
+    String(conflict.text || conflict.title || "").includes(assignment.room),
+  );
+  if (conflicts.length) {
+    return {
+      ok: false,
+      message: conflicts[0].title || "目标时段存在冲突",
+      conflicts,
+    };
+  }
+
+  return {
+    ok: true,
+    message: `${assignment.subjectName} 可移动到 ${scheduleWeekdayLabel(date)} 第 ${period.period} 节`,
+  };
+}
+
+function clearScheduleDropPreview() {
+  document.querySelectorAll(".schedule-slot-drop.is-drop-ok, .schedule-slot-drop.is-drop-blocked").forEach((zone) => {
+    zone.classList.remove("is-drop-ok", "is-drop-blocked");
+    zone.removeAttribute("title");
+    const hint = zone.querySelector("[data-schedule-drop-hint]");
+    if (hint) hint.textContent = "";
+  });
+}
+
+function updateScheduleDropPreview(zone) {
+  if (!zone || !draggedScheduleAssignmentId) return null;
+  clearScheduleDropPreview();
+  const preview = previewScheduleDrop(
+    draggedScheduleAssignmentId,
+    zone.dataset.scheduleDropDate,
+    zone.dataset.scheduleDropPeriod,
+  );
+  zone.classList.add(preview.ok ? "is-drop-ok" : "is-drop-blocked");
+  zone.setAttribute("title", preview.message);
+  const hint = zone.querySelector("[data-schedule-drop-hint]");
+  if (hint) hint.textContent = preview.ok ? "可放置" : "不可放置";
+  return preview;
 }
 
 function syncTeacherImportText() {
@@ -5920,6 +6070,7 @@ function adminScheduleGrid(assignments) {
                     <div class="schedule-slot-label">
                       <strong>第 ${period.period} 节</strong>
                       <span>${escapeHtml(period.time)}</span>
+                      <em data-schedule-drop-hint></em>
                     </div>
                     <div class="schedule-slot-content">
                       ${
@@ -8221,11 +8372,29 @@ document.addEventListener("dragstart", (event) => {
   if (!item) return;
   draggedScheduleAssignmentId = item.dataset.dragAssignment;
   event.dataTransfer?.setData("text/plain", draggedScheduleAssignmentId);
+  event.dataTransfer?.setDragImage?.(item, 12, 12);
 });
 
 document.addEventListener("dragover", (event) => {
-  if (!draggedScheduleAssignmentId || !event.target.closest("[data-schedule-drop-date]")) return;
+  const zone = event.target.closest("[data-schedule-drop-date]");
+  if (!draggedScheduleAssignmentId || !zone) return;
   event.preventDefault();
+  updateScheduleDropPreview(zone);
+});
+
+document.addEventListener("dragleave", (event) => {
+  if (!draggedScheduleAssignmentId) return;
+  const zone = event.target.closest("[data-schedule-drop-date]");
+  if (!zone || zone.contains(event.relatedTarget)) return;
+  zone.classList.remove("is-drop-ok", "is-drop-blocked");
+  zone.removeAttribute("title");
+  const hint = zone.querySelector("[data-schedule-drop-hint]");
+  if (hint) hint.textContent = "";
+});
+
+document.addEventListener("dragend", () => {
+  draggedScheduleAssignmentId = "";
+  clearScheduleDropPreview();
 });
 
 document.addEventListener("drop", async (event) => {
@@ -8233,7 +8402,13 @@ document.addEventListener("drop", async (event) => {
   if (!zone || !draggedScheduleAssignmentId) return;
   event.preventDefault();
   const assignmentId = draggedScheduleAssignmentId;
+  const preview = updateScheduleDropPreview(zone);
   draggedScheduleAssignmentId = "";
+  clearScheduleDropPreview();
+  if (preview && !preview.ok) {
+    showToast(preview.message);
+    return;
+  }
   await moveScheduleAssignmentToSlot(assignmentId, zone.dataset.scheduleDropDate, zone.dataset.scheduleDropPeriod);
 });
 
