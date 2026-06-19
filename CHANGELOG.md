@@ -2,6 +2,25 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-19 - 增加排课求解 benchmark 测试
+
+- 类型：测试 / 工程化 / 排课
+- 影响范围：OR-Tools CP-SAT / fallback / 算法回归 / 质量评分
+- 提交：待提交
+- 部署：未部署
+- 验证：
+  - `node --check tests/scheduling-solver-benchmark.test.js`
+  - `npm run check`
+  - `npm run test:phase1`
+  - `npm run test:benchmark`
+- 内容：
+  - 新增 `tests/scheduling-solver-benchmark.test.js`，覆盖小学 10 班、初中 12 班、高中 16 班三档场景。
+  - benchmark 输出算法、是否 fallback、生成课节、未排课、冲突、质量评分、耗时。
+  - 新增 `npm run test:benchmark` 脚本，并纳入 `npm run check` 语法检查。
+  - 更新最高标准排课 TODO 中 benchmark 相关完成状态。
+- 注意事项：
+  - 当前 benchmark 是手动脚本，后续可接入 CI 并增加 P95 耗时和极限约束场景。
+
 ## 2026-06-19 - 增加排课质量 100 分评分报告
 
 - 类型：功能 / 前端 / 后端 / 测试 / 排课
