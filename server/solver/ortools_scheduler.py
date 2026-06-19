@@ -222,6 +222,56 @@ def assignment_from_candidate(config, task, candidate):
     }
 
 
+def select_candidate_specs(candidate_specs, candidate_limit):
+    if candidate_limit <= 0 or len(candidate_specs) <= candidate_limit:
+        return candidate_specs
+
+    sorted_specs = sorted(candidate_specs, key=lambda item: item["cost"])
+    selected = []
+    selected_keys = set()
+
+    def candidate_key(candidate_spec):
+        slot = candidate_spec["slot"]
+        return (candidate_spec["teacherId"], slot["date"], int(slot["period"]))
+
+    def add(candidate_spec):
+        key = candidate_key(candidate_spec)
+        if key in selected_keys:
+            return False
+        selected.append(candidate_spec)
+        selected_keys.add(key)
+        return len(selected) >= candidate_limit
+
+    best_count = max(12, int(candidate_limit * 0.35))
+    for candidate_spec in sorted_specs[:best_count]:
+        if add(candidate_spec):
+            return selected
+
+    coverage_getters = [
+        lambda item: ("day", item["slot"]["dayIndex"]),
+        lambda item: ("period", int(item["slot"]["period"])),
+        lambda item: ("teacher", item["teacherId"]),
+        lambda item: ("teacher_day", item["teacherId"], item["slot"]["dayIndex"]),
+        lambda item: ("day_period", item["slot"]["dayIndex"], int(item["slot"]["period"])),
+    ]
+
+    for coverage_getter in coverage_getters:
+        grouped = {}
+        for candidate_spec in sorted_specs:
+            key = coverage_getter(candidate_spec)
+            if key not in grouped:
+                grouped[key] = candidate_spec
+        for candidate_spec in grouped.values():
+            if add(candidate_spec):
+                return selected
+
+    for candidate_spec in sorted_specs:
+        if add(candidate_spec):
+            return selected
+
+    return selected
+
+
 def solve(payload):
     try:
         from ortools.sat.python import cp_model
@@ -334,8 +384,7 @@ def solve(payload):
                 )
 
         candidate_specs.sort(key=lambda item: item["cost"])
-        if len(candidate_specs) > candidate_limit:
-            candidate_specs = candidate_specs[:candidate_limit]
+        candidate_specs = select_candidate_specs(candidate_specs, candidate_limit)
 
         for candidate_spec in candidate_specs:
             slot = candidate_spec["slot"]

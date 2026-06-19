@@ -1822,57 +1822,207 @@ function solveScheduleAttempt(config, tasks, options, attemptIndex, deadline) {
 }
 
 function buildScheduleDiagnostics(config, options = {}) {
+  return buildSchedulePrecheck(config, options).checks.slice(0, 12);
+}
+
+function precheckItem(severity, key, title, text, details = {}) {
+  return { severity, key, title, text, details };
+}
+
+function teacherWeeklyCapacity(config, teacherId) {
+  const rule = teacherScheduleRuleFor(config, teacherId);
+  return Number(rule?.maxDailyLessons || 4) * 5;
+}
+
+export function buildSchedulePrecheck(config, options = {}) {
   const lockedAssignments = (options.lockedAssignments || [])
     .filter((assignment) => assignment.locked)
     .map((assignment) => normalizeLockedAssignment(config, assignment));
   const externalAssignments = options.externalAssignments || [];
   const slots = schedulingSlots(config);
-  const diagnostics = [];
+  const checks = [];
+
+  if (!(config.classes || []).length) {
+    checks.push(
+      precheckItem(
+        "error",
+        "class_empty",
+        "当前年级没有可排班级",
+        "请先维护年级班级结构，至少保留 1 个有效班级。",
+      ),
+    );
+  }
+
+  if (!(config.subjects || []).length) {
+    checks.push(
+      precheckItem(
+        "error",
+        "subject_empty",
+        "当前年级没有启用课程",
+        "请先维护年级课程，并确认每门课周课时大于 0。",
+      ),
+    );
+  }
+
+  const weeklyPerClass = weeklyLessonsPerClass(config);
+  if (weeklyPerClass > slots.length) {
+    checks.push(
+      precheckItem(
+        "error",
+        "class_weekly_capacity",
+        "班级周课时超过可用时段",
+        `当前每班每周需要 ${weeklyPerClass} 节，但一周只有 ${slots.length} 个可排时段，请减少课程课时或增加时段。`,
+        { weeklyPerClass, availableSlots: slots.length },
+      ),
+    );
+  }
+
+  const lockedConflicts = validateScheduleConflicts(lockedAssignments, { externalAssignments, config });
+  lockedConflicts.slice(0, 5).forEach((conflict, index) => {
+    checks.push(
+      precheckItem(
+        "error",
+        `locked_conflict_${index + 1}`,
+        `已锁定课节存在冲突：${conflict.title}`,
+        conflict.text,
+        { conflict },
+      ),
+    );
+  });
 
   config.subjects.forEach((subject) => {
     if (!subject.teacherIds?.length) {
-      diagnostics.push({
-        severity: "error",
-        title: `${subject.name} 没有可排老师`,
-        text: "请先为当前年级各班配置该科目的任课老师，否则该科目无法生成排课。",
-      });
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_teacher_empty_${subject.id}`,
+          `${subject.name} 没有可排老师`,
+          "请先为当前年级各班配置该科目的任课老师，否则该科目无法生成排课。",
+          { subjectId: subject.id },
+        ),
+      );
       return;
     }
+
+    const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
+    if (maxPerClassPerDay > 0 && Number(subject.weeklyLessons || 0) > maxPerClassPerDay * 5) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_daily_capacity_${subject.id}`,
+          `${subject.name} 周课时超过每日上限容量`,
+          `${subject.name} 每班每周需要 ${subject.weeklyLessons} 节，但设置为每班每天最多 ${maxPerClassPerDay} 节，5 天最多只能排 ${maxPerClassPerDay * 5} 节。`,
+          { subjectId: subject.id, weeklyLessons: subject.weeklyLessons, maxPerClassPerDay },
+        ),
+      );
+    }
+
     const demand = config.classes.length * Number(subject.weeklyLessons || 0);
-    const weeklyCapacity = subject.teacherIds.reduce((sum, teacherId) => {
-      const rule = teacherScheduleRuleFor(config, teacherId);
-      return sum + Number(rule?.maxDailyLessons || 4) * 5;
-    }, 0);
+    const weeklyCapacity = Array.from(new Set(subject.teacherIds)).reduce(
+      (sum, teacherId) => sum + teacherWeeklyCapacity(config, teacherId),
+      0,
+    );
     if (weeklyCapacity > 0 && demand > weeklyCapacity) {
-      diagnostics.push({
-        severity: "warning",
-        title: `${subject.name} 任课老师容量偏紧`,
-        text: `本年级需要 ${demand} 节，当前任课老师按每日上限估算最多 ${weeklyCapacity} 节，建议调整任课配置或放宽课量上限。`,
-      });
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_teacher_capacity_${subject.id}`,
+          `${subject.name} 任课老师容量不足`,
+          `本年级需要 ${demand} 节，当前任课老师按每日上限估算最多 ${weeklyCapacity} 节，请增加老师或放宽课量上限。`,
+          { subjectId: subject.id, demand, weeklyCapacity },
+        ),
+      );
+    } else if (weeklyCapacity > 0 && demand > weeklyCapacity * 0.85) {
+      checks.push(
+        precheckItem(
+          "warning",
+          `subject_teacher_capacity_tight_${subject.id}`,
+          `${subject.name} 任课老师容量偏紧`,
+          `本年级需要 ${demand} 节，当前任课老师容量约 ${weeklyCapacity} 节，排课可能较慢且质量分偏低。`,
+          { subjectId: subject.id, demand, weeklyCapacity },
+        ),
+      );
     }
   });
 
   const state = createSolverState(config, lockedAssignments, externalAssignments);
   const tasks = buildScheduleTasks(config, lockedAssignments);
-  tasks.slice(0, 80).forEach((task) => {
+  let zeroCandidateCount = 0;
+  let tightCandidateCount = 0;
+  tasks.forEach((task) => {
     const candidates = buildCandidateList(config, state, task, slots, seededRandom(hashString(task.id)));
-    if (candidates.length) return;
-    diagnostics.push({
-      severity: "error",
-      title: `${task.className} ${task.subjectName} 没有可用候选`,
-      text: "当前任课老师、老师不可用时间、教室/班级占用或课程硬约束共同作用后，没有任何可排时段。",
-    });
+    if (!candidates.length) {
+      zeroCandidateCount += 1;
+      if (zeroCandidateCount <= 8) {
+        checks.push(
+          precheckItem(
+            "error",
+            `task_candidate_empty_${task.id}`,
+            `${task.className} ${task.subjectName} 没有可用候选`,
+            "当前任课老师、老师不可用时间、教室/班级占用或课程硬约束共同作用后，没有任何可排时段。",
+            { taskId: task.id, classId: task.classId, subjectId: task.subjectId },
+          ),
+        );
+      }
+    } else if (candidates.length <= 3) {
+      tightCandidateCount += 1;
+      if (tightCandidateCount <= 5) {
+        checks.push(
+          precheckItem(
+            "warning",
+            `task_candidate_tight_${task.id}`,
+            `${task.className} ${task.subjectName} 可选位置偏少`,
+            `当前只剩 ${candidates.length} 个可用候选，建议放宽禁排或增加老师池，避免后续排课质量较低。`,
+            { taskId: task.id, classId: task.classId, subjectId: task.subjectId, candidateCount: candidates.length },
+          ),
+        );
+      }
+    }
   });
 
-  if (!diagnostics.length) {
-    diagnostics.push({
-      severity: "ok",
-      title: "排课准备度正常",
-      text: "任课配置、硬约束和全校老师时间线具备可行候选，若仍然求解失败，优先检查锁定课过多或软约束过紧。",
-    });
+  if (zeroCandidateCount > 8) {
+    checks.push(
+      precheckItem(
+        "error",
+        "task_candidate_empty_more",
+        `还有 ${zeroCandidateCount - 8} 个课时任务没有可用候选`,
+        "请优先检查老师池、课程禁排、老师不可用时间和锁定课节。",
+        { zeroCandidateCount },
+      ),
+    );
   }
 
-  return diagnostics.slice(0, 12);
+  if (!checks.length) {
+    checks.push(
+      precheckItem(
+        "ok",
+        "schedule_precheck_ok",
+        "排课准备度正常",
+        "任课配置、硬约束和全校老师时间线具备可行候选，若仍然求解失败，优先检查锁定课过多或软约束过紧。",
+        { taskCount: tasks.length, requiredLessonCount: requiredScheduleLessonCount(config) },
+      ),
+    );
+  }
+
+  const blockingCount = checks.filter((check) => check.severity === "error").length;
+  const warningCount = checks.filter((check) => check.severity === "warning").length;
+  return {
+    status: blockingCount ? "blocked" : warningCount ? "warning" : "ok",
+    blockingCount,
+    warningCount,
+    taskCount: tasks.length,
+    requiredLessonCount: requiredScheduleLessonCount(config),
+    checks,
+  };
+}
+
+function assertSchedulePrecheckPasses(precheck) {
+  if (!precheck?.blockingCount) return;
+  const firstError = (precheck.checks || []).find((check) => check.severity === "error");
+  const error = new Error(`排课前预检未通过：${firstError?.title || "存在阻塞项"}`);
+  error.statusCode = 400;
+  error.details = { precheck };
+  throw error;
 }
 
 function generateHeuristicScheduleSolution(config, options = {}) {
@@ -1946,7 +2096,7 @@ function generateHeuristicScheduleSolution(config, options = {}) {
       generatedLessonCount: assignments.length,
       lockedCount: lockedAssignments.length,
       externalBusyCount: externalAssignments.length,
-      diagnostics: buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments }),
+      diagnostics: options.precheck?.checks || buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments }),
       timeoutMs: Date.now() - startedAt,
     },
   };
@@ -1963,16 +2113,16 @@ function solveScheduleWithOrTools(config, options = {}) {
     lockedAssignments,
     externalAssignments,
     options: {
-      timeLimitSeconds: Number(options.cpSatTimeLimitSeconds || options.solver?.cpSatTimeLimitSeconds || 10),
+      timeLimitSeconds: Number(options.cpSatTimeLimitSeconds || options.solver?.cpSatTimeLimitSeconds || 30),
       workers: Number(options.cpSatWorkers || options.solver?.cpSatWorkers || 8),
-      candidateLimit: Number(options.cpSatCandidateLimit || options.solver?.cpSatCandidateLimit || 120),
+      candidateLimit: Number(options.cpSatCandidateLimit || options.solver?.cpSatCandidateLimit || 300),
     },
   };
 
   const result = spawnSync(pythonBin, [ORTOOLS_SOLVER_PATH], {
     input: JSON.stringify(payload),
     encoding: "utf8",
-    timeout: Number(options.cpSatProcessTimeoutMs || options.solver?.cpSatProcessTimeoutMs || 45000),
+    timeout: Number(options.cpSatProcessTimeoutMs || options.solver?.cpSatProcessTimeoutMs || 90000),
     maxBuffer: 1024 * 1024 * 8,
   });
 
@@ -2012,7 +2162,7 @@ function solveScheduleWithOrTools(config, options = {}) {
   }
 
   const requiredCount = requiredScheduleLessonCount(config);
-  const diagnostics = buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments });
+  const diagnostics = options.precheck?.checks || buildScheduleDiagnostics(config, { lockedAssignments, externalAssignments });
   const assignments = (parsed.assignments || []).sort((a, b) =>
     `${a.classId} ${a.date} ${a.period}`.localeCompare(`${b.classId} ${b.date} ${b.period}`),
   );
@@ -2060,7 +2210,7 @@ export function generateScheduleSolution(config, options = {}) {
     fallback.meta.fallbackFrom = "ortools-cp-sat";
     fallback.meta.fallbackReason = cpSatResult.error;
     fallback.meta.fallbackMessage = cpSatResult.message;
-    fallback.meta.diagnostics = buildScheduleDiagnostics(config, options);
+    fallback.meta.diagnostics = options.precheck?.checks || buildScheduleDiagnostics(config, options);
   }
   return fallback;
 }
@@ -2351,7 +2501,9 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   const config = buildSchedulingConfig(db, options);
   assertTeacherAssignmentsComplete(config);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
-  const solution = generateScheduleSolution(config, { externalAssignments });
+  const precheck = buildSchedulePrecheck(config, { externalAssignments });
+  assertSchedulePrecheckPasses(precheck);
+  const solution = generateScheduleSolution(config, { externalAssignments, precheck });
   const assignments = solution.assignments;
   const conflicts = solution.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
   const now = formatDateTimeMinute();
@@ -2375,6 +2527,7 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
     assignments,
     conflicts,
     globalBusyCount: externalAssignments.length,
+    precheck,
     solver: solution.meta,
     lockedCount: 0,
     publishedLessonIds: [],
@@ -3051,7 +3204,9 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
 
   const lockedAssignments = (draft.assignments || []).filter((assignment) => assignment.locked);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
-  const solution = generateScheduleSolution(config, { lockedAssignments, externalAssignments });
+  const precheck = buildSchedulePrecheck(config, { lockedAssignments, externalAssignments });
+  assertSchedulePrecheckPasses(precheck);
+  const solution = generateScheduleSolution(config, { lockedAssignments, externalAssignments, precheck });
   const assignments = solution.assignments;
   const conflicts = solution.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
   const now = formatDateTimeMinute();
@@ -3062,6 +3217,7 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
   draft.unassignedCount = Math.max((draft.requiredLessonCount || requiredScheduleLessonCount(config)) - assignments.length, 0);
   draft.lockedCount = lockedAssignments.length;
   draft.globalBusyCount = externalAssignments.length;
+  draft.precheck = precheck;
   draft.solver = solution.meta;
   draft.updatedAt = now;
   draft.replannedAt = now;

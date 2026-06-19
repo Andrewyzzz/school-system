@@ -19,7 +19,12 @@ import {
   updateTeacherSalaryProfile,
   validatePhase1Readiness,
 } from "../server/storage.js";
-import { generateScheduleDraft, publishScheduleDraft, updateGradeClassStructure } from "../server/scheduling.js";
+import {
+  generateScheduleDraft,
+  publishScheduleDraft,
+  updateGradeClassStructure,
+  updateGradeCourseRules,
+} from "../server/scheduling.js";
 
 function actor(db, username) {
   const account = db.accounts.find((item) => item.username === username);
@@ -115,6 +120,43 @@ const schedule = generateScheduleDraft(
   admin,
 );
 assert.equal(schedule.draft.conflicts.length, 0);
+assert.notEqual(schedule.draft.precheck.status, "blocked");
+assert.ok(schedule.draft.precheck.checks.length >= 1);
+
+const impossibleDb = createInitialData({ teacherCount: 1000 });
+const impossibleAdmin = actor(impossibleDb, "admin");
+updateGradeClassStructure(
+  impossibleDb,
+  {
+    stageId: "primary",
+    grade: 1,
+    regularCount: 8,
+    experimentalCount: 2,
+  },
+  impossibleAdmin,
+);
+configureClassTeachers(impossibleDb, { stageId: "primary", grade: 1 }, impossibleAdmin);
+updateGradeCourseRules(
+  impossibleDb,
+  {
+    stageId: "primary",
+    grade: 1,
+    rules: [{ subjectId: "pe", enabled: true, weeklyLessons: 6, maxPerClassPerDay: 1 }],
+  },
+  impossibleAdmin,
+);
+assert.throws(
+  () =>
+    generateScheduleDraft(
+      impossibleDb,
+      {
+        divisionId: "elementary",
+        gradeId: "elementary-g1",
+      },
+      impossibleAdmin,
+    ),
+  /排课前预检未通过/,
+);
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
 const peLessonsByClassDay = new Map();

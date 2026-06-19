@@ -2,6 +2,28 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-19 - 启动最高标准排课引擎升级
+
+- 类型：功能 / 算法 / 测试 / 文档
+- 影响范围：行政排课 / OR-Tools CP-SAT / 排课前预检 / 测试
+- 提交：随本次提交
+- 部署：未部署
+- 验证：
+  - `node --check server/scheduling.js`
+  - `node --check tests/phase1-production.test.js`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/python-cache python3 -m py_compile server/solver/ortools_scheduler.py`
+  - `node tests/phase1-production.test.js`
+- 内容：
+  - 新增排课前预检，生成草稿和局部重排前会检查班级周课时容量、课程每日上限、老师池容量、锁定课冲突和无候选课时任务。
+  - 预检结果区分 `ok`、`warning`、`blocked`，阻塞项会在求解前拦截并返回结构化 `precheck` 明细。
+  - 排课草稿新增 `precheck` 字段，后续前端可直接展示预检报告。
+  - CP-SAT 默认求解时间从 `10s` 提升到 `30s`，候选池上限从 `120` 提升到 `300`，进程超时提升到 `90s`。
+  - OR-Tools 候选截断从简单取前 N 个改为覆盖式候选池，保留低成本候选的同时覆盖不同日期、节次和老师。
+  - 自动化测试新增无解课程规则场景，验证预检会在求解前阻塞。
+  - 更新最高标准排课 TODO 完成状态。
+- 注意事项：
+  - 本次还未实现两阶段 CP-SAT、未排课惩罚变量、fallback warm start 和前端预检独立面板。
+
 ## 2026-06-19 - 建立最高标准排课系统 TODO
 
 - 类型：产品规划 / 文档
