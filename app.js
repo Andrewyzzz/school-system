@@ -261,6 +261,12 @@ const initialState = {
   selectedSchedulingGradeId: "elementary-g1",
   selectedSchedulingClassId: "P1C01",
   selectedScheduleAssignmentId: "",
+  scheduleReplanScope: {
+    classId: "",
+    teacherId: "",
+    date: "",
+    subjectId: "",
+  },
   selectedScheduleWeekStart: "2026-06-08",
   scannerLessonId: "L002",
   lastScanText: "",
@@ -1386,12 +1392,88 @@ function resetSchedulingDraftForSelection() {
   };
 }
 
+function emptyScheduleReplanScope() {
+  return { classId: "", teacherId: "", date: "", subjectId: "" };
+}
+
+function currentScheduleReplanScope() {
+  const config = state.schedulingConfig;
+  const scope = {
+    ...emptyScheduleReplanScope(),
+    ...(state.scheduleReplanScope || {}),
+  };
+  if (!config.classes.some((schoolClass) => schoolClass.id === scope.classId)) scope.classId = "";
+  if (!config.teachers.some((teacher) => teacher.id === scope.teacherId)) scope.teacherId = "";
+  if (!config.subjects.some((subject) => subject.id === scope.subjectId)) scope.subjectId = "";
+  if (!weekDateKeys(config.weekStart).slice(0, 5).includes(scope.date)) scope.date = "";
+  state.scheduleReplanScope = scope;
+  return scope;
+}
+
+function scheduleReplanScopeIsEmpty(scope = currentScheduleReplanScope()) {
+  return !scope.classId && !scope.teacherId && !scope.date && !scope.subjectId;
+}
+
+function scheduleReplanScopeText(scope = currentScheduleReplanScope()) {
+  if (scheduleReplanScopeIsEmpty(scope)) return "全部未锁定课程";
+  const parts = [];
+  const schoolClass = state.schedulingConfig.classes.find((item) => item.id === scope.classId);
+  const teacher = state.schedulingConfig.teachers.find((item) => item.id === scope.teacherId);
+  const subject = state.schedulingConfig.subjects.find((item) => item.id === scope.subjectId);
+  if (schoolClass) parts.push(schoolClass.name);
+  if (teacher) parts.push(teacher.name);
+  if (scope.date) parts.push(scheduleWeekdayLabel(scope.date));
+  if (subject) parts.push(subject.name);
+  return parts.join(" / ");
+}
+
+function updateScheduleReplanScopeFromControls() {
+  state.scheduleReplanScope = {
+    classId: document.querySelector("#scheduleReplanClassSelect")?.value || "",
+    teacherId: document.querySelector("#scheduleReplanTeacherSelect")?.value || "",
+    date: document.querySelector("#scheduleReplanDateSelect")?.value || "",
+    subjectId: document.querySelector("#scheduleReplanSubjectSelect")?.value || "",
+  };
+  return currentScheduleReplanScope();
+}
+
+function scheduleAssignmentMatchesReplanScope(assignment, scope = currentScheduleReplanScope()) {
+  if (scope.classId && assignment.classId !== scope.classId) return false;
+  if (scope.teacherId && assignment.teacherId !== scope.teacherId) return false;
+  if (scope.date && assignment.date !== scope.date) return false;
+  if (scope.subjectId && assignment.subjectId !== scope.subjectId) return false;
+  return true;
+}
+
+function temporaryLockedAssignmentsForReplan(assignments, scope = currentScheduleReplanScope()) {
+  return (assignments || [])
+    .filter((assignment) => assignment.locked || !scheduleAssignmentMatchesReplanScope(assignment, scope))
+    .map((assignment) => ({ ...assignment, locked: true, temporaryReplanLock: !assignment.locked }));
+}
+
+function restoreTemporaryReplanLocks(assignments, originalAssignments) {
+  const originalById = new Map((originalAssignments || []).map((assignment) => [assignment.id, assignment]));
+  return (assignments || []).map((assignment) => {
+    const original = originalById.get(assignment.id);
+    const { temporaryReplanLock, ...cleanAssignment } = assignment;
+    if (!original) return cleanAssignment;
+    return {
+      ...cleanAssignment,
+      locked: Boolean(original.locked),
+      lockedAt: original.lockedAt || "",
+      lockedByAccountId: original.lockedByAccountId || "",
+      unlockedAt: original.unlockedAt || "",
+    };
+  });
+}
+
 function applySchedulingSelection(divisionId, gradeId = "") {
   const nextConfig = buildSchedulingConfig(divisionId, gradeId);
   state.selectedSchedulingDivisionId = nextConfig.divisionId;
   state.selectedSchedulingGradeId = nextConfig.gradeId;
   state.selectedSchedulingClassId = nextConfig.classes[0]?.id || "";
   state.schedulingConfig = nextConfig;
+  state.scheduleReplanScope = emptyScheduleReplanScope();
   resetSchedulingDraftForSelection();
 }
 
@@ -3613,22 +3695,27 @@ async function toggleScheduleAssignmentLock() {
 }
 
 async function regenerateBackendUnlockedSchedule() {
+  const replanScope = updateScheduleReplanScopeFromControls();
   schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
   renderAdminScheduling();
 
   try {
     const result = await apiRequest("/api/scheduling/regenerate-unlocked", {
       method: "POST",
-      body: backendSchedulingOptions(),
+      body: {
+        ...backendSchedulingOptions(),
+        replanScope,
+      },
     });
     applyBackendScheduleResult(result);
     schedulingBackendState = { loaded: true, loading: false, error: "" };
-    const lockedCount = result.draft?.lockedCount || 0;
+    const preservedCount = result.draft?.preservedCount ?? result.draft?.lockedCount ?? 0;
     const conflicts = result.draft?.conflicts?.length || 0;
+    const scopeText = scheduleReplanScopeText(result.draft?.replanScope || replanScope);
     showToast(
       conflicts
-        ? `已保留 ${lockedCount} 节锁定课并重排，发现 ${conflicts} 个冲突`
-        : `已保留 ${lockedCount} 节锁定课并重排未锁定课程`,
+        ? `${scopeText}已重排，保留 ${preservedCount} 节，发现 ${conflicts} 个冲突`
+        : `${scopeText}已重排，保留 ${preservedCount} 节`,
     );
   } catch (error) {
     schedulingBackendState = {
@@ -3648,8 +3735,19 @@ function regenerateLocalUnlockedSchedule() {
     showToast("请先生成排课草稿");
     return;
   }
-  const lockedAssignments = draft.assignments.filter((assignment) => assignment.locked);
-  const assignments = generateScheduleAssignments({ lockedAssignments });
+  const replanScope = updateScheduleReplanScopeFromControls();
+  const scopeTargetCount = draft.assignments.filter(
+    (assignment) => !assignment.locked && scheduleAssignmentMatchesReplanScope(assignment, replanScope),
+  ).length;
+  if (!scopeTargetCount) {
+    showToast(`${scheduleReplanScopeText(replanScope)}没有可重排的未锁定课程`);
+    return;
+  }
+  const lockedAssignments = temporaryLockedAssignmentsForReplan(draft.assignments, replanScope);
+  const assignments = restoreTemporaryReplanLocks(
+    generateScheduleAssignments({ lockedAssignments }),
+    draft.assignments,
+  );
   const conflicts = validateScheduleConflicts(assignments);
   state.schedulingDraft = {
     ...draft,
@@ -3658,14 +3756,17 @@ function regenerateLocalUnlockedSchedule() {
     conflicts,
     generatedLessonCount: assignments.length,
     unassignedCount: Math.max(requiredScheduleLessonCount() - assignments.length, 0),
-    lockedCount: lockedAssignments.length,
+    lockedCount: draft.assignments.filter((assignment) => assignment.locked).length,
+    preservedCount: lockedAssignments.length,
+    replanScope,
+    replannedScopeCount: scopeTargetCount,
     updatedAt: formatDateTimeMinute(),
     replannedAt: formatDateTimeMinute(),
   };
   showToast(
     conflicts.length
-      ? `已保留 ${lockedAssignments.length} 节锁定课并重排，发现 ${conflicts.length} 个冲突`
-      : `已保留 ${lockedAssignments.length} 节锁定课并重排未锁定课程`,
+      ? `${scheduleReplanScopeText(replanScope)}已重排，保留 ${lockedAssignments.length} 节，发现 ${conflicts.length} 个冲突`
+      : `${scheduleReplanScopeText(replanScope)}已重排，保留 ${lockedAssignments.length} 节`,
   );
   render();
 }
@@ -4854,6 +4955,11 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   const regenerateButton = document.querySelector("#regenerateUnlockedSchedule");
   const status = document.querySelector("#scheduleAdjustStatus");
   const suggestions = document.querySelector("#scheduleAdjustmentSuggestions");
+  const replanClassSelect = document.querySelector("#scheduleReplanClassSelect");
+  const replanTeacherSelect = document.querySelector("#scheduleReplanTeacherSelect");
+  const replanDateSelect = document.querySelector("#scheduleReplanDateSelect");
+  const replanSubjectSelect = document.querySelector("#scheduleReplanSubjectSelect");
+  const replanScopeStatus = document.querySelector("#scheduleReplanScopeStatus");
   if (
     !assignmentSelect ||
     !teacherSelect ||
@@ -4864,7 +4970,12 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
     !lockButton ||
     !regenerateButton ||
     !status ||
-    !suggestions
+    !suggestions ||
+    !replanClassSelect ||
+    !replanTeacherSelect ||
+    !replanDateSelect ||
+    !replanSubjectSelect ||
+    !replanScopeStatus
   ) {
     return;
   }
@@ -4953,6 +5064,49 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
         .join("")
     : `<option value="">暂无教室</option>`;
 
+  const replanScope = currentScheduleReplanScope();
+  const replanDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  replanClassSelect.innerHTML = `<option value="">全部班级</option>${state.schedulingConfig.classes
+    .map(
+      (schoolClass) => `
+        <option value="${escapeHtml(schoolClass.id)}" ${schoolClass.id === replanScope.classId ? "selected" : ""}>
+          ${escapeHtml(schoolClass.name)}
+        </option>
+      `,
+    )
+    .join("")}`;
+  replanTeacherSelect.innerHTML = `<option value="">全部老师</option>${state.schedulingConfig.teachers
+    .map(
+      (teacher) => `
+        <option value="${escapeHtml(teacher.id)}" ${teacher.id === replanScope.teacherId ? "selected" : ""}>
+          ${escapeHtml(teacher.name)} · ${escapeHtml(teacher.subject || teacher.subjectId || "")}
+        </option>
+      `,
+    )
+    .join("")}`;
+  replanDateSelect.innerHTML = `<option value="">全部日期</option>${replanDates
+    .map(
+      (date) => `
+        <option value="${escapeHtml(date)}" ${date === replanScope.date ? "selected" : ""}>
+          ${escapeHtml(scheduleWeekdayLabel(date))} · ${escapeHtml(formatDate(date))}
+        </option>
+      `,
+    )
+    .join("")}`;
+  replanSubjectSelect.innerHTML = `<option value="">全部科目</option>${state.schedulingConfig.subjects
+    .map(
+      (subject) => `
+        <option value="${escapeHtml(subject.id)}" ${subject.id === replanScope.subjectId ? "selected" : ""}>
+          ${escapeHtml(subject.name)}
+        </option>
+      `,
+    )
+    .join("")}`;
+  const scopeText = scheduleReplanScopeText(replanScope);
+  replanScopeStatus.textContent = scheduleReplanScopeIsEmpty(replanScope)
+    ? "默认重排全部未锁定课程"
+    : `仅重排：${scopeText}`;
+
   assignmentSelect.disabled = !hasDraft || schedulingBackendState.loading;
   teacherSelect.disabled = !canAdjust;
   dateSelect.disabled = !canAdjust;
@@ -4962,6 +5116,11 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   lockButton.disabled = !canAdjust || !selectedAssignment;
   lockButton.textContent = selectedAssignment?.locked ? "解锁该课节" : "锁定该课节";
   regenerateButton.disabled = !canAdjust || !hasDraft;
+  regenerateButton.textContent = scheduleReplanScopeIsEmpty(replanScope) ? "重排未锁定课程" : "按范围局部重排";
+  replanClassSelect.disabled = !canAdjust || !hasDraft;
+  replanTeacherSelect.disabled = !canAdjust || !hasDraft;
+  replanDateSelect.disabled = !canAdjust || !hasDraft;
+  replanSubjectSelect.disabled = !canAdjust || !hasDraft;
   suggestions.innerHTML = scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft);
 }
 
@@ -8430,6 +8589,15 @@ document.querySelector("#adminAssignmentSelect").addEventListener("change", (eve
   state.selectedScheduleAssignmentId = event.target.value;
   renderAdminScheduling();
 });
+
+["#scheduleReplanClassSelect", "#scheduleReplanTeacherSelect", "#scheduleReplanDateSelect", "#scheduleReplanSubjectSelect"].forEach(
+  (selector) => {
+    document.querySelector(selector).addEventListener("change", () => {
+      updateScheduleReplanScopeFromControls();
+      renderAdminScheduling();
+    });
+  },
+);
 
 document.querySelector("#changeAssignmentSelect").addEventListener("change", (event) => {
   state.selectedScheduleAssignmentId = event.target.value;

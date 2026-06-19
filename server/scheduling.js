@@ -497,7 +497,7 @@ export function buildSchedulingConfig(db, options = {}) {
     gradeId: grade.id,
     gradeName: grade.name,
     grade: grade.grade,
-    weekStart: division.weekStart,
+    weekStart: division.weekStart || "2026-06-15",
     classCount: classes.length,
     classStructure,
     classes,
@@ -3395,6 +3395,60 @@ export function setScheduleAssignmentLock(db, options = {}, actorAccount = null)
   return { config, draft, assignment };
 }
 
+function normalizeReplanScope(config, options = {}) {
+  const source = options.replanScope || {};
+  const weekDates = weekDateKeys(config).slice(0, 5);
+  const scope = {
+    classId: String(source.classId || "").trim(),
+    teacherId: String(source.teacherId || "").trim(),
+    date: String(source.date || "").trim(),
+    subjectId: String(source.subjectId || "").trim(),
+  };
+  if (!config.classes.some((schoolClass) => schoolClass.id === scope.classId)) scope.classId = "";
+  if (!config.teachers.some((teacher) => teacher.id === scope.teacherId)) scope.teacherId = "";
+  if (!config.subjects.some((subject) => subject.id === scope.subjectId)) scope.subjectId = "";
+  if (!weekDates.includes(scope.date)) scope.date = "";
+  return scope;
+}
+
+function replanScopeIsEmpty(scope) {
+  return !scope.classId && !scope.teacherId && !scope.date && !scope.subjectId;
+}
+
+function assignmentMatchesReplanScope(assignment, scope) {
+  if (scope.classId && assignment.classId !== scope.classId) return false;
+  if (scope.teacherId && assignment.teacherId !== scope.teacherId) return false;
+  if (scope.date && assignment.date !== scope.date) return false;
+  if (scope.subjectId && assignment.subjectId !== scope.subjectId) return false;
+  return true;
+}
+
+function temporaryLockedAssignmentsForScope(assignments = [], scope = {}) {
+  return assignments
+    .filter((assignment) => assignment.locked || !assignmentMatchesReplanScope(assignment, scope))
+    .map((assignment) => ({
+      ...assignment,
+      locked: true,
+      temporaryReplanLock: !assignment.locked,
+    }));
+}
+
+function restoreTemporaryReplanLocks(assignments = [], originalAssignments = []) {
+  const originalById = new Map(originalAssignments.map((assignment) => [assignment.id, assignment]));
+  return assignments.map((assignment) => {
+    const original = originalById.get(assignment.id);
+    const { temporaryReplanLock, ...cleanAssignment } = assignment;
+    if (!original) return cleanAssignment;
+    return {
+      ...cleanAssignment,
+      locked: Boolean(original.locked),
+      lockedAt: original.lockedAt || "",
+      lockedByAccountId: original.lockedByAccountId || "",
+      unlockedAt: original.unlockedAt || "",
+    };
+  });
+}
+
 export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
@@ -3413,12 +3467,26 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
     throw error;
   }
 
-  const lockedAssignments = (draft.assignments || []).filter((assignment) => assignment.locked);
+  const replanScope = normalizeReplanScope(config, options);
+  const scopeTargetCount = (draft.assignments || []).filter(
+    (assignment) => !assignment.locked && assignmentMatchesReplanScope(assignment, replanScope),
+  ).length;
+  if (!scopeTargetCount) {
+    const error = new Error(
+      replanScopeIsEmpty(replanScope)
+        ? "当前没有可重排的未锁定课程"
+        : "当前局部范围内没有可重排的未锁定课程",
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const lockedAssignments = temporaryLockedAssignmentsForScope(draft.assignments || [], replanScope);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   const precheck = buildSchedulePrecheck(config, { lockedAssignments, externalAssignments });
   assertSchedulePrecheckPasses(precheck);
   const solution = generateScheduleSolution(config, { lockedAssignments, externalAssignments, precheck });
-  const assignments = solution.assignments;
+  const assignments = restoreTemporaryReplanLocks(solution.assignments, draft.assignments || []);
   const conflicts = solution.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
   const now = formatDateTimeMinute();
 
@@ -3426,7 +3494,10 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
   draft.conflicts = conflicts;
   draft.generatedLessonCount = assignments.length;
   draft.unassignedCount = Math.max((draft.requiredLessonCount || requiredScheduleLessonCount(config)) - assignments.length, 0);
-  draft.lockedCount = lockedAssignments.length;
+  draft.lockedCount = assignments.filter((assignment) => assignment.locked).length;
+  draft.preservedCount = lockedAssignments.length;
+  draft.replanScope = replanScope;
+  draft.replannedScopeCount = scopeTargetCount;
   draft.globalBusyCount = externalAssignments.length;
   draft.precheck = precheck;
   draft.solver = solution.meta;
@@ -3441,7 +3512,10 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
     actorName: actorAccount?.name || "",
     divisionId: config.divisionId,
     gradeId: config.gradeId,
-    lockedCount: lockedAssignments.length,
+    replanScope,
+    replannedScopeCount: scopeTargetCount,
+    lockedCount: draft.lockedCount,
+    preservedCount: lockedAssignments.length,
     assignmentCount: assignments.length,
     conflictCount: conflicts.length,
     solverAlgorithm: solution.meta.algorithm,

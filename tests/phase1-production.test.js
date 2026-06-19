@@ -23,6 +23,7 @@ import {
   adjustScheduleAssignment,
   generateScheduleDraft,
   publishScheduleDraft,
+  regenerateUnlockedScheduleAssignments,
   updateGradeClassStructure,
   updateGradeCourseRules,
 } from "../server/scheduling.js";
@@ -157,6 +158,37 @@ assert.throws(
     ),
   /教室类型不匹配|需要操场/,
 );
+
+const targetReplanClassId = peAssignment.classId;
+const outsideClassBefore = new Map(
+  schedule.draft.assignments
+    .filter((assignment) => assignment.classId !== targetReplanClassId)
+    .map((assignment) => [
+      assignment.id,
+      `${assignment.date}|${assignment.period}|${assignment.teacherId}|${assignment.roomId}|${Boolean(assignment.locked)}`,
+    ]),
+);
+const scopedReplan = regenerateUnlockedScheduleAssignments(
+  db,
+  {
+    divisionId: "elementary",
+    gradeId: "elementary-g1",
+    replanScope: { classId: targetReplanClassId },
+  },
+  admin,
+);
+assert.equal(scopedReplan.draft.conflicts.length, 0);
+assert.equal(scopedReplan.draft.replanScope.classId, targetReplanClassId);
+assert.ok(scopedReplan.draft.replannedScopeCount > 0);
+outsideClassBefore.forEach((signature, assignmentId) => {
+  const after = scopedReplan.draft.assignments.find((assignment) => assignment.id === assignmentId);
+  assert.ok(after, `outside-scope assignment should remain: ${assignmentId}`);
+  assert.equal(
+    `${after.date}|${after.period}|${after.teacherId}|${after.roomId}|${Boolean(after.locked)}`,
+    signature,
+    "局部重排不能移动范围外课节，也不能把临时保留污染为锁定",
+  );
+});
 
 const impossibleDb = createInitialData({ teacherCount: 1000 });
 const impossibleAdmin = actor(impossibleDb, "admin");
