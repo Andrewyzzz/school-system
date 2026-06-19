@@ -743,6 +743,80 @@ h2 {
   margin-bottom: 0;
 }
 
+.schedule-suggestions {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.schedule-suggestions-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.schedule-suggestions-head strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.schedule-suggestions-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-suggestion-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.schedule-suggestion-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-height: 64px;
+  border: 1px solid rgba(0, 32, 104, 0.14);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+
+.schedule-suggestion-item:hover {
+  border-color: rgba(0, 32, 104, 0.36);
+  box-shadow: 0 10px 24px rgba(0, 32, 104, 0.1);
+  transform: translateY(-1px);
+}
+
+.schedule-suggestion-item strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.schedule-suggestion-item span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.compact-empty {
+  padding: 10px;
+  min-height: auto;
+  font-size: 13px;
+}
+
 .teacher-import-panel,
 .import-feedback-panel {
   margin-bottom: 16px;
@@ -3286,6 +3360,15 @@ td {
   }
 
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-suggestions-head {
+    display: grid;
+    gap: 4px;
+  }
+
+  .schedule-suggestion-list {
     grid-template-columns: 1fr;
   }
 

@@ -3801,7 +3801,14 @@ async function moveScheduleAssignmentToSlot(assignmentId, date, period) {
   if (!assignment) return;
   const preview = previewScheduleDrop(assignmentId, date, period);
   if (!preview.ok) {
-    showToast(preview.message);
+    const suggestions = scheduleDropSuggestions(assignmentId, 3);
+    state.selectedScheduleAssignmentId = assignmentId;
+    showToast(
+      suggestions.length
+        ? `${preview.message}；可试 ${scheduleWeekdayLabel(suggestions[0].date)}第 ${suggestions[0].period} 节`
+        : preview.message,
+    );
+    renderAdminScheduling();
     return;
   }
   if (state.schedulingDraft.status === "published") {
@@ -3918,6 +3925,74 @@ function previewScheduleDrop(assignmentId, date, periodValue) {
     ok: true,
     message: `${assignment.subjectName} 可移动到 ${scheduleWeekdayLabel(date)} 第 ${period.period} 节`,
   };
+}
+
+function scheduleDropSuggestions(assignmentId, limit = 5) {
+  const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+  if (!assignment || assignment.locked || state.schedulingDraft.status === "published") return [];
+  const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  return weekDates
+    .flatMap((date) =>
+      (state.schedulingConfig.periods || []).map((period) => ({
+        date,
+        period: Number(period.period),
+        time: period.time,
+      })),
+    )
+    .filter((slot) => !(slot.date === assignment.date && Number(slot.period) === Number(assignment.period)))
+    .map((slot) => {
+      const preview = previewScheduleDrop(assignmentId, slot.date, slot.period);
+      const dayDistance = Math.abs(weekDates.indexOf(slot.date) - weekDates.indexOf(assignment.date));
+      const periodDistance = Math.abs(Number(slot.period) - Number(assignment.period));
+      return {
+        ...slot,
+        ...preview,
+        score: dayDistance * 10 + periodDistance,
+      };
+    })
+    .filter((item) => item.ok)
+    .sort((a, b) => a.score - b.score || `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`))
+    .slice(0, limit);
+}
+
+function scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft) {
+  if (!selectedAssignment || !draft.assignments?.length) {
+    return `<div class="empty-state compact-empty">选择一节课后显示推荐可用位置</div>`;
+  }
+  if (draft.status === "published") {
+    return `<div class="empty-state compact-empty">已发布课表请通过调课/代课审批调整</div>`;
+  }
+  if (selectedAssignment.locked) {
+    return `<div class="empty-state compact-empty">该课节已锁定，解锁后可查看推荐位置</div>`;
+  }
+  const suggestions = scheduleDropSuggestions(selectedAssignment.id);
+  if (!suggestions.length) {
+    return `<div class="empty-state compact-empty">暂未找到同老师、同教室可直接移动的位置；可尝试换老师、换教室或重排未锁定课程。</div>`;
+  }
+  return `
+    <div class="schedule-suggestions-head">
+      <strong>推荐可用位置</strong>
+      <span>按同一天、相近节次优先排序</span>
+    </div>
+    <div class="schedule-suggestion-list">
+      ${suggestions
+        .map(
+          (item) => `
+            <button
+              class="schedule-suggestion-item"
+              data-apply-schedule-suggestion="${escapeHtml(selectedAssignment.id)}"
+              data-suggestion-date="${escapeHtml(item.date)}"
+              data-suggestion-period="${item.period}"
+              type="button"
+            >
+              <strong>${escapeHtml(scheduleWeekdayLabel(item.date))} · 第 ${item.period} 节</strong>
+              <span>${escapeHtml(item.time)} · ${escapeHtml(selectedAssignment.room)}</span>
+            </button>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function clearScheduleDropPreview() {
@@ -4778,6 +4853,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   const lockButton = document.querySelector("#toggleScheduleAssignmentLock");
   const regenerateButton = document.querySelector("#regenerateUnlockedSchedule");
   const status = document.querySelector("#scheduleAdjustStatus");
+  const suggestions = document.querySelector("#scheduleAdjustmentSuggestions");
   if (
     !assignmentSelect ||
     !teacherSelect ||
@@ -4787,7 +4863,8 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
     !applyButton ||
     !lockButton ||
     !regenerateButton ||
-    !status
+    !status ||
+    !suggestions
   ) {
     return;
   }
@@ -4885,6 +4962,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   lockButton.disabled = !canAdjust || !selectedAssignment;
   lockButton.textContent = selectedAssignment?.locked ? "解锁该课节" : "锁定该课节";
   regenerateButton.disabled = !canAdjust || !hasDraft;
+  suggestions.innerHTML = scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft);
 }
 
 function renderTeacherRulePanel(config) {
@@ -7962,6 +8040,25 @@ document.addEventListener("click", async (event) => {
   if (scheduleDateButton) {
     state.selectedScheduleDate = scheduleDateButton.dataset.scheduleDate;
     renderSchedule();
+    return;
+  }
+
+  const scheduleSuggestionButton = event.target.closest("[data-apply-schedule-suggestion]");
+  if (scheduleSuggestionButton) {
+    const assignmentId = scheduleSuggestionButton.dataset.applyScheduleSuggestion;
+    const assignment = (state.schedulingDraft.assignments || []).find((item) => item.id === assignmentId);
+    const assignmentSelect = document.querySelector("#adminAssignmentSelect");
+    const teacherSelect = document.querySelector("#adminAssignmentTeacherSelect");
+    const dateSelect = document.querySelector("#adminAssignmentDateSelect");
+    const periodSelect = document.querySelector("#adminAssignmentPeriodSelect");
+    const roomSelect = document.querySelector("#adminAssignmentRoomSelect");
+    state.selectedScheduleAssignmentId = assignmentId;
+    if (assignmentSelect) assignmentSelect.value = assignmentId;
+    if (teacherSelect && assignment) teacherSelect.value = assignment.teacherId;
+    if (roomSelect && assignment) roomSelect.value = assignment.roomId;
+    if (dateSelect) dateSelect.value = scheduleSuggestionButton.dataset.suggestionDate;
+    if (periodSelect) periodSelect.value = scheduleSuggestionButton.dataset.suggestionPeriod;
+    await applyScheduleAdjustment();
     return;
   }
 
