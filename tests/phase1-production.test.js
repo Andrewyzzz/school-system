@@ -167,6 +167,10 @@ const schedule = generateScheduleDraft(
 assert.equal(schedule.draft.conflicts.length, 0);
 assert.notEqual(schedule.draft.precheck.status, "blocked");
 assert.ok(schedule.draft.precheck.checks.length >= 1);
+assert.ok(schedule.draft.solver.qualityReport, "expected schedule quality report");
+assert.equal(schedule.draft.solver.qualityReport.maxScore, 100);
+assert.ok(schedule.draft.solver.qualityReport.score >= 0 && schedule.draft.solver.qualityReport.score <= 100);
+assert.ok(Array.isArray(schedule.draft.solver.qualityReport.deductions));
 assert.ok(
   schedule.draft.assignments.filter((assignment) => assignment.subjectId === "pe").every((assignment) => assignment.roomType === "playground"),
   "体育课应排到操场",

@@ -1513,6 +1513,10 @@ function scheduleStatusText(status = state.schedulingDraft.status) {
 
 function scheduleSolverSummaryText(draft) {
   const solver = draft.solver || null;
+  const quality = solver?.qualityReport || null;
+  const qualityText = quality
+    ? `质量评分 ${quality.score}/${quality.maxScore || 100}，未满足偏好 ${quality.unmetPreferenceCount || 0} 条`
+    : `评分 ${solver?.score || 0}`;
   if (!solver?.algorithm) {
     return `已通过：当前课表无内部冲突，并已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
   }
@@ -1521,12 +1525,12 @@ function scheduleSolverSummaryText(draft) {
       solver.phase1Status || solver.phase2Status
         ? `，硬约束 ${solver.phase1Status || "UNKNOWN"} / 优化 ${solver.phase2Status || "未执行"}`
         : "";
-    return `OR-Tools CP-SAT：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，状态 ${solver.status || "UNKNOWN"}${stageText}，目标值 ${solver.objectiveValue || 0}，求解 ${Number(solver.solveTimeSeconds || 0).toFixed(2)} 秒；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+    return `OR-Tools CP-SAT：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，${qualityText}，状态 ${solver.status || "UNKNOWN"}${stageText}，求解 ${Number(solver.solveTimeSeconds || 0).toFixed(2)} 秒；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
   }
   const fallbackText = solver.fallbackFrom
     ? `，由 ${solver.fallbackFrom} 兜底，原因 ${solver.fallbackReason || "未返回"}`
     : "";
-  return `高级约束搜索：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，搜索 ${solver.attemptsRun || 0} 轮/${solver.totalNodes || 0} 个节点，评分 ${solver.score || 0}${fallbackText}；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
+  return `高级约束搜索：${solver.generatedLessonCount || draft.generatedLessonCount || 0}/${solver.requiredLessonCount || draft.requiredLessonCount || 0} 节，未排 ${solver.unassignedCount || 0}，${qualityText}，搜索 ${solver.attemptsRun || 0} 轮/${solver.totalNodes || 0} 个节点${fallbackText}；已纳入 ${draft.globalBusyCount || 0} 个老师全局占用。`;
 }
 
 function buildSubjectQueueFromCounters(classIndex, counters) {
@@ -4989,7 +4993,7 @@ function renderAdminScheduling() {
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
       : conflicts.length
         ? conflicts.map(conflictItem).join("")
-        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${completionWarningHtml}${scheduleDiagnosticsHtml(draft)}`;
+        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${completionWarningHtml}${scheduleQualityHtml(draft)}${scheduleDiagnosticsHtml(draft)}`;
   document.querySelector("#adminClassSelect").innerHTML = config.classes
     .map(
       (schoolClass) => `
@@ -6296,6 +6300,40 @@ function scheduleDiagnosticItem(diagnostic) {
         <span class="tag ${tagClass}">${label}</span>
       </header>
       <p>${escapeHtml(diagnostic.text)}</p>
+    </article>
+  `;
+}
+
+function scheduleQualityHtml(draft) {
+  const quality = draft.solver?.qualityReport;
+  if (!quality) return "";
+  const scoreClass = quality.score >= 90 ? "completed" : quality.score >= 75 ? "scheduled" : "exception";
+  const deductions = (quality.deductions || []).filter((item) => item.impact > 0).slice(0, 6);
+  return `
+    <article class="quality-report-card">
+      <header>
+        <div>
+          <strong>排课质量评分 ${Number(quality.score || 0)}/${Number(quality.maxScore || 100)}</strong>
+          <span>硬冲突 ${Number(quality.hardConflictCount || 0)} · 未满足偏好 ${Number(quality.unmetPreferenceCount || 0)} 条 · 扣分 ${Number(quality.totalDeduction || 0)}</span>
+        </div>
+        <span class="tag ${scoreClass}">${quality.score >= 90 ? "优秀" : quality.score >= 75 ? "可用" : "需优化"}</span>
+      </header>
+      <div class="quality-deduction-list">
+        ${
+          deductions.length
+            ? deductions
+                .map(
+                  (item) => `
+                    <div class="quality-deduction-item">
+                      <strong>${escapeHtml(item.title)} <span>-${Number(item.impact || 0)}</span></strong>
+                      <p>${escapeHtml(item.text || "")}</p>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="quality-deduction-item"><strong>无明显扣分项</strong><p>当前课表满足主要偏好约束。</p></div>`
+        }
+      </div>
     </article>
   `;
 }

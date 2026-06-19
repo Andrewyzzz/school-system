@@ -1832,6 +1832,200 @@ function scheduleQualityScore(config, assignments) {
   return score;
 }
 
+function buildScheduleQualityReport(config, assignments = [], conflicts = [], meta = {}) {
+  const deductions = [];
+  const addDeduction = (key, title, impact, text, lessonIds = []) => {
+    if (impact <= 0) return;
+    deductions.push({
+      key,
+      title,
+      impact: Math.round(impact * 10) / 10,
+      text,
+      lessonIds: lessonIds.slice(0, 12),
+    });
+  };
+
+  const teacherLoad = new Map(config.teachers.map((teacher) => [teacher.id, 0]));
+  const teacherDayLoad = new Map();
+  const teacherDayPeriods = new Map();
+  const classDayLoad = new Map();
+  const classSubjectDay = new Map();
+  const lateMainSubjectLessons = [];
+  const avoidPeriodLessons = [];
+  const nonPreferredLessons = [];
+
+  assignments.forEach((assignment) => {
+    const subject = config.subjects.find((item) => item.id === assignment.subjectId) || {};
+    const period = Number(assignment.period);
+    incrementMap(teacherLoad, assignment.teacherId);
+    incrementMap(teacherDayLoad, teacherDayKey(assignment.teacherId, assignment.date));
+    incrementMap(classDayLoad, classDayKey(assignment.classId, assignment.date));
+    incrementMap(classSubjectDay, classSubjectDayKey(assignment.classId, assignment.subjectId, assignment.date));
+    const periodKey = teacherDayPeriodKey(assignment.teacherId, assignment.date);
+    if (!teacherDayPeriods.has(periodKey)) teacherDayPeriods.set(periodKey, []);
+    teacherDayPeriods.get(periodKey).push(period);
+
+    if (["chinese", "math", "english"].includes(assignment.subjectId) && period > 4) {
+      lateMainSubjectLessons.push(assignment.id);
+    }
+    const rule = teacherScheduleRuleFor(config, assignment.teacherId);
+    if ((rule?.avoidPeriods || []).map(Number).includes(period)) {
+      avoidPeriodLessons.push(assignment.id);
+    }
+    if ((subject.preferredPeriods || []).length && !subject.preferredPeriods.map(Number).includes(period)) {
+      nonPreferredLessons.push(assignment.id);
+    }
+  });
+
+  const hardConflictCount = conflicts.length + Number(meta.unassignedCount || 0);
+  addDeduction(
+    "hard_conflicts",
+    "硬冲突或未排课",
+    hardConflictCount * 25,
+    hardConflictCount ? `存在 ${conflicts.length} 个硬冲突，未排 ${Number(meta.unassignedCount || 0)} 节。` : "",
+  );
+
+  const teacherLoads = mapValues(teacherLoad);
+  const teacherLoadGap = teacherLoads.length ? Math.max(...teacherLoads) - Math.min(...teacherLoads) : 0;
+  addDeduction(
+    "teacher_weekly_balance",
+    "老师周课量不均衡",
+    Math.min(12, teacherLoadGap * 1.5),
+    `老师周课量最高和最低相差 ${teacherLoadGap} 节。`,
+  );
+
+  let teacherDailyOverload = 0;
+  const dailyOverloadLessons = [];
+  teacherDayLoad.forEach((count, key) => {
+    const [teacherId] = key.split(":");
+    const rule = teacherScheduleRuleFor(config, teacherId);
+    const maxDailyLessons = Number(rule?.maxDailyLessons || 4);
+    if (count > maxDailyLessons) {
+      teacherDailyOverload += count - maxDailyLessons;
+      dailyOverloadLessons.push(...assignments.filter((assignment) => teacherDayKey(assignment.teacherId, assignment.date) === key).map((assignment) => assignment.id));
+    }
+  });
+  addDeduction(
+    "teacher_daily_overload",
+    "老师日课量偏高",
+    Math.min(12, teacherDailyOverload * 2),
+    `有 ${teacherDailyOverload} 节超过老师每日课量上限。`,
+    dailyOverloadLessons,
+  );
+
+  let consecutiveOverage = 0;
+  const consecutiveLessons = [];
+  teacherDayPeriods.forEach((periods, key) => {
+    const [teacherId, date] = key.split(":");
+    const rule = teacherScheduleRuleFor(config, teacherId);
+    const maxConsecutiveLessons = Number(rule?.maxConsecutiveLessons || 3);
+    const run = maxConsecutiveRun(periods);
+    if (run > maxConsecutiveLessons) {
+      consecutiveOverage += run - maxConsecutiveLessons;
+      consecutiveLessons.push(
+        ...assignments
+          .filter((assignment) => assignment.teacherId === teacherId && assignment.date === date)
+          .map((assignment) => assignment.id),
+      );
+    }
+  });
+  addDeduction(
+    "teacher_consecutive",
+    "老师连续上课偏多",
+    Math.min(10, consecutiveOverage * 2),
+    `存在 ${consecutiveOverage} 节连续上课超出建议上限。`,
+    consecutiveLessons,
+  );
+
+  let teacherGapCount = 0;
+  const fragmentedLessons = [];
+  teacherDayPeriods.forEach((periods, key) => {
+    const [teacherId, date] = key.split(":");
+    const gapCount = projectedGapCount(periods);
+    if (gapCount > 0) {
+      teacherGapCount += gapCount;
+      fragmentedLessons.push(
+        ...assignments
+          .filter((assignment) => assignment.teacherId === teacherId && assignment.date === date)
+          .map((assignment) => assignment.id),
+      );
+    }
+  });
+  addDeduction(
+    "teacher_fragmentation",
+    "老师课表碎片化",
+    Math.min(8, teacherGapCount * 1.2),
+    `老师当天课表中间空档累计 ${teacherGapCount} 个。`,
+    fragmentedLessons,
+  );
+
+  const targetClassDayLoad = Math.ceil(weeklyLessonsPerClass(config) / 5);
+  let classDailyGap = 0;
+  classDayLoad.forEach((count) => {
+    classDailyGap += Math.abs(count - targetClassDayLoad);
+  });
+  addDeduction(
+    "class_daily_balance",
+    "班级每日课量不均衡",
+    Math.min(10, classDailyGap * 0.4),
+    `班级每日课量与建议值累计偏差 ${Math.round(classDailyGap)}。`,
+  );
+
+  let sameSubjectSameDay = 0;
+  const concentratedLessons = [];
+  classSubjectDay.forEach((count, key) => {
+    if (count > 1) {
+      sameSubjectSameDay += count - 1;
+      const [classId, subjectId, date] = key.split(":");
+      concentratedLessons.push(
+        ...assignments
+          .filter((assignment) => assignment.classId === classId && assignment.subjectId === subjectId && assignment.date === date)
+          .map((assignment) => assignment.id),
+      );
+    }
+  });
+  addDeduction(
+    "subject_concentration",
+    "同班同科过度集中",
+    Math.min(10, sameSubjectSameDay * 1.5),
+    `同一班同一科同日重复 ${sameSubjectSameDay} 次。`,
+    concentratedLessons,
+  );
+
+  addDeduction(
+    "main_subject_morning",
+    "主科上午分布不足",
+    Math.min(8, lateMainSubjectLessons.length * 0.6),
+    `语文/数学/英语有 ${lateMainSubjectLessons.length} 节排在下午或较晚节次。`,
+    lateMainSubjectLessons,
+  );
+  addDeduction(
+    "teacher_avoid_period",
+    "命中老师避开时段",
+    Math.min(8, avoidPeriodLessons.length * 1.5),
+    `有 ${avoidPeriodLessons.length} 节课落在老师尽量避免的时段。`,
+    avoidPeriodLessons,
+  );
+  addDeduction(
+    "subject_preference",
+    "课程偏好时段未满足",
+    Math.min(6, nonPreferredLessons.length * 0.8),
+    `有 ${nonPreferredLessons.length} 节课未落在课程偏好时段。`,
+    nonPreferredLessons,
+  );
+
+  const totalDeduction = deductions.reduce((sum, item) => sum + item.impact, 0);
+  const score = Math.max(0, Math.round(100 - totalDeduction));
+  return {
+    score,
+    maxScore: 100,
+    hardConflictCount,
+    unmetPreferenceCount: deductions.filter((item) => item.key !== "hard_conflicts").length,
+    totalDeduction: Math.round(totalDeduction * 10) / 10,
+    deductions: deductions.sort((a, b) => b.impact - a.impact),
+  };
+}
+
 function solveScheduleAttempt(config, tasks, options, attemptIndex, deadline) {
   const random = seededRandom(options.seed + attemptIndex * 9973);
   const slots = [...options.slots].sort(() => random() - 0.5);
@@ -2239,17 +2433,21 @@ function generateHeuristicScheduleSolution(config, options = {}) {
   const assignments = (best?.assignments || lockedAssignments).sort((a, b) =>
     `${a.classId} ${a.date} ${a.period}`.localeCompare(`${b.classId} ${b.date} ${b.period}`),
   );
+  const conflicts = best?.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
+  const unassignedCount = Math.max(requiredCount - assignments.length, 0);
+  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount });
 
   return {
     assignments,
-    conflicts: best?.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config }),
+    conflicts,
     meta: {
       algorithm: "advanced-constraint-search",
       description: "硬约束求解 + MRV 最难课节优先 + 多轮扰动搜索 + 有限回溯 + 软约束评分",
       attemptsRun,
       totalNodes,
       score: Math.round(best?.score || scheduleQualityScore(config, assignments)),
-      unassignedCount: Math.max(requiredCount - assignments.length, 0),
+      qualityReport,
+      unassignedCount,
       requiredLessonCount: requiredCount,
       generatedLessonCount: assignments.length,
       lockedCount: lockedAssignments.length,
@@ -2337,6 +2535,8 @@ function solveScheduleWithOrTools(config, options = {}) {
     `${a.classId} ${a.date} ${a.period}`.localeCompare(`${b.classId} ${b.date} ${b.period}`),
   );
   const conflicts = validateScheduleConflicts(assignments, { externalAssignments, config });
+  const unassignedCount = Math.max(requiredCount - assignments.length, 0);
+  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount });
 
   return {
     ok: true,
@@ -2351,13 +2551,15 @@ function solveScheduleWithOrTools(config, options = {}) {
       phase2Status: parsed.phase2Status || "",
       objectiveValue: Number(parsed.objectiveValue || 0),
       bestObjectiveBound: Number(parsed.bestObjectiveBound || 0),
+      score: qualityReport.score,
       solveTimeSeconds: Number(parsed.solveTimeSeconds || 0),
       phase1SolveTimeSeconds: Number(parsed.phase1SolveTimeSeconds || 0),
       phase2SolveTimeSeconds: Number(parsed.phase2SolveTimeSeconds || 0),
       branches: Number(parsed.branches || 0),
       conflicts: Number(parsed.conflicts || 0),
       wallTimeMs: Number(parsed.wallTimeMs || 0),
-      unassignedCount: Math.max(requiredCount - assignments.length, 0),
+      qualityReport,
+      unassignedCount,
       requiredLessonCount: requiredCount,
       generatedLessonCount: assignments.length,
       lockedCount: lockedAssignments.length,

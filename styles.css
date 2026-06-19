@@ -907,6 +907,67 @@ h2 {
   align-items: center;
 }
 
+.quality-report-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(0, 32, 104, 0.12);
+  border-radius: 8px;
+  background: #fff;
+  padding: 14px;
+}
+
+.quality-report-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quality-report-card header div {
+  display: grid;
+  gap: 4px;
+}
+
+.quality-report-card strong {
+  color: var(--ink);
+}
+
+.quality-report-card header span:not(.tag) {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.quality-deduction-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.quality-deduction-item {
+  border: 1px solid rgba(0, 32, 104, 0.1);
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 10px;
+}
+
+.quality-deduction-item strong {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.quality-deduction-item strong span {
+  color: var(--action-dark);
+}
+
+.quality-deduction-item p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .compact-empty {
   padding: 10px;
   min-height: auto;
@@ -3478,6 +3539,14 @@ td {
   }
 
   .schedule-version-list {
+    grid-template-columns: 1fr;
+  }
+
+  .quality-report-card header {
+    display: grid;
+  }
+
+  .quality-deduction-list {
     grid-template-columns: 1fr;
   }
 
