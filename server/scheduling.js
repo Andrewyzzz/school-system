@@ -130,8 +130,13 @@ function formatDateTimeMinute(date = new Date()) {
   return `${year}-${month}-${day} ${hour}:${minute}`;
 }
 
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function ensureSchedulingStore(db) {
   if (!Array.isArray(db.scheduleDrafts)) db.scheduleDrafts = [];
+  if (!Array.isArray(db.scheduleVersions)) db.scheduleVersions = [];
   if (!Array.isArray(db.auditLogs)) db.auditLogs = [];
   if (!Array.isArray(db.notifications)) db.notifications = [];
   if (!Array.isArray(db.gradeCourseRules)) db.gradeCourseRules = [];
@@ -2741,7 +2746,7 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   return { config, draft };
 }
 
-function lessonFromAssignment(draft, assignment) {
+function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
   return {
     id: `LESSON-${draft.id}-${assignment.id}`,
     teacherId: assignment.teacherId,
@@ -2762,6 +2767,7 @@ function lessonFromAssignment(draft, assignment) {
     checkOutAt: "",
     source: "backend-scheduling",
     schedulingDraftId: draft.id,
+    scheduleVersionId,
     scheduleAssignmentId: assignment.id,
     divisionId: draft.divisionId,
     gradeId: draft.gradeId,
@@ -2769,6 +2775,125 @@ function lessonFromAssignment(draft, assignment) {
     grade: draft.grade,
     period: assignment.period,
   };
+}
+
+function assignmentVersionSignature(assignment) {
+  return [
+    assignment.classId,
+    assignment.subjectId,
+    assignment.teacherId,
+    assignment.date,
+    assignment.period,
+    assignment.roomId || assignment.room,
+  ].join("|");
+}
+
+function scheduleVersionDiff(previousVersion, assignments = []) {
+  if (!previousVersion) {
+    return {
+      added: assignments.length,
+      removed: 0,
+      changed: 0,
+      samples: assignments.slice(0, 8).map((assignment) => ({
+        type: "added",
+        className: assignment.className,
+        subjectName: assignment.subjectName,
+        date: assignment.date,
+        period: assignment.period,
+        teacherName: assignment.teacherName,
+      })),
+    };
+  }
+  const previousAssignments = previousVersion.assignments || [];
+  const previousById = new Map(previousAssignments.map((assignment) => [assignment.id, assignment]));
+  const nextById = new Map(assignments.map((assignment) => [assignment.id, assignment]));
+  const added = assignments.filter((assignment) => !previousById.has(assignment.id));
+  const removed = previousAssignments.filter((assignment) => !nextById.has(assignment.id));
+  const changed = assignments.filter((assignment) => {
+    const previous = previousById.get(assignment.id);
+    return previous && assignmentVersionSignature(previous) !== assignmentVersionSignature(assignment);
+  });
+  const samples = [
+    ...added.slice(0, 4).map((assignment) => ({ type: "added", className: assignment.className, subjectName: assignment.subjectName, date: assignment.date, period: assignment.period, teacherName: assignment.teacherName })),
+    ...removed.slice(0, 4).map((assignment) => ({ type: "removed", className: assignment.className, subjectName: assignment.subjectName, date: assignment.date, period: assignment.period, teacherName: assignment.teacherName })),
+    ...changed.slice(0, 4).map((assignment) => ({ type: "changed", className: assignment.className, subjectName: assignment.subjectName, date: assignment.date, period: assignment.period, teacherName: assignment.teacherName })),
+  ].slice(0, 8);
+  return {
+    added: added.length,
+    removed: removed.length,
+    changed: changed.length,
+    samples,
+  };
+}
+
+function scheduleVersionScopeMatches(version, config) {
+  return version.divisionId === config.divisionId && version.gradeId === config.gradeId && version.weekStart === config.weekStart;
+}
+
+function currentScheduleVersion(db, config) {
+  return (db.scheduleVersions || []).find((version) => scheduleVersionScopeMatches(version, config) && version.current) || null;
+}
+
+function scheduleVersionSummariesForConfig(db, config) {
+  return (db.scheduleVersions || [])
+    .filter((version) => scheduleVersionScopeMatches(version, config))
+    .sort((a, b) => String(b.publishedAt || "").localeCompare(String(a.publishedAt || "")) || Number(b.versionNumber || 0) - Number(a.versionNumber || 0))
+    .map((version) => ({
+      id: version.id,
+      versionNumber: version.versionNumber,
+      current: Boolean(version.current),
+      status: version.current ? "current" : "history",
+      divisionId: version.divisionId,
+      gradeId: version.gradeId,
+      weekStart: version.weekStart,
+      publishedAt: version.publishedAt,
+      publishedByName: version.publishedByName || "",
+      rolledBackAt: version.rolledBackAt || "",
+      rolledBackByName: version.rolledBackByName || "",
+      assignmentCount: version.assignmentCount || 0,
+      lessonCount: version.lessonCount || 0,
+      diff: version.diff || { added: 0, removed: 0, changed: 0, samples: [] },
+    }));
+}
+
+export function listScheduleVersions(db, options = {}) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  return scheduleVersionSummariesForConfig(db, config);
+}
+
+function createPublishedScheduleVersion(db, config, draft, lessons, actorAccount = null, versionId = "") {
+  const versions = (db.scheduleVersions || []).filter((version) => scheduleVersionScopeMatches(version, config));
+  const previousVersion = currentScheduleVersion(db, config);
+  const versionNumber = Math.max(0, ...versions.map((version) => Number(version.versionNumber || 0))) + 1;
+  const now = draft.publishedAt || formatDateTimeMinute();
+  const version = {
+    id: versionId || `SVER-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    versionNumber,
+    current: true,
+    divisionId: config.divisionId,
+    divisionName: config.divisionName,
+    gradeId: config.gradeId,
+    gradeName: config.gradeName,
+    stageId: config.stageId,
+    grade: config.grade,
+    weekStart: config.weekStart,
+    draftId: draft.id,
+    publishedAt: now,
+    publishedByAccountId: actorAccount?.id || "",
+    publishedByName: actorAccount?.name || "",
+    assignmentCount: draft.assignments?.length || 0,
+    lessonCount: lessons.length,
+    assignments: clone(draft.assignments || []),
+    lessons: clone(lessons),
+    previousVersionId: previousVersion?.id || "",
+    diff: scheduleVersionDiff(previousVersion, draft.assignments || []),
+  };
+  db.scheduleVersions = (db.scheduleVersions || []).map((existing) =>
+    scheduleVersionScopeMatches(existing, config) ? { ...existing, current: false } : existing,
+  );
+  db.scheduleVersions.push(version);
+  return version;
 }
 
 export function publishScheduleDraft(db, options = {}, actorAccount = null) {
@@ -2818,7 +2943,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   }
 
   const now = formatDateTimeMinute();
-  const lessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment));
+  const scheduleVersionId = `SVER-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`;
+  const lessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
   db.lessonInstances = db.lessonInstances
     .filter(
       (lesson) =>
@@ -2839,6 +2965,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   draft.globalBusyCount = externalAssignments.length;
   draft.publishedLessonIds = lessons.map((lesson) => lesson.id);
   draft.publishedByAccountId = actorAccount?.id || "";
+  draft.scheduleVersionId = scheduleVersionId;
+  const version = createPublishedScheduleVersion(db, config, draft, lessons, actorAccount, scheduleVersionId);
   pushScheduleNotification(
     db,
     {
@@ -2858,10 +2986,117 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     divisionId: config.divisionId,
     gradeId: config.gradeId,
     lessonCount: lessons.length,
+    scheduleVersionId,
+    versionNumber: version.versionNumber,
     createdAt: db.meta.updatedAt,
   });
 
-  return { config, draft, lessons };
+  return { config, draft, lessons, versions: scheduleVersionSummariesForConfig(db, config), version };
+}
+
+export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  const versionId = String(options.versionId || "").trim();
+  const targetVersion = (db.scheduleVersions || []).find(
+    (version) => scheduleVersionScopeMatches(version, config) && version.id === versionId,
+  );
+  if (!targetVersion) {
+    const error = new Error("未找到要回滚的课表版本");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const now = formatDateTimeMinute();
+  const lessons = clone(targetVersion.lessons || []).map((lesson) => ({
+    ...lesson,
+    source: "backend-scheduling",
+    scheduleVersionId: targetVersion.id,
+    rolledBackAt: now,
+  }));
+  db.lessonInstances = (db.lessonInstances || [])
+    .filter(
+      (lesson) =>
+        !(
+          lesson.source === "backend-scheduling" &&
+          lesson.divisionId === targetVersion.divisionId &&
+          lesson.gradeId === targetVersion.gradeId &&
+          lesson.date >= targetVersion.weekStart &&
+          lesson.date <= addDays(targetVersion.weekStart, 6)
+        ),
+    )
+    .concat(lessons);
+
+  db.scheduleVersions = (db.scheduleVersions || []).map((version) =>
+    scheduleVersionScopeMatches(version, config)
+      ? {
+          ...version,
+          current: version.id === targetVersion.id,
+          rolledBackAt: version.id === targetVersion.id ? now : version.rolledBackAt || "",
+          rolledBackByAccountId: version.id === targetVersion.id ? actorAccount?.id || "" : version.rolledBackByAccountId || "",
+          rolledBackByName: version.id === targetVersion.id ? actorAccount?.name || "" : version.rolledBackByName || "",
+        }
+      : version,
+  );
+
+  const draft = {
+    id: `DRAFT-ROLLBACK-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    status: "published",
+    divisionId: targetVersion.divisionId,
+    gradeId: targetVersion.gradeId,
+    stageId: targetVersion.stageId,
+    grade: targetVersion.grade,
+    divisionName: targetVersion.divisionName,
+    gradeName: targetVersion.gradeName,
+    weekStart: targetVersion.weekStart,
+    requiredLessonCount: requiredScheduleLessonCount(config),
+    generatedLessonCount: targetVersion.assignmentCount,
+    unassignedCount: 0,
+    generatedAt: targetVersion.publishedAt,
+    confirmedAt: now,
+    publishedAt: now,
+    assignments: clone(targetVersion.assignments || []),
+    conflicts: [],
+    globalBusyCount: 0,
+    solver: { algorithm: "rollback", status: "restored", scheduleVersionId: targetVersion.id },
+    lockedCount: (targetVersion.assignments || []).filter((assignment) => assignment.locked).length,
+    publishedLessonIds: lessons.map((lesson) => lesson.id),
+    publishedByAccountId: targetVersion.publishedByAccountId || "",
+    scheduleVersionId: targetVersion.id,
+    rollbackFromVersionId: targetVersion.id,
+    rollbackAt: now,
+    rollbackByAccountId: actorAccount?.id || "",
+  };
+  db.scheduleDrafts = (db.scheduleDrafts || []).filter(
+    (item) => !(item.divisionId === config.divisionId && item.gradeId === config.gradeId),
+  );
+  db.scheduleDrafts.push(draft);
+
+  pushScheduleNotification(
+    db,
+    {
+      teacherIds: lessons.map((lesson) => lesson.teacherId),
+      title: `${targetVersion.divisionName}${targetVersion.gradeName}课表已回滚`,
+      text: `已回滚到 V${targetVersion.versionNumber}，老师端课表、签入签出和薪资工作量将按该版本执行。`,
+      level: "warning",
+    },
+    actorAccount,
+  );
+  db.meta.updatedAt = new Date().toISOString();
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "schedule_version_rollback",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    divisionId: config.divisionId,
+    gradeId: config.gradeId,
+    scheduleVersionId: targetVersion.id,
+    versionNumber: targetVersion.versionNumber,
+    lessonCount: lessons.length,
+    createdAt: db.meta.updatedAt,
+  });
+
+  return { config, draft, lessons, versions: scheduleVersionSummariesForConfig(db, config), version: targetVersion };
 }
 
 function monthKey(dateKey = "") {

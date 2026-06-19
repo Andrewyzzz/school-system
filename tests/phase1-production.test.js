@@ -22,8 +22,10 @@ import {
 import {
   adjustScheduleAssignment,
   generateScheduleDraft,
+  listScheduleVersions,
   publishScheduleDraft,
   regenerateUnlockedScheduleAssignments,
+  rollbackScheduleVersion,
   updateGradeClassStructure,
   updateGradeCourseRules,
 } from "../server/scheduling.js";
@@ -243,6 +245,8 @@ draftToProtect.generatedLessonCount = originalGeneratedCount;
 draftToProtect.unassignedCount = originalUnassignedCount;
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
+assert.ok(published.version?.id, "发布后应生成正式版本快照");
+assert.ok(published.lessons.every((lesson) => lesson.scheduleVersionId === published.version.id));
 assert.ok(
   published.lessons.filter((lesson) => lesson.subjectId === "pe").every((lesson) => lesson.roomType === "playground"),
   "发布后的体育课应保留操场类型",
@@ -257,6 +261,24 @@ published.lessons
 peLessonsByClassDay.forEach((count) => {
   assert.ok(count <= 1, "体育课应满足每班每天最多 1 节");
 });
+const firstPublishedVersionId = published.version.id;
+generateScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
+const secondPublished = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
+assert.equal(listScheduleVersions(db, { divisionId: "elementary", gradeId: "elementary-g1" }).length, 2);
+assert.ok(secondPublished.versions.find((version) => version.id === secondPublished.version.id && version.current));
+const rolledBack = rollbackScheduleVersion(
+  db,
+  { divisionId: "elementary", gradeId: "elementary-g1", versionId: firstPublishedVersionId },
+  admin,
+);
+assert.equal(rolledBack.version.id, firstPublishedVersionId);
+assert.ok(rolledBack.versions.find((version) => version.id === firstPublishedVersionId && version.current));
+assert.ok(
+  db.lessonInstances
+    .filter((lesson) => lesson.source === "backend-scheduling" && lesson.divisionId === "elementary" && lesson.gradeId === "elementary-g1")
+    .every((lesson) => lesson.scheduleVersionId === firstPublishedVersionId),
+  "回滚后老师端课表、签到和薪资数据源应切换到目标版本",
+);
 
 const token = "phase1-production-session-token";
 createSession(db, admin, token, { userAgent: "phase1-test" });

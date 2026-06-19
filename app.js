@@ -267,6 +267,7 @@ const initialState = {
     date: "",
     subjectId: "",
   },
+  scheduleVersions: [],
   selectedScheduleWeekStart: "2026-06-08",
   scannerLessonId: "L002",
   lastScanText: "",
@@ -2904,6 +2905,10 @@ function applyBackendScheduleResult(result) {
       gradeId: result.config.gradeId,
     };
   }
+
+  if (Array.isArray(result.versions)) {
+    state.scheduleVersions = result.versions;
+  }
 }
 
 async function loadBackendSchedulingContext(options = backendSchedulingOptions()) {
@@ -2980,6 +2985,35 @@ async function publishBackendSchedule() {
       loaded: true,
       loading: false,
       error: error.message || "后端发布课表失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
+}
+
+async function rollbackBackendScheduleVersion(versionId) {
+  if (!versionId || !backendMode() || currentRole() !== "admin") return;
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest("/api/scheduling/rollback", {
+      method: "POST",
+      body: {
+        ...backendSchedulingOptions(),
+        versionId,
+      },
+    });
+    applyBackendScheduleResult(result);
+    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    await loadBackendNotifications();
+    showToast(`已回滚到 V${result.version?.versionNumber || ""}，老师端课表已同步`);
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "课表版本回滚失败",
     };
     showToast(schedulingBackendState.error);
   }
@@ -4096,6 +4130,43 @@ function scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft) {
   `;
 }
 
+function scheduleVersionDiffText(diff = {}) {
+  const parts = [];
+  if (Number(diff.added || 0)) parts.push(`新增 ${diff.added}`);
+  if (Number(diff.removed || 0)) parts.push(`删除 ${diff.removed}`);
+  if (Number(diff.changed || 0)) parts.push(`变更 ${diff.changed}`);
+  return parts.length ? parts.join(" · ") : "与上一版本无结构差异";
+}
+
+function scheduleVersionListHtml(versions = []) {
+  if (!versions.length) {
+    return `<div class="empty-state compact-empty">暂无正式发布版本。发布课表后会在这里形成可追溯快照。</div>`;
+  }
+  return versions
+    .map(
+      (version) => `
+        <article class="schedule-version-item ${version.current ? "current" : ""}">
+          <header>
+            <div>
+              <strong>V${version.versionNumber} · ${escapeHtml(version.weekStart || "")}</strong>
+              <span>${escapeHtml(version.publishedAt || "")} · ${escapeHtml(version.publishedByName || "系统")}</span>
+            </div>
+            <span class="tag ${version.current ? "completed" : "locked"}">${version.current ? "当前正式版" : "历史版本"}</span>
+          </header>
+          <p>${escapeHtml(scheduleVersionDiffText(version.diff))} · ${Number(version.lessonCount || 0)} 节课</p>
+          <div class="schedule-version-actions">
+            ${
+              version.current
+                ? `<span class="muted">老师端、签到和薪资当前读取此版本</span>`
+                : `<button class="mini-button" data-rollback-schedule-version="${escapeHtml(version.id)}" type="button">回滚到此版本</button>`
+            }
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+}
+
 function clearScheduleDropPreview() {
   document.querySelectorAll(".schedule-slot-drop.is-drop-ok, .schedule-slot-drop.is-drop-blocked").forEach((zone) => {
     zone.classList.remove("is-drop-ok", "is-drop-blocked");
@@ -4879,6 +4950,13 @@ function renderAdminScheduling() {
   document.querySelector("#courseRulesStatus").className = (config.constraints || []).length
     ? "status-pill warning"
     : "status-pill done";
+  const scheduleVersions = state.scheduleVersions || [];
+  const currentVersion = scheduleVersions.find((version) => version.current);
+  document.querySelector("#scheduleVersionStatus").textContent = currentVersion
+    ? `当前 V${currentVersion.versionNumber}`
+    : "暂无版本";
+  document.querySelector("#scheduleVersionStatus").className = currentVersion ? "status-pill done" : "status-pill";
+  document.querySelector("#scheduleVersionList").innerHTML = scheduleVersionListHtml(scheduleVersions);
   document.querySelector("#toggleCourseEditMode").textContent = courseRulesEditMode ? "完成编辑" : "编辑";
   document.querySelector("#adminSchedulePreviewHelp").textContent =
     `按${config.gradeName}班级查看生成结果，确认前为草稿，确认后同步到老师端 ${formatWeekRange(config.weekStart)} 课表。`;
@@ -8218,6 +8296,12 @@ document.addEventListener("click", async (event) => {
     if (dateSelect) dateSelect.value = scheduleSuggestionButton.dataset.suggestionDate;
     if (periodSelect) periodSelect.value = scheduleSuggestionButton.dataset.suggestionPeriod;
     await applyScheduleAdjustment();
+    return;
+  }
+
+  const rollbackVersionButton = event.target.closest("[data-rollback-schedule-version]");
+  if (rollbackVersionButton) {
+    await rollbackBackendScheduleVersion(rollbackVersionButton.dataset.rollbackScheduleVersion);
     return;
   }
 

@@ -2,6 +2,29 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-19 - 增加课表发布版本与回滚
+
+- 类型：功能 / 前端 / 后端 / 测试 / 排课
+- 影响范围：行政排课 / 发布版本 / 老师课表 / 签到 / 薪资工作量
+- 提交：待提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/scheduling.js`
+  - `node --check server/server.js`
+  - `node --check server/storage.js`
+  - `node --check tests/phase1-production.test.js`
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+- 内容：
+  - 后端新增课表正式版本快照，每次发布保留完整 assignments 和 lessonInstances。
+  - 发布版本记录新增/删除/变更课节差异，并写入发布审计日志。
+  - 新增课表版本回滚接口，回滚后老师端课表、签入签出和薪资工作量数据源同步切换到目标版本。
+  - 行政端新增发布版本面板，展示当前正式版、历史版本、差异统计和回滚入口。
+  - 生产回归测试覆盖发布两版、版本历史、回滚后 lessonInstances 切换。
+- 注意事项：
+  - 当前是行政确认发布，后续可扩展教务/总校二级发布审批。
+
 ## 2026-06-19 - 增加按范围局部重排
 
 - 类型：功能 / 前端 / 后端 / 测试 / 排课

@@ -16,8 +16,10 @@ import {
   deleteGradeCourse,
   findScheduleDraft,
   generateScheduleDraft,
+  listScheduleVersions,
   publishScheduleDraft,
   regenerateUnlockedScheduleAssignments,
+  rollbackScheduleVersion,
   setScheduleAssignmentLock,
   updateGradeClassStructure,
   updateGradeCourseRules,
@@ -503,6 +505,7 @@ async function handleApi(req, res, db, url) {
       sendJson(res, 200, {
         config: buildSchedulingConfig(db, options),
         draft: findScheduleDraft(db, options),
+        versions: listScheduleVersions(db, options),
       });
       return;
     }
@@ -532,6 +535,16 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = publishScheduleDraft(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/rollback") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = rollbackScheduleVersion(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
       return;
