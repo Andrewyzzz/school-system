@@ -253,6 +253,29 @@ function createClassesAndRooms() {
           id: roomId,
           stageId: stage.id,
           name: roomName,
+          roomType: "homeroom",
+          capacity: 1,
+          qrCode: `ROOM:${roomId}`,
+          displayKey: `screen-${roomId.toLowerCase()}`,
+          active: true,
+        });
+      }
+    });
+    [
+      ["LAB", "实验室", "lab", 2],
+      ["COMPUTER", "机房", "computer", 1],
+      ["PLAYGROUND", "操场", "playground", 1],
+      ["ART", "美术室", "art", 1],
+      ["MUSIC", "音乐室", "music", 1],
+    ].forEach(([suffix, name, roomType, count]) => {
+      for (let index = 1; index <= count; index += 1) {
+        const roomId = `ROOM-${stage.id}-${suffix}-${pad(index, 2)}`;
+        rooms.push({
+          id: roomId,
+          stageId: stage.id,
+          name: `${stage.name}${name}${count > 1 ? pad(index, 2) : ""}`,
+          roomType,
+          capacity: 1,
           qrCode: `ROOM:${roomId}`,
           displayKey: `screen-${roomId.toLowerCase()}`,
           active: true,
@@ -622,6 +645,14 @@ function normalizeDatabase(db) {
   }
 
   (db.rooms || []).forEach((room) => {
+    if (!room.roomType) {
+      room.roomType = "homeroom";
+      changed = true;
+    }
+    if (!room.capacity) {
+      room.capacity = 1;
+      changed = true;
+    }
     if (!room.qrCode) {
       room.qrCode = `ROOM:${room.id}`;
       changed = true;
@@ -631,6 +662,14 @@ function normalizeDatabase(db) {
       changed = true;
     }
   });
+
+  (defaults.rooms || [])
+    .filter((room) => room.roomType && room.roomType !== "homeroom")
+    .forEach((room) => {
+      if ((db.rooms || []).some((item) => item.id === room.id)) return;
+      db.rooms.push(room);
+      changed = true;
+    });
 
   const normalizedPayrollRules = normalizePayrollRules(db.payrollRules || defaults.payrollRules);
   if (JSON.stringify(db.payrollRules || null) !== JSON.stringify(normalizedPayrollRules)) {

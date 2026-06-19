@@ -20,6 +20,7 @@ import {
   validatePhase1Readiness,
 } from "../server/storage.js";
 import {
+  adjustScheduleAssignment,
   generateScheduleDraft,
   publishScheduleDraft,
   updateGradeClassStructure,
@@ -122,10 +123,40 @@ const schedule = generateScheduleDraft(
 assert.equal(schedule.draft.conflicts.length, 0);
 assert.notEqual(schedule.draft.precheck.status, "blocked");
 assert.ok(schedule.draft.precheck.checks.length >= 1);
+assert.ok(
+  schedule.draft.assignments.filter((assignment) => assignment.subjectId === "pe").every((assignment) => assignment.roomType === "playground"),
+  "体育课应排到操场",
+);
+assert.ok(
+  schedule.draft.assignments
+    .filter((assignment) => assignment.subjectId === "physics" || assignment.subjectId === "chemistry")
+    .every((assignment) => assignment.roomType === "lab"),
+  "物理/化学应排到实验室",
+);
 if (schedule.draft.solver.algorithm === "ortools-cp-sat") {
   assert.ok(schedule.draft.solver.phase1Status, "CP-SAT 应返回硬约束阶段状态");
   assert.ok(schedule.draft.solver.phase === "optimized" || schedule.draft.solver.phase === "feasible_only");
 }
+const peAssignment = schedule.draft.assignments.find((assignment) => assignment.subjectId === "pe");
+const homeroom = schedule.config.rooms.find((room) => room.roomType === "homeroom");
+assert.ok(peAssignment && homeroom, "expected PE assignment and homeroom");
+assert.throws(
+  () =>
+    adjustScheduleAssignment(
+      db,
+      {
+        divisionId: "elementary",
+        gradeId: "elementary-g1",
+        assignmentId: peAssignment.id,
+        teacherId: peAssignment.teacherId,
+        date: peAssignment.date,
+        period: peAssignment.period,
+        roomId: homeroom.id,
+      },
+      admin,
+    ),
+  /教室类型不匹配|需要操场/,
+);
 
 const impossibleDb = createInitialData({ teacherCount: 1000 });
 const impossibleAdmin = actor(impossibleDb, "admin");
@@ -180,6 +211,10 @@ draftToProtect.generatedLessonCount = originalGeneratedCount;
 draftToProtect.unassignedCount = originalUnassignedCount;
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
+assert.ok(
+  published.lessons.filter((lesson) => lesson.subjectId === "pe").every((lesson) => lesson.roomType === "playground"),
+  "发布后的体育课应保留操场类型",
+);
 const peLessonsByClassDay = new Map();
 published.lessons
   .filter((lesson) => lesson.subjectId === "pe")

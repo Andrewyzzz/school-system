@@ -20,6 +20,21 @@ const DAY_PARTS = {
   afternoon: "下午",
 };
 
+const ROOM_TYPES = {
+  homeroom: "普通教室",
+  lab: "实验室",
+  computer: "机房",
+  playground: "操场",
+  art: "美术室",
+  music: "音乐室",
+};
+
+const SUBJECT_DEFAULT_ROOM_TYPES = {
+  pe: "playground",
+  physics: "lab",
+  chemistry: "lab",
+};
+
 const DIVISIONS = [
   {
     id: "elementary",
@@ -272,6 +287,11 @@ function normalizePreferredDayPart(value, fallback = "any") {
   return Object.hasOwn(DAY_PARTS, text) ? text : "any";
 }
 
+function normalizeRoomType(value, fallback = "homeroom") {
+  const text = String(value || fallback || "homeroom").trim();
+  return Object.hasOwn(ROOM_TYPES, text) ? text : "homeroom";
+}
+
 function normalizeSubjectForbiddenPeriods(value) {
   return normalizedConstraintNumbers(value, 1, PERIODS.length);
 }
@@ -290,6 +310,10 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
     preferredDayPart: normalizePreferredDayPart(
       rule.preferredDayPart ?? fallbackRule.preferredDayPart,
       fallbackRule.preferredDayPart || "any",
+    ),
+    requiredRoomType: normalizeRoomType(
+      rule.requiredRoomType ?? fallbackRule.requiredRoomType,
+      fallbackRule.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[rule.subjectId || fallbackRule.subjectId] || "homeroom",
     ),
   };
 }
@@ -412,6 +436,8 @@ function schedulingSubjects(db, division, grade) {
             allowConsecutive: rule.allowConsecutive,
             forbiddenPeriods: rule.forbiddenPeriods || [],
             preferredDayPart: rule.preferredDayPart,
+            requiredRoomType: normalizeRoomType(rule.requiredRoomType, "homeroom"),
+            requiredRoomTypeName: ROOM_TYPES[normalizeRoomType(rule.requiredRoomType, "homeroom")],
             teacherIds,
             classTeacherIds,
             availableTeachers: availableTeachers.map(publicSchedulingTeacher),
@@ -433,6 +459,7 @@ function schedulingClasses(db, division, grade) {
         displayOrder: Number(schoolClass.displayOrder || 0),
         room: room?.name || schoolClass.roomId,
         roomId: schoolClass.roomId,
+        roomType: normalizeRoomType(room?.roomType || room?.type, "homeroom"),
       };
     });
 }
@@ -474,11 +501,17 @@ export function buildSchedulingConfig(db, options = {}) {
     classCount: classes.length,
     classStructure,
     classes,
-    rooms: classes.map((schoolClass) => ({
-      id: schoolClass.roomId,
-      name: schoolClass.room,
-      sourceClassId: schoolClass.id,
-    })),
+    rooms: (db.rooms || [])
+      .filter((room) => room.active !== false && room.stageId === division.stageId)
+      .filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom" || classes.some((schoolClass) => schoolClass.roomId === room.id))
+      .map((room) => ({
+        id: room.id,
+        name: room.name,
+        roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+        roomTypeName: ROOM_TYPES[normalizeRoomType(room.roomType || room.type, "homeroom")],
+        sourceClassId: classes.find((schoolClass) => schoolClass.roomId === room.id)?.id || "",
+        capacity: Number(room.capacity || 1),
+      })),
     periods: PERIODS.map((period) => ({ ...period })),
     courseRules,
     constraints,
@@ -548,6 +581,8 @@ function buildClassAndRoomRows(division, grade, options = {}) {
       id: roomId,
       stageId: division.stageId,
       name: roomName,
+      roomType: "homeroom",
+      capacity: 1,
       qrCode: `ROOM:${roomId}`,
       displayKey: `screen-${roomId.toLowerCase()}`,
       active: true,
@@ -772,6 +807,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
       enabled: true,
       weeklyLessons: options.weeklyLessons ?? existingRule?.weeklyLessons ?? 1,
       durationMinutes: options.durationMinutes ?? existingRule?.durationMinutes ?? DEFAULT_LESSON_DURATION_MINUTES,
+      requiredRoomType: options.requiredRoomType ?? existingRule?.requiredRoomType ?? SUBJECT_DEFAULT_ROOM_TYPES[subject.id] ?? "homeroom",
     },
     actorAccount,
   );
@@ -813,6 +849,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
       enabled: false,
       weeklyLessons: currentRule?.weeklyLessons || 1,
       durationMinutes: currentRule?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+      requiredRoomType: currentRule?.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subjectId] || "homeroom",
     },
     actorAccount,
   );
@@ -1109,6 +1146,38 @@ function roomById(config, roomId) {
   return config.rooms?.find((room) => room.id === roomId) || null;
 }
 
+function roomTypeName(roomType = "homeroom") {
+  return ROOM_TYPES[normalizeRoomType(roomType)] || ROOM_TYPES.homeroom;
+}
+
+function roomsForTask(config, task) {
+  const requiredRoomType = normalizeRoomType(task.requiredRoomType || task.subject?.requiredRoomType, "homeroom");
+  if (requiredRoomType === "homeroom") {
+    const homeRoom = roomById(config, task.roomId);
+    return homeRoom ? [homeRoom] : [];
+  }
+  return (config.rooms || []).filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") === requiredRoomType);
+}
+
+function roomRuleText(config, task) {
+  const requiredRoomType = normalizeRoomType(task.requiredRoomType || task.subject?.requiredRoomType, "homeroom");
+  return `${task.subjectName || task.subject?.name || "课程"} 需要${roomTypeName(requiredRoomType)}`;
+}
+
+function roomHardRuleViolation(config, subjectId, room) {
+  const subject = scheduleSubjectRuleFor(config, subjectId);
+  const requiredRoomType = normalizeRoomType(subject?.requiredRoomType, "homeroom");
+  const actualRoomType = normalizeRoomType(room?.roomType || room?.type, "homeroom");
+  if (requiredRoomType !== actualRoomType) {
+    return {
+      type: "room-type",
+      title: `${subject?.name || subjectId} 教室类型不匹配`,
+      text: `${subject?.name || subjectId} 需要${roomTypeName(requiredRoomType)}，不能安排到${room?.name || "该教室"}（${roomTypeName(actualRoomType)}）。`,
+    };
+  }
+  return null;
+}
+
 function classById(config, classId) {
   return config.classes.find((schoolClass) => schoolClass.id === classId) || null;
 }
@@ -1172,6 +1241,9 @@ function subjectRuleSummary(config, subjectId) {
   }
   if (subject?.preferredDayPart && subject.preferredDayPart !== "any") {
     rules.push(`偏好${DAY_PARTS[subject.preferredDayPart] || subject.preferredDayPart}`);
+  }
+  if (subject?.requiredRoomType && subject.requiredRoomType !== "homeroom") {
+    rules.push(`需要${roomTypeName(subject.requiredRoomType)}`);
   }
   return `${subjectName}${rules.length ? `：${rules.join("，")}` : "无特殊课程规则"}`;
 }
@@ -1625,6 +1697,7 @@ function buildScheduleTasks(config, lockedAssignments = []) {
           subject,
           teacherIds: taskTeacherIds,
           durationMinutes: subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+          requiredRoomType: normalizeRoomType(subject.requiredRoomType, "homeroom"),
           difficulty: 80 - Math.min(taskTeacherIds.length, 12) * 5 + Number(subject.weeklyLessons || 0) * 3,
         });
       }
@@ -1635,7 +1708,7 @@ function buildScheduleTasks(config, lockedAssignments = []) {
 }
 
 function assignmentFromCandidate(config, task, candidate) {
-  const room = roomById(config, task.roomId);
+  const room = roomById(config, candidate.roomId || task.roomId);
   return {
     id: task.id,
     classId: task.classId,
@@ -1650,7 +1723,8 @@ function assignmentFromCandidate(config, task, candidate) {
     period: candidate.slot.period,
     time: candidate.slot.time,
     room: room?.name || task.room,
-    roomId: room?.id || task.roomId,
+    roomId: room?.id || candidate.roomId || task.roomId,
+    roomType: room?.roomType || task.requiredRoomType || "homeroom",
   };
 }
 
@@ -1683,21 +1757,27 @@ function buildCandidateList(config, state, task, slots, random) {
   if (!task.teacherIds.length) return [];
   const candidates = [];
 
+  const candidateRooms = roomsForTask(config, task);
+  if (!candidateRooms.length) return [];
+
   slots.forEach((slot) => {
     if (state.classBusy.get(task.classId)?.has(slot.slotKey)) return;
-    if ((state.roomBusy.get(task.roomId) || new Set()).has(slot.slotKey)) return;
     if (firstScheduleConstraintViolation(config, task.subjectId, slot)) return;
     if (subjectHardRuleViolation(config, task.subjectId, slot, state.assignments, task.classId)) return;
 
-    task.teacherIds.forEach((teacherId) => {
-      if ((state.teacherBusy.get(teacherId) || new Set()).has(slot.slotKey)) return;
-      const teacherDayLoad = state.teacherDayLoad.get(teacherDayKey(teacherId, slot.date)) || 0;
-      const teacherPeriods = state.teacherDayPeriods.get(teacherDayPeriodKey(teacherId, slot.date)) || [];
-      if (teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad, teacherPeriods)) return;
-      candidates.push({
-        slot,
-        teacherId,
-        score: candidateSoftScore(config, state, task, slot, teacherId, random),
+    candidateRooms.forEach((room) => {
+      if ((state.roomBusy.get(room.id) || new Set()).has(slot.slotKey)) return;
+      task.teacherIds.forEach((teacherId) => {
+        if ((state.teacherBusy.get(teacherId) || new Set()).has(slot.slotKey)) return;
+        const teacherDayLoad = state.teacherDayLoad.get(teacherDayKey(teacherId, slot.date)) || 0;
+        const teacherPeriods = state.teacherDayPeriods.get(teacherDayPeriodKey(teacherId, slot.date)) || [];
+        if (teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad, teacherPeriods)) return;
+        candidates.push({
+          slot,
+          teacherId,
+          roomId: room.id,
+          score: candidateSoftScore(config, state, task, slot, teacherId, random),
+        });
       });
     });
   });
@@ -1918,6 +1998,53 @@ export function buildSchedulePrecheck(config, options = {}) {
     }
 
     const demand = config.classes.length * Number(subject.weeklyLessons || 0);
+    const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
+    const candidateRooms =
+      requiredRoomType === "homeroom"
+        ? config.classes.map((schoolClass) => roomById(config, schoolClass.roomId)).filter(Boolean)
+        : (config.rooms || []).filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") === requiredRoomType);
+    if (!candidateRooms.length) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_room_empty_${subject.id}`,
+          `${subject.name} 缺少${roomTypeName(requiredRoomType)}`,
+          `${subject.name} 已设置需要${roomTypeName(requiredRoomType)}，但当前学部没有可用教室，请新增或调整课程教室要求。`,
+          { subjectId: subject.id, requiredRoomType },
+        ),
+      );
+    } else if (requiredRoomType === "homeroom" && candidateRooms.length < config.classes.length) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_homeroom_missing_${subject.id}`,
+          `${subject.name} 有班级缺少普通教室`,
+          `${subject.name} 需要普通教室，但当前只有 ${candidateRooms.length}/${config.classes.length} 个班级绑定了可用教室，请先维护班级教室。`,
+          { subjectId: subject.id, requiredRoomType, roomCount: candidateRooms.length, classCount: config.classes.length },
+        ),
+      );
+    } else if (requiredRoomType !== "homeroom" && demand > candidateRooms.length * slots.length) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_room_capacity_${subject.id}`,
+          `${subject.name} ${roomTypeName(requiredRoomType)}容量不足`,
+          `${subject.name} 本周需要 ${demand} 节，当前 ${candidateRooms.length} 间${roomTypeName(requiredRoomType)}最多提供 ${candidateRooms.length * slots.length} 个课位，请增加教室或减少课时。`,
+          { subjectId: subject.id, requiredRoomType, demand, roomCount: candidateRooms.length, availableRoomSlots: candidateRooms.length * slots.length },
+        ),
+      );
+    } else if (requiredRoomType !== "homeroom" && demand > candidateRooms.length * slots.length * 0.75) {
+      checks.push(
+        precheckItem(
+          "warning",
+          `subject_room_capacity_tight_${subject.id}`,
+          `${subject.name} ${roomTypeName(requiredRoomType)}容量偏紧`,
+          `${subject.name} 本周需要 ${demand} 节，当前 ${candidateRooms.length} 间${roomTypeName(requiredRoomType)}可用容量约 ${candidateRooms.length * slots.length} 个课位，排课可能较紧。`,
+          { subjectId: subject.id, requiredRoomType, demand, roomCount: candidateRooms.length },
+        ),
+      );
+    }
+
     const weeklyCapacity = Array.from(new Set(subject.teacherIds)).reduce(
       (sum, teacherId) => sum + teacherWeeklyCapacity(config, teacherId),
       0,
@@ -2430,6 +2557,15 @@ export function validateScheduleConflicts(assignments, options = {}) {
           text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${subjectRuleViolation.text}`,
         });
       }
+      const room = roomById(config, assignment.roomId);
+      const roomRuleViolation = roomHardRuleViolation(config, assignment.subjectId, room);
+      if (roomRuleViolation) {
+        conflicts.push({
+          type: roomRuleViolation.type,
+          title: roomRuleViolation.title,
+          text: `${formatDate(assignment.date)} 第 ${assignment.period} 节 ${assignment.time}：${assignment.className} ${roomRuleViolation.text}`,
+        });
+      }
       const unavailable = teacherRuleBlocksSlot(config, assignment.teacherId, {
         ...assignment,
         dayIndex,
@@ -2616,6 +2752,7 @@ function lessonFromAssignment(draft, assignment) {
     durationMinutes: assignment.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
     roomId: assignment.roomId,
     room: assignment.room,
+    roomType: assignment.roomType || "homeroom",
     date: assignment.date,
     time: assignment.time,
     type: "regular",
@@ -2793,6 +2930,12 @@ function validatePublishedLessonChange(db, config, lesson, next) {
   const room = roomById(config, next.roomId);
   if (!room) {
     const error = new Error("调课教室不在当前年级可用教室范围内");
+    error.statusCode = 400;
+    throw error;
+  }
+  const roomRuleViolation = roomHardRuleViolation(config, lesson.subjectId, room);
+  if (roomRuleViolation) {
+    const error = new Error(roomRuleViolation.text || roomRuleViolation.title);
     error.statusCode = 400;
     throw error;
   }
@@ -2986,6 +3129,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
   lesson.period = validated.period.period;
   lesson.roomId = validated.room.id;
   lesson.room = validated.room.name;
+  lesson.roomType = validated.room.roomType || "homeroom";
   lesson.changeRequestId = request.id;
   lesson.changedAt = now;
   lesson.changedByAccountId = actorAccount?.id || "";
@@ -3002,6 +3146,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
       time: validated.period.time,
       roomId: validated.room.id,
       room: validated.room.name,
+      roomType: validated.room.roomType || "homeroom",
       changedAt: formatDateTimeMinute(),
       changeRequestId: request.id,
     });
@@ -3103,6 +3248,12 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
     error.statusCode = 400;
     throw error;
   }
+  const roomRuleViolation = roomHardRuleViolation(config, assignment.subjectId, nextRoom);
+  if (roomRuleViolation) {
+    const error = new Error(roomRuleViolation.text || roomRuleViolation.title);
+    error.statusCode = 400;
+    throw error;
+  }
 
   const subjectRuleViolation = subjectHardRuleViolation(
     config,
@@ -3157,6 +3308,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   assignment.time = period.time;
   assignment.roomId = nextRoom.id;
   assignment.room = nextRoom.name;
+  assignment.roomType = nextRoom.roomType || "homeroom";
   assignment.adjustedAt = formatDateTimeMinute();
   assignment.adjustedByAccountId = actorAccount?.id || "";
 

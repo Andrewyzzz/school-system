@@ -13,6 +13,14 @@ def emit(payload):
 DEFAULT_DURATION = 40
 CORE_SUBJECT_IDS = {"chinese", "math", "english", "physics", "chemistry"}
 ACTIVITY_SUBJECT_IDS = {"pe", "music", "art"}
+ROOM_TYPES = {
+    "homeroom": "普通教室",
+    "lab": "实验室",
+    "computer": "机房",
+    "playground": "操场",
+    "art": "美术室",
+    "music": "音乐室",
+}
 
 
 def add_days(date_key, days):
@@ -89,6 +97,18 @@ def constraint_applies(constraint, subject_id, day_index, period):
 
 def teacher_rules(config):
     return {rule.get("teacherId"): rule for rule in config.get("teacherRules") or [] if rule.get("teacherId")}
+
+
+def normalize_room_type(value):
+    return value if value in ROOM_TYPES else "homeroom"
+
+
+def rooms_for_task(config, task):
+    required_room_type = normalize_room_type(task.get("requiredRoomType") or task.get("subject", {}).get("requiredRoomType"))
+    rooms = config.get("rooms") or []
+    if required_room_type == "homeroom":
+        return [room for room in rooms if room.get("id") == task.get("roomId")]
+    return [room for room in rooms if normalize_room_type(room.get("roomType") or room.get("type")) == required_room_type]
 
 
 def teacher_unavailable(rule, day_index, period):
@@ -170,6 +190,12 @@ def build_tasks(config, locked_assignments):
         for subject_index, subject in enumerate(config.get("subjects") or []):
             key = (school_class["id"], subject["id"])
             remaining = max(int(subject.get("weeklyLessons") or 0) - existing_counts.get(key, 0), 0)
+            class_teacher_ids = (
+                (subject.get("classTeacherIds") or {}).get(school_class["id"])
+                if isinstance(subject.get("classTeacherIds"), dict)
+                else None
+            )
+            task_teacher_ids = class_teacher_ids if class_teacher_ids else subject.get("teacherIds") or []
             for _ in range(remaining):
                 lesson_number = existing_counts.get(key, 0) + 1
                 assignment_id, next_index = next_assignment_id(
@@ -187,11 +213,12 @@ def build_tasks(config, locked_assignments):
                         "classIndex": class_index,
                         "room": school_class.get("room") or "",
                         "roomId": school_class.get("roomId") or "",
+                        "requiredRoomType": subject.get("requiredRoomType") or "homeroom",
                         "subjectId": subject["id"],
                         "subjectName": subject["name"],
                         "subjectIndex": subject_index,
                         "subject": subject,
-                        "teacherIds": subject.get("teacherIds") or [],
+                        "teacherIds": task_teacher_ids,
                         "durationMinutes": subject.get("durationMinutes") or DEFAULT_DURATION,
                     }
                 )
@@ -202,7 +229,7 @@ def assignment_from_candidate(config, task, candidate):
     teachers = {item["id"]: item for item in config.get("teachers") or []}
     rooms = {item["id"]: item for item in config.get("rooms") or []}
     slot = candidate["slot"]
-    room = rooms.get(task.get("roomId")) or {}
+    room = rooms.get(candidate.get("roomId") or task.get("roomId")) or {}
     teacher = teachers.get(candidate["teacherId"]) or {}
     return {
         "id": task["id"],
@@ -218,7 +245,8 @@ def assignment_from_candidate(config, task, candidate):
         "period": int(slot["period"]),
         "time": slot.get("time") or "",
         "room": room.get("name") or task.get("room") or "",
-        "roomId": room.get("id") or task.get("roomId") or "",
+        "roomId": room.get("id") or candidate.get("roomId") or task.get("roomId") or "",
+        "roomType": normalize_room_type(room.get("roomType") or task.get("requiredRoomType")),
     }
 
 
@@ -232,7 +260,7 @@ def select_candidate_specs(candidate_specs, candidate_limit):
 
     def candidate_key(candidate_spec):
         slot = candidate_spec["slot"]
-        return (candidate_spec["teacherId"], slot["date"], int(slot["period"]))
+        return (candidate_spec["teacherId"], candidate_spec.get("roomId") or "", slot["date"], int(slot["period"]))
 
     def add(candidate_spec):
         key = candidate_key(candidate_spec)
@@ -251,7 +279,9 @@ def select_candidate_specs(candidate_specs, candidate_limit):
         lambda item: ("day", item["slot"]["dayIndex"]),
         lambda item: ("period", int(item["slot"]["period"])),
         lambda item: ("teacher", item["teacherId"]),
+        lambda item: ("room", item.get("roomId") or ""),
         lambda item: ("teacher_day", item["teacherId"], item["slot"]["dayIndex"]),
+        lambda item: ("room_day", item.get("roomId") or "", item["slot"]["dayIndex"]),
         lambda item: ("day_period", item["slot"]["dayIndex"], int(item["slot"]["period"])),
     ]
 
@@ -284,6 +314,7 @@ def solver_diagnostic(severity, key, title, text, details=None):
 
 def candidate_task_report(task, candidate_specs):
     teacher_ids = sorted({candidate["teacherId"] for candidate in candidate_specs})
+    room_ids = sorted({candidate.get("roomId") or "" for candidate in candidate_specs if candidate.get("roomId")})
     day_indexes = sorted({int(candidate["slot"]["dayIndex"]) for candidate in candidate_specs})
     periods = sorted({int(candidate["slot"]["period"]) for candidate in candidate_specs})
     return {
@@ -295,12 +326,14 @@ def candidate_task_report(task, candidate_specs):
         "candidateCount": len(candidate_specs),
         "teacherCount": len(teacher_ids),
         "teacherIds": teacher_ids[:8],
+        "roomCount": len(room_ids),
+        "roomIds": room_ids[:8],
         "dayIndexes": day_indexes,
         "periods": periods,
     }
 
 
-def build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidate_counts, config):
+def build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidate_counts, room_task_demand, room_candidate_counts, config):
     diagnostics = []
     if not task_reports:
         return diagnostics
@@ -365,6 +398,40 @@ def build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidat
                 "老师资源紧张度",
                 f"{sample}，这些老师的可用候选相对较少，可能成为排课瓶颈。",
                 {"teachers": tight_teachers},
+            )
+        )
+
+    rooms_by_id = {room["id"]: room for room in config.get("rooms") or []}
+    room_density = []
+    for room_id, demand in room_task_demand.items():
+        if demand <= 0:
+            continue
+        candidate_count = room_candidate_counts.get(room_id, 0)
+        room = rooms_by_id.get(room_id) or {}
+        room_density.append(
+            {
+                "roomId": room_id,
+                "roomName": room.get("name") or room_id,
+                "roomType": normalize_room_type(room.get("roomType") or room.get("type")),
+                "demand": demand,
+                "candidateCount": candidate_count,
+                "density": candidate_count / max(demand, 1),
+            }
+        )
+
+    tight_rooms = sorted(room_density, key=lambda item: (item["density"], item["candidateCount"]))[:5]
+    if tight_rooms:
+        sample = "、".join(
+            f"{item['roomName']}({item['candidateCount']}候选/{item['demand']}需求)"
+            for item in tight_rooms[:3]
+        )
+        diagnostics.append(
+            solver_diagnostic(
+                "warning" if tight_rooms[0]["density"] < 5 else "info",
+                "cp_sat_tight_rooms",
+                "教室资源紧张度",
+                f"{sample}，这些专用教室或班级教室的可用候选相对较少，可能成为排课瓶颈。",
+                {"rooms": tight_rooms},
             )
         )
 
@@ -457,16 +524,23 @@ def solve(payload):
     task_reports = []
     teacher_task_demand = {}
     teacher_candidate_counts = {}
+    room_task_demand = {}
+    room_candidate_counts = {}
 
     for task_index, task in enumerate(tasks):
         task_vars[task_index] = []
         candidate_specs = []
+        candidate_rooms = rooms_for_task(config, task)
+        if task.get("requiredRoomType") == "homeroom":
+            for room in candidate_rooms:
+                room_task_demand[room["id"]] = room_task_demand.get(room["id"], 0) + 1
+        else:
+            for room in candidate_rooms:
+                room_task_demand[room["id"]] = room_task_demand.get(room["id"], 0) + 1 / max(len(candidate_rooms), 1)
         for teacher_id in task.get("teacherIds") or []:
             teacher_task_demand[teacher_id] = teacher_task_demand.get(teacher_id, 0) + 1
         for slot in slots:
             if (task["classId"], slot["slotKey"]) in class_busy:
-                continue
-            if (task["roomId"], slot["slotKey"]) in room_busy:
                 continue
             if subject_forbidden_period(task["subject"], int(slot["period"])):
                 continue
@@ -475,29 +549,37 @@ def solve(payload):
                 for constraint in config.get("constraints") or []
             ):
                 continue
-            for teacher_id in task.get("teacherIds") or []:
-                rule = rules_by_teacher.get(teacher_id)
-                if (teacher_id, slot["slotKey"]) in teacher_busy:
+            for room in candidate_rooms:
+                room_id = room.get("id")
+                if (room_id, slot["slotKey"]) in room_busy:
                     continue
-                if teacher_unavailable(rule, slot["dayIndex"], int(slot["period"])):
-                    continue
-                candidate_specs.append(
-                    {
-                        "slot": slot,
-                        "teacherId": teacher_id,
-                        "cost": period_cost(task["subject"], int(slot["period"]))
-                        + subject_preference_cost(task["subject"], int(slot["period"]))
-                        + teacher_preference_cost(rule, int(slot["period"]))
-                        + int(slot["period"]) * 0.25
-                        + int(slot["dayIndex"]) * 0.15
-                        + teacher_fixed_load.get(teacher_id, 0) * 3,
-                    }
-                )
+                for teacher_id in task.get("teacherIds") or []:
+                    rule = rules_by_teacher.get(teacher_id)
+                    if (teacher_id, slot["slotKey"]) in teacher_busy:
+                        continue
+                    if teacher_unavailable(rule, slot["dayIndex"], int(slot["period"])):
+                        continue
+                    candidate_specs.append(
+                        {
+                            "slot": slot,
+                            "teacherId": teacher_id,
+                            "roomId": room_id,
+                            "cost": period_cost(task["subject"], int(slot["period"]))
+                            + subject_preference_cost(task["subject"], int(slot["period"]))
+                            + teacher_preference_cost(rule, int(slot["period"]))
+                            + int(slot["period"]) * 0.25
+                            + int(slot["dayIndex"]) * 0.15
+                            + teacher_fixed_load.get(teacher_id, 0) * 3,
+                        }
+                    )
 
         task_reports.append(candidate_task_report(task, candidate_specs))
         for candidate_spec in candidate_specs:
             teacher_id = candidate_spec["teacherId"]
             teacher_candidate_counts[teacher_id] = teacher_candidate_counts.get(teacher_id, 0) + 1
+            room_id = candidate_spec.get("roomId")
+            if room_id:
+                room_candidate_counts[room_id] = room_candidate_counts.get(room_id, 0) + 1
         candidate_specs.sort(key=lambda item: item["cost"])
         candidate_specs = select_candidate_specs(candidate_specs, candidate_limit)
 
@@ -509,13 +591,14 @@ def solve(payload):
                 "taskIndex": task_index,
                 "task": task,
                 "teacherId": teacher_id,
+                "roomId": candidate_spec.get("roomId"),
                 "slot": slot,
             }
             task_vars[task_index].append(var)
             candidates_by_var[var.Index()] = candidate
             teacher_slot_vars.setdefault((teacher_id, slot["slotKey"]), []).append(var)
             class_slot_vars.setdefault((task["classId"], slot["slotKey"]), []).append(var)
-            room_slot_vars.setdefault((task["roomId"], slot["slotKey"]), []).append(var)
+            room_slot_vars.setdefault((candidate_spec.get("roomId") or task["roomId"], slot["slotKey"]), []).append(var)
             class_subject_day_vars.setdefault((task["classId"], task["subjectId"], slot["date"]), []).append(var)
             class_subject_day_period_vars.setdefault(
                 (task["classId"], task["subjectId"], slot["date"], int(slot["period"])),
@@ -536,6 +619,8 @@ def solve(payload):
                     task_reports,
                     teacher_task_demand,
                     teacher_candidate_counts,
+                    room_task_demand,
+                    room_candidate_counts,
                     config,
                 ),
             }
@@ -649,7 +734,14 @@ def solve(payload):
             if variables:
                 model.Add(sum(variables) + fixed_count <= max_consecutive_lessons)
 
-    diagnostics = build_solver_diagnostics(task_reports, teacher_task_demand, teacher_candidate_counts, config)
+    diagnostics = build_solver_diagnostics(
+        task_reports,
+        teacher_task_demand,
+        teacher_candidate_counts,
+        room_task_demand,
+        room_candidate_counts,
+        config,
+    )
     time_limit_seconds = float(options.get("timeLimitSeconds") or 10)
     workers = int(options.get("workers") or 8)
     two_stage = options.get("twoStage", True) is not False

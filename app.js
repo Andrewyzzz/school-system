@@ -135,6 +135,21 @@ const schedulingCatalog = {
   ],
 };
 
+const SCHEDULE_ROOM_TYPES = {
+  homeroom: "普通教室",
+  lab: "实验室",
+  computer: "机房",
+  playground: "操场",
+  art: "美术室",
+  music: "音乐室",
+};
+
+const SUBJECT_DEFAULT_ROOM_TYPES = {
+  pe: "playground",
+  physics: "lab",
+  chemistry: "lab",
+};
+
 function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-g1") {
   const division =
     schedulingCatalog.divisions.find((item) => item.id === divisionId) ||
@@ -147,7 +162,12 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     const availableTeachers = schedulingCatalog.teachers
       .filter((teacher) => subject.teacherIds.includes(teacher.id))
       .map((teacher) => ({ ...teacher, title: "任课教师", department: division.name }));
-    return { ...subject, durationMinutes: subject.durationMinutes || 40, availableTeachers };
+    return {
+      ...subject,
+      durationMinutes: subject.durationMinutes || 40,
+      requiredRoomType: normalizeScheduleRoomType(subject.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subject.id] || "homeroom"),
+      availableTeachers,
+    };
   });
   const enabledSubjectIds = new Set(division.subjectIds);
   const courseRules = Object.values(schedulingCatalog.subjects).map((subject) => ({
@@ -163,6 +183,7 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     allowConsecutive: subject.allowConsecutive !== false,
     forbiddenPeriods: Array.isArray(subject.forbiddenPeriods) ? subject.forbiddenPeriods : [],
     preferredDayPart: subject.preferredDayPart || "any",
+    requiredRoomType: normalizeScheduleRoomType(subject.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subject.id] || "homeroom"),
   }));
   const classes = Array.from({ length: division.classCount }, (_, index) => {
     const roomNumber = String(index + 1).padStart(2, "0");
@@ -174,8 +195,23 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
       displayOrder: index + 1,
       room: roomName,
       roomId: `${grade.code}R${roomNumber}`,
+      roomType: "homeroom",
     };
   });
+  const specialRooms = [
+    ["LAB", "实验室01", "lab"],
+    ["LAB2", "实验室02", "lab"],
+    ["COMPUTER", "机房", "computer"],
+    ["PLAYGROUND", "操场", "playground"],
+    ["ART", "美术室", "art"],
+    ["MUSIC", "音乐室", "music"],
+  ].map(([suffix, name, roomType]) => ({
+    id: `${grade.code}-${suffix}`,
+    name: `${division.shortName}${grade.name}${name}`,
+    roomType,
+    roomTypeName: SCHEDULE_ROOM_TYPES[roomType],
+    sourceClassId: "",
+  }));
 
   return {
     divisionId: division.id,
@@ -190,11 +226,16 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
       totalCount: classes.length,
     },
     classes,
-    rooms: classes.map((schoolClass) => ({
-      id: schoolClass.roomId,
-      name: schoolClass.room,
-      sourceClassId: schoolClass.id,
-    })),
+    rooms: [
+      ...classes.map((schoolClass) => ({
+        id: schoolClass.roomId,
+        name: schoolClass.room,
+        roomType: "homeroom",
+        roomTypeName: SCHEDULE_ROOM_TYPES.homeroom,
+        sourceClassId: schoolClass.id,
+      })),
+      ...specialRooms,
+    ],
     periods: schedulingCatalog.periods.map((period) => ({ ...period })),
     courseRules,
     constraints: [],
@@ -1460,6 +1501,14 @@ function normalizeCourseRulePeriods(value) {
 
 function normalizePreferredDayPart(value) {
   return ["any", "morning", "afternoon"].includes(value) ? value : "any";
+}
+
+function normalizeScheduleRoomType(value) {
+  return Object.hasOwn(SCHEDULE_ROOM_TYPES, value) ? value : "homeroom";
+}
+
+function scheduleRoomTypeText(value) {
+  return SCHEDULE_ROOM_TYPES[normalizeScheduleRoomType(value)] || SCHEDULE_ROOM_TYPES.homeroom;
 }
 
 function periodDayPart(period) {
@@ -2847,6 +2896,9 @@ function collectCourseRulesFromForm() {
       preferredDayPart: normalizePreferredDayPart(
         document.querySelector(`[data-course-rule-preferred-day-part="${subjectId}"]`)?.value || "any",
       ),
+      requiredRoomType: normalizeScheduleRoomType(
+        document.querySelector(`[data-course-rule-room-type="${subjectId}"]`)?.value || "homeroom",
+      ),
     };
   });
 }
@@ -2865,6 +2917,7 @@ function localSubjectFromCourseRule(rule) {
     allowConsecutive: rule.allowConsecutive !== false,
     forbiddenPeriods: normalizeCourseRulePeriods(rule.forbiddenPeriods || []),
     preferredDayPart: normalizePreferredDayPart(rule.preferredDayPart || "any"),
+    requiredRoomType: normalizeScheduleRoomType(rule.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[rule.subjectId] || "homeroom"),
     availableTeachers,
   };
 }
@@ -2944,12 +2997,34 @@ function applyLocalClassStructure(regularCount, experimentalCount) {
       room,
       roomId,
     });
-    rooms.push({ id: roomId, name: room, sourceClassId: classId });
+    rooms.push({
+      id: roomId,
+      name: room,
+      roomType: "homeroom",
+      roomTypeName: SCHEDULE_ROOM_TYPES.homeroom,
+      sourceClassId: classId,
+    });
   };
   for (let index = 1; index <= regularCount; index += 1) pushClass("regular", index, index);
   for (let index = 1; index <= experimentalCount; index += 1) {
     pushClass("experimental", index, regularCount + index);
   }
+  [
+    ["LAB", "实验室01", "lab"],
+    ["LAB2", "实验室02", "lab"],
+    ["COMPUTER", "机房", "computer"],
+    ["PLAYGROUND", "操场", "playground"],
+    ["ART", "美术室", "art"],
+    ["MUSIC", "音乐室", "music"],
+  ].forEach(([suffix, name, roomType]) => {
+    rooms.push({
+      id: `${config.gradeId}-${suffix}`,
+      name: `${config.divisionName}${config.gradeName}${name}`,
+      roomType,
+      roomTypeName: SCHEDULE_ROOM_TYPES[roomType],
+      sourceClassId: "",
+    });
+  });
   config.classes = classes;
   config.rooms = rooms;
   config.classCount = classes.length;
@@ -3065,7 +3140,7 @@ function createLocalSubjectId() {
   return id;
 }
 
-function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
+function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requiredRoomType = "homeroom") {
   const normalizedName = subjectName.trim().replace(/\s+/g, "");
   const existingSubject =
     Object.values(schedulingCatalog.subjects).find((subject) => subject.name === normalizedName) || null;
@@ -3082,6 +3157,7 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
       allowConsecutive: true,
       forbiddenPeriods: [],
       preferredDayPart: "any",
+      requiredRoomType,
     };
   if (!existingSubject) schedulingCatalog.subjects[subject.id] = subject;
   const existingRule = state.schedulingConfig.courseRules.find((rule) => rule.subjectId === subject.id);
@@ -3098,6 +3174,9 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes) {
     allowConsecutive: existingRule?.allowConsecutive ?? subject.allowConsecutive ?? true,
     forbiddenPeriods: existingRule?.forbiddenPeriods || subject.forbiddenPeriods || [],
     preferredDayPart: existingRule?.preferredDayPart || subject.preferredDayPart || "any",
+    requiredRoomType: normalizeScheduleRoomType(
+      existingRule?.requiredRoomType || requiredRoomType || subject.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subject.id] || "homeroom",
+    ),
   };
   if (existingRule) {
     Object.assign(existingRule, nextRule);
@@ -3111,6 +3190,7 @@ async function addAdminGradeCourse() {
   const subjectName = document.querySelector("#newCourseName").value.trim();
   const weeklyLessons = Number.parseInt(document.querySelector("#newCourseWeekly").value || "0", 10);
   const durationMinutes = Number.parseInt(document.querySelector("#newCourseDuration").value || "40", 10);
+  const requiredRoomType = normalizeScheduleRoomType(document.querySelector("#newCourseRoomType")?.value || "homeroom");
   if (!subjectName) {
     showToast("请输入课程名称");
     return;
@@ -3132,6 +3212,7 @@ async function addAdminGradeCourse() {
           subjectName,
           weeklyLessons,
           durationMinutes,
+          requiredRoomType,
         },
       });
       applyBackendScheduleResult(result);
@@ -3139,6 +3220,7 @@ async function addAdminGradeCourse() {
       document.querySelector("#newCourseName").value = "";
       document.querySelector("#newCourseWeekly").value = "2";
       document.querySelector("#newCourseDuration").value = "40";
+      document.querySelector("#newCourseRoomType").value = "homeroom";
       showToast("课程已添加到当前年级");
     } catch (error) {
       schedulingBackendState = {
@@ -3152,8 +3234,11 @@ async function addAdminGradeCourse() {
     return;
   }
 
-  applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes);
+  applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requiredRoomType);
   document.querySelector("#newCourseName").value = "";
+  document.querySelector("#newCourseWeekly").value = "2";
+  document.querySelector("#newCourseDuration").value = "40";
+  document.querySelector("#newCourseRoomType").value = "homeroom";
   showToast("课程已添加到试运行数据");
   render();
 }
@@ -4634,7 +4719,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
         .map(
           (room) => `
             <option value="${room.id}" ${room.id === selectedAssignment.roomId || room.name === selectedAssignment.room ? "selected" : ""}>
-              ${room.name}
+              ${room.name} · ${scheduleRoomTypeText(room.roomType || "homeroom")}
             </option>
           `,
         )
@@ -4750,7 +4835,7 @@ function renderScheduleChangePanel(assignments, selectedAssignment, draft) {
         .map(
           (room) => `
             <option value="${room.id}" ${room.id === selected.roomId || room.name === selected.room ? "selected" : ""}>
-              ${room.name}
+              ${room.name} · ${scheduleRoomTypeText(room.roomType || "homeroom")}
             </option>
           `,
         )
@@ -5338,13 +5423,26 @@ function courseRuleConstraintSummary(rule) {
   parts.push(forbiddenPeriods.length ? `禁排第 ${forbiddenPeriods.join("、")} 节` : "无禁排节次");
   const preferred = normalizePreferredDayPart(rule.preferredDayPart || "any");
   parts.push(preferred === "any" ? "时段不限" : `偏好${courseRulePreferredDayPartText(preferred)}`);
+  parts.push(`教室：${scheduleRoomTypeText(rule.requiredRoomType || "homeroom")}`);
   return parts.join(" · ");
+}
+
+function scheduleRoomTypeOptions(selected = "homeroom") {
+  const normalized = normalizeScheduleRoomType(selected);
+  return Object.entries(SCHEDULE_ROOM_TYPES)
+    .map(
+      ([value, label]) => `
+        <option value="${value}" ${normalized === value ? "selected" : ""}>${label}</option>
+      `,
+    )
+    .join("");
 }
 
 function adminCourseRuleItem(rule) {
   const subjectId = escapeHtml(rule.subjectId);
   const allowConsecutive = rule.allowConsecutive !== false;
   const preferredDayPart = normalizePreferredDayPart(rule.preferredDayPart || "any");
+  const requiredRoomType = normalizeScheduleRoomType(rule.requiredRoomType || "homeroom");
   return `
     <article class="course-rule-item ${courseRulesEditMode ? "editing" : ""}" data-course-rule-id="${escapeHtml(rule.subjectId)}">
       <div class="course-rule-top">
@@ -5436,6 +5534,16 @@ function adminCourseRuleItem(rule) {
                   <option value="afternoon" ${preferredDayPart === "afternoon" ? "selected" : ""}>下午</option>
                 </select>
               </label>
+              <label class="field-label compact-field" for="courseRoomType-${subjectId}">
+                <span>教室要求</span>
+                <select
+                  class="lesson-select"
+                  id="courseRoomType-${subjectId}"
+                  data-course-rule-room-type="${subjectId}"
+                >
+                  ${scheduleRoomTypeOptions(requiredRoomType)}
+                </select>
+              </label>
             </div>
           `
           : `
@@ -5443,6 +5551,7 @@ function adminCourseRuleItem(rule) {
             <input type="hidden" data-course-rule-consecutive="${subjectId}" value="${allowConsecutive ? "true" : "false"}" />
             <input type="hidden" data-course-rule-forbidden-periods="${subjectId}" value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}" />
             <input type="hidden" data-course-rule-preferred-day-part="${subjectId}" value="${preferredDayPart}" />
+            <input type="hidden" data-course-rule-room-type="${subjectId}" value="${requiredRoomType}" />
           `
       }
     </article>
