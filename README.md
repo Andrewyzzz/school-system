@@ -110,6 +110,7 @@ http://127.0.0.1:4173/api/health
 - 系统更新流程：`docs/system-update-process.md`
 - 更新日志：`CHANGELOG.md`
 - 第一阶段 PRD：`docs/学校教学薪资管理系统-第一阶段PRD.md`
+- 排课系统最高标准 TODO：`docs/scheduling-high-standard-todo.md`
 - 字段字典：`docs/phase1-field-dictionary.md`
 - 教师导入说明：`docs/teacher-import-guide.md`
 - 教师导入 CSV 模板：`templates/teacher-import-template.csv`
