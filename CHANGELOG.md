@@ -6,7 +6,7 @@
 
 - 类型：测试 / 工程化 / 排课
 - 影响范围：OR-Tools CP-SAT / fallback / 算法回归 / 质量评分
-- 提交：待提交
+- 提交：已提交 `848a20a`
 - 部署：未部署
 - 验证：
   - `node --check tests/scheduling-solver-benchmark.test.js`
