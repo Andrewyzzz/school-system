@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { currentTerm, weekStartForDivision } from "./terms.js";
 
 const ORTOOLS_SOLVER_PATH = fileURLToPath(new URL("./solver/ortools_scheduler.py", import.meta.url));
 
@@ -193,9 +194,9 @@ function subjectById(db, subjectId) {
   return db.subjects.find((subject) => subject.id === subjectId);
 }
 
-function clearScheduleDraftForScope(db, division, grade) {
+function clearScheduleDraftForScope(db, division, grade, term = currentTerm(db)) {
   db.scheduleDrafts = (db.scheduleDrafts || []).filter(
-    (draft) => !(draft.divisionId === division.id && draft.gradeId === grade.id),
+    (draft) => !(draft.termId === term.id && draft.divisionId === division.id && draft.gradeId === grade.id),
   );
 }
 
@@ -397,9 +398,9 @@ function publicTeacherScheduleRules(db, division, subjects) {
     .sort((a, b) => a.teacherName.localeCompare(b.teacherName, "zh-CN"));
 }
 
-function publicScheduleChangeRequests(db, division, grade) {
+function publicScheduleChangeRequests(db, division, grade, term) {
   return (db.scheduleChangeRequests || [])
-    .filter((request) => request.divisionId === division.id && request.gradeId === grade.id)
+    .filter((request) => request.termId === term.id && request.divisionId === division.id && request.gradeId === grade.id)
     .slice()
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, 20);
@@ -486,6 +487,7 @@ function gradeClassStructure(classes = []) {
 
 export function buildSchedulingConfig(db, options = {}) {
   ensureSchedulingStore(db);
+  const term = currentTerm(db, options.termId);
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
   const courseRules = schedulingCourseRules(db, division, grade);
@@ -498,11 +500,15 @@ export function buildSchedulingConfig(db, options = {}) {
   return {
     divisionId: division.id,
     divisionName: division.name,
+    termId: term.id,
+    termName: term.name,
+    termStartDate: term.startDate,
+    termEndDate: term.endDate,
     stageId: division.stageId,
     gradeId: grade.id,
     gradeName: grade.name,
     grade: grade.grade,
-    weekStart: division.weekStart || "2026-06-15",
+    weekStart: String(options.weekStart || "").trim() || weekStartForDivision(term, division) || division.weekStart || "2026-06-15",
     classCount: classes.length,
     classStructure,
     classes,
@@ -521,7 +527,7 @@ export function buildSchedulingConfig(db, options = {}) {
     courseRules,
     constraints,
     teacherRules,
-    changeRequests: publicScheduleChangeRequests(db, division, grade),
+    changeRequests: publicScheduleChangeRequests(db, division, grade, term),
     subjects,
     teachers: schedulingTeacherRows(db, subjects),
     divisions: DIVISIONS.map((item) => ({
@@ -1396,8 +1402,12 @@ function periodForLesson(lesson) {
   return PERIODS.find((period) => period.time === lesson.time)?.period || null;
 }
 
+function termScopeMatches(config, item) {
+  return !item.termId || item.termId === config.termId;
+}
+
 function currentScope(config, item) {
-  return item.divisionId === config.divisionId && item.gradeId === config.gradeId;
+  return termScopeMatches(config, item) && item.divisionId === config.divisionId && item.gradeId === config.gradeId;
 }
 
 function teacherById(db, teacherId) {
@@ -1433,6 +1443,8 @@ function lessonAsExternalAssignment(db, lesson) {
     time: lesson.time || periodMeta?.time || "",
     divisionId: lesson.divisionId,
     gradeId: lesson.gradeId,
+    termId: lesson.termId,
+    termName: lesson.termName,
     stageId: lesson.stageId,
     grade: lesson.grade,
   };
@@ -1446,6 +1458,8 @@ function draftAssignmentAsExternal(draft, assignment) {
     sourceLabel: "其他年级锁定草稿",
     divisionId: draft.divisionId,
     gradeId: draft.gradeId,
+    termId: draft.termId,
+    termName: draft.termName,
     stageId: draft.stageId,
     grade: draft.grade,
     divisionName: draft.divisionName,
@@ -1457,6 +1471,7 @@ function draftAssignmentAsExternal(draft, assignment) {
 function globalTeacherBusyAssignments(db, config) {
   const weekDates = new Set(weekDateKeys(config));
   const publishedAssignments = (db.lessonInstances || [])
+    .filter((lesson) => termScopeMatches(config, lesson))
     .filter((lesson) => weekDates.has(lesson.date))
     .filter((lesson) => !currentScope(config, lesson))
     .filter((lesson) => lesson.status !== "cancelled")
@@ -1464,6 +1479,7 @@ function globalTeacherBusyAssignments(db, config) {
     .filter(Boolean);
 
   const lockedDraftAssignments = (db.scheduleDrafts || [])
+    .filter((draft) => termScopeMatches(config, draft))
     .filter((draft) => !currentScope(config, draft))
     .filter((draft) => draft.status !== "published")
     .flatMap((draft) =>
@@ -2519,7 +2535,7 @@ function generateHeuristicScheduleSolution(config, options = {}) {
   };
   const seed =
     options.seed ||
-    hashString(`${config.divisionId}:${config.gradeId}:${config.weekStart}:${tasks.length}:${externalAssignments.length}`);
+    hashString(`${config.termId}:${config.divisionId}:${config.gradeId}:${config.weekStart}:${tasks.length}:${externalAssignments.length}`);
   const startedAt = Date.now();
   const deadline = startedAt + solverOptions.timeoutMs;
   const requiredCount = requiredScheduleLessonCount(config);
@@ -3026,8 +3042,17 @@ export function validateScheduleConflicts(assignments, options = {}) {
   return conflicts;
 }
 
-function draftKey(divisionId, gradeId) {
-  return `${divisionId}:${gradeId}`;
+function draftKey(config) {
+  return `${config.termId}:${config.divisionId}:${config.gradeId}`;
+}
+
+function scheduleScopeMatches(item, config) {
+  return (
+    termScopeMatches(config, item) &&
+    item.divisionId === config.divisionId &&
+    item.gradeId === config.gradeId &&
+    (!item.weekStart || item.weekStart === config.weekStart)
+  );
 }
 
 function refreshDraftConflicts(db, config, draft) {
@@ -3043,9 +3068,7 @@ export function findScheduleDraft(db, options = {}) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   const draft =
-    db.scheduleDrafts.find(
-      (draft) => draft.divisionId === config.divisionId && draft.gradeId === config.gradeId,
-    ) || null;
+    db.scheduleDrafts.find((draft) => scheduleScopeMatches(draft, config)) || null;
   return refreshDraftConflicts(db, config, draft);
 }
 
@@ -3062,8 +3085,12 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   const now = formatDateTimeMinute();
   const requiredCount = requiredScheduleLessonCount(config);
   const draft = {
-    id: `DRAFT-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    id: `DRAFT-${draftKey(config)}-${Date.now()}`,
     status: "draft",
+    termId: config.termId,
+    termName: config.termName,
+    termStartDate: config.termStartDate,
+    termEndDate: config.termEndDate,
     divisionId: config.divisionId,
     gradeId: config.gradeId,
     stageId: config.stageId,
@@ -3088,7 +3115,7 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   };
 
   db.scheduleDrafts = db.scheduleDrafts.filter(
-    (item) => !(item.divisionId === config.divisionId && item.gradeId === config.gradeId),
+    (item) => !scheduleScopeMatches(item, config),
   );
   db.scheduleDrafts.push(draft);
   db.meta.updatedAt = new Date().toISOString();
@@ -3133,6 +3160,8 @@ function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
     schedulingDraftId: draft.id,
     scheduleVersionId,
     scheduleAssignmentId: assignment.id,
+    termId: draft.termId,
+    termName: draft.termName,
     divisionId: draft.divisionId,
     gradeId: draft.gradeId,
     stageId: draft.stageId,
@@ -3191,7 +3220,7 @@ function scheduleVersionDiff(previousVersion, assignments = []) {
 }
 
 function scheduleVersionScopeMatches(version, config) {
-  return version.divisionId === config.divisionId && version.gradeId === config.gradeId && version.weekStart === config.weekStart;
+  return scheduleScopeMatches(version, config);
 }
 
 function currentScheduleVersion(db, config) {
@@ -3207,6 +3236,8 @@ function scheduleVersionSummariesForConfig(db, config) {
       versionNumber: version.versionNumber,
       current: Boolean(version.current),
       status: version.current ? "current" : "history",
+      termId: version.termId,
+      termName: version.termName,
       divisionId: version.divisionId,
       gradeId: version.gradeId,
       weekStart: version.weekStart,
@@ -3232,9 +3263,13 @@ function createPublishedScheduleVersion(db, config, draft, lessons, actorAccount
   const versionNumber = Math.max(0, ...versions.map((version) => Number(version.versionNumber || 0))) + 1;
   const now = draft.publishedAt || formatDateTimeMinute();
   const version = {
-    id: versionId || `SVER-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    id: versionId || `SVER-${draftKey(config)}-${Date.now()}`,
     versionNumber,
     current: true,
+    termId: config.termId,
+    termName: config.termName,
+    termStartDate: config.termStartDate,
+    termEndDate: config.termEndDate,
     divisionId: config.divisionId,
     divisionName: config.divisionName,
     gradeId: config.gradeId,
@@ -3307,13 +3342,14 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   }
 
   const now = formatDateTimeMinute();
-  const scheduleVersionId = `SVER-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`;
+  const scheduleVersionId = `SVER-${draftKey(config)}-${Date.now()}`;
   const lessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
   db.lessonInstances = db.lessonInstances
     .filter(
       (lesson) =>
         !(
           lesson.source === "backend-scheduling" &&
+          termScopeMatches(config, lesson) &&
           lesson.divisionId === draft.divisionId &&
           lesson.gradeId === draft.gradeId &&
           lesson.date >= draft.weekStart &&
@@ -3335,8 +3371,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     db,
     {
       teacherIds: lessons.map((lesson) => lesson.teacherId),
-      title: `${draft.divisionName}${draft.gradeName}课表已发布`,
-      text: `自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
+      title: `${draft.termName}${draft.divisionName}${draft.gradeName}课表已发布`,
+      text: `${draft.termName}自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
       level: "info",
     },
     actorAccount,
@@ -3349,6 +3385,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     actorName: actorAccount?.name || "",
     divisionId: config.divisionId,
     gradeId: config.gradeId,
+    termId: config.termId,
+    termName: config.termName,
     lessonCount: lessons.length,
     scheduleVersionId,
     versionNumber: version.versionNumber,
@@ -3375,6 +3413,8 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   const lessons = clone(targetVersion.lessons || []).map((lesson) => ({
     ...lesson,
     source: "backend-scheduling",
+    termId: targetVersion.termId,
+    termName: targetVersion.termName,
     scheduleVersionId: targetVersion.id,
     rolledBackAt: now,
   }));
@@ -3383,6 +3423,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
       (lesson) =>
         !(
           lesson.source === "backend-scheduling" &&
+          termScopeMatches(config, lesson) &&
           lesson.divisionId === targetVersion.divisionId &&
           lesson.gradeId === targetVersion.gradeId &&
           lesson.date >= targetVersion.weekStart &&
@@ -3404,8 +3445,12 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   );
 
   const draft = {
-    id: targetVersion.draftId || `DRAFT-ROLLBACK-${draftKey(config.divisionId, config.gradeId)}-${Date.now()}`,
+    id: targetVersion.draftId || `DRAFT-ROLLBACK-${draftKey(config)}-${Date.now()}`,
     status: "published",
+    termId: targetVersion.termId || config.termId,
+    termName: targetVersion.termName || config.termName,
+    termStartDate: targetVersion.termStartDate || config.termStartDate,
+    termEndDate: targetVersion.termEndDate || config.termEndDate,
     divisionId: targetVersion.divisionId,
     gradeId: targetVersion.gradeId,
     stageId: targetVersion.stageId,
@@ -3432,7 +3477,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
     rollbackByAccountId: actorAccount?.id || "",
   };
   db.scheduleDrafts = (db.scheduleDrafts || []).filter(
-    (item) => !(item.divisionId === config.divisionId && item.gradeId === config.gradeId),
+    (item) => !scheduleScopeMatches(item, config),
   );
   db.scheduleDrafts.push(draft);
 
@@ -3440,7 +3485,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
     db,
     {
       teacherIds: lessons.map((lesson) => lesson.teacherId),
-      title: `${targetVersion.divisionName}${targetVersion.gradeName}课表已回滚`,
+      title: `${targetVersion.termName || config.termName}${targetVersion.divisionName}${targetVersion.gradeName}课表已回滚`,
       text: `已回滚到 V${targetVersion.versionNumber}，老师端课表、签入签出和薪资工作量将按该版本执行。`,
       level: "warning",
     },
@@ -3454,6 +3499,8 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
     actorName: actorAccount?.name || "",
     divisionId: config.divisionId,
     gradeId: config.gradeId,
+    termId: config.termId,
+    termName: config.termName,
     scheduleVersionId: targetVersion.id,
     versionNumber: targetVersion.versionNumber,
     lessonCount: lessons.length,
@@ -3554,6 +3601,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
   const currentScopeLessons = (db.lessonInstances || [])
     .filter((item) => item.id !== lesson.id)
     .filter((item) => item.source === "backend-scheduling")
+    .filter((item) => termScopeMatches(config, item))
     .filter((item) => item.divisionId === config.divisionId && item.gradeId === config.gradeId)
     .filter((item) => weekDates.has(item.date))
     .filter((item) => item.status !== "cancelled")
@@ -3647,6 +3695,8 @@ export function createScheduleChangeRequest(db, options = {}, actorAccount = nul
     changeType: next.teacherId === lesson.teacherId ? "reschedule" : "substitute",
     lessonId: lesson.id,
     assignmentId,
+    termId: config.termId,
+    termName: config.termName,
     divisionId: config.divisionId,
     gradeId: config.gradeId,
     stageId: config.stageId,
@@ -3689,6 +3739,8 @@ export function createScheduleChangeRequest(db, options = {}, actorAccount = nul
     actorAccountId: actorAccount?.id || "",
     actorName: actorAccount?.name || "",
     requestId: request.id,
+    termId: config.termId,
+    termName: config.termName,
     divisionId: config.divisionId,
     gradeId: config.gradeId,
     createdAt: now,
@@ -3711,7 +3763,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
     error.statusCode = 409;
     throw error;
   }
-  const config = buildSchedulingConfig(db, { divisionId: request.divisionId, gradeId: request.gradeId });
+  const config = buildSchedulingConfig(db, { termId: request.termId, divisionId: request.divisionId, gradeId: request.gradeId });
   const lesson = (db.lessonInstances || []).find((item) => item.id === request.lessonId);
   const validated = validatePublishedLessonChange(db, config, lesson, {
     teacherId: request.to.teacherId,
@@ -3733,7 +3785,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
   lesson.changedAt = now;
   lesson.changedByAccountId = actorAccount?.id || "";
 
-  const draft = findScheduleDraft(db, { divisionId: request.divisionId, gradeId: request.gradeId });
+  const draft = findScheduleDraft(db, { termId: request.termId, divisionId: request.divisionId, gradeId: request.gradeId });
   const assignment = (draft?.assignments || []).find((item) => item.id === request.assignmentId);
   if (assignment) {
     Object.assign(assignment, {
@@ -3773,12 +3825,14 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
     actorName: actorAccount?.name || "",
     requestId,
     lessonId: lesson.id,
+    termId: config.termId,
+    termName: config.termName,
     divisionId: config.divisionId,
     gradeId: config.gradeId,
     createdAt: now,
   });
 
-  return { config: buildSchedulingConfig(db, { divisionId: request.divisionId, gradeId: request.gradeId }), draft, request, lesson };
+  return { config: buildSchedulingConfig(db, { termId: request.termId, divisionId: request.divisionId, gradeId: request.gradeId }), draft, request, lesson };
 }
 
 export function adjustScheduleAssignment(db, options = {}, actorAccount = null) {

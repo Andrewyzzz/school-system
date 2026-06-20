@@ -10,6 +10,7 @@ import {
   ensureTeacherSalaryProfile,
   normalizePayrollRules,
 } from "./payroll.js";
+import { currentTerm, defaultTerms, ensureTerms, listTerms, termForMonth } from "./terms.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
@@ -522,6 +523,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     scheduleConstraints: [],
     teacherScheduleRules: [],
     scheduleChangeRequests: [],
+    terms: defaultTerms(),
     lessonInstances,
     attendanceRecords: [],
     payrollRules: createDefaultPayrollRules(),
@@ -550,6 +552,7 @@ function normalizeDatabase(db) {
     "scheduleConstraints",
     "teacherScheduleRules",
     "scheduleChangeRequests",
+    "terms",
     "lessonInstances",
     "attendanceRecords",
     "scheduleDrafts",
@@ -573,9 +576,24 @@ function normalizeDatabase(db) {
     db.teacherAssignments = createTeacherAssignments(db.teachers || [], db.classes || []);
     changed = true;
   }
+  if (ensureTerms(db)) {
+    changed = true;
+  }
   if (normalizeTeacherAssignments(db)) {
     changed = true;
   }
+
+  const activeTerm = currentTerm(db);
+  ["scheduleDrafts", "scheduleVersions", "lessonInstances", "workloadConfirmations", "payrollDetails"].forEach((key) => {
+    (db[key] || []).forEach((item) => {
+      if (!item.termId) {
+        const term = item.month ? termForMonth(db, item.month) : activeTerm;
+        item.termId = term.id;
+        item.termName = term.name;
+        changed = true;
+      }
+    });
+  });
 
   if (!db.notifications.length) {
     const now = new Date().toISOString();
@@ -716,8 +734,8 @@ function normalizeDatabase(db) {
     db.meta.productionLessonSourceMigrationAt = new Date().toISOString();
     changed = true;
   }
-  if (!db.meta.schemaVersion || db.meta.schemaVersion < 2) {
-    db.meta.schemaVersion = 2;
+  if (!db.meta.schemaVersion || db.meta.schemaVersion < 3) {
+    db.meta.schemaVersion = 3;
     db.meta.updatedAt = new Date().toISOString();
     changed = true;
   }
@@ -832,6 +850,13 @@ export function createSession(db, account, token, context = {}) {
     sessionId: session.id,
   });
   return session;
+}
+
+export function queryTerms(db) {
+  return {
+    currentTerm: currentTerm(db),
+    terms: listTerms(db),
+  };
 }
 
 export function findActiveSession(db, token = "") {
@@ -1618,13 +1643,15 @@ function publicLesson(db, lesson) {
   };
 }
 
-export function teacherLessonsForWeek(db, teacherId, weekStart) {
+export function teacherLessonsForWeek(db, teacherId, weekStart, options = {}) {
+  const term = currentTerm(db, options.termId);
   const startKey = weekStart || "2026-06-15";
   const endKey = addDays(startKey, 6);
   return db.lessonInstances
     .filter(
       (lesson) =>
         lesson.teacherId === teacherId &&
+        (!lesson.termId || lesson.termId === term.id) &&
         lesson.date >= startKey &&
         lesson.date <= endKey,
     )
@@ -1632,10 +1659,11 @@ export function teacherLessonsForWeek(db, teacherId, weekStart) {
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
 
-export function teacherScheduleWeeks(db, teacherId) {
+export function teacherScheduleWeeks(db, teacherId, options = {}) {
+  const term = currentTerm(db, options.termId);
   const weekMap = new Map();
   db.lessonInstances
-    .filter((lesson) => lesson.teacherId === teacherId)
+    .filter((lesson) => lesson.teacherId === teacherId && (!lesson.termId || lesson.termId === term.id))
     .forEach((lesson) => {
       const weekStart = startOfNaturalWeek(lesson.date);
       const current = weekMap.get(weekStart) || {
@@ -1713,17 +1741,23 @@ export function queryTeacherAttendanceRecords(db, teacherId, month = "2026-06") 
 export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   const teacher = findTeacher(db, teacherId);
   if (!teacher) return null;
+  const term = termForMonth(db, month);
 
   const lessons = db.lessonInstances
     .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
-  return calculateDedicatedTeacherPayroll({
+  const payroll = calculateDedicatedTeacherPayroll({
     teacher,
     lessons,
     month,
     payrollRules: db.payrollRules,
     getRoomName: (lesson) => lessonRoomName(db, lesson),
   });
+  return {
+    ...payroll,
+    termId: term.id,
+    termName: term.name,
+  };
 }
 
 function ensurePayrollDetails(db) {
@@ -1784,6 +1818,8 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
     generated: generated
       ? {
           id: generated.id,
+          termId: generated.termId || "",
+          termName: generated.termName || "",
           status: generated.status,
           generatedAt: generated.generatedAt,
           generatedByName: generated.generatedByName,
@@ -1819,10 +1855,13 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
   }
 
   const now = new Date().toISOString();
+  const term = termForMonth(db, month);
   const generated = {
     id: existing?.id || `PAY-${teacherId}-${month.replace("-", "")}`,
     teacherId,
     month,
+    termId: term.id,
+    termName: term.name,
     status: "generated",
     generatedAt: now,
     generatedByAccountId: actorAccount?.id || "",
@@ -1864,6 +1903,8 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     actorName: actorAccount?.name || "",
     teacherId,
     month,
+    termId: term.id,
+    termName: term.name,
     grossPay: detail.grossPay,
     netPay: detail.netPay,
   });
@@ -2209,6 +2250,8 @@ function publicWorkloadConfirmation(confirmation) {
     id: confirmation.id,
     teacherId: confirmation.teacherId,
     month: confirmation.month,
+    termId: confirmation.termId || "",
+    termName: confirmation.termName || "",
     status: confirmation.status,
     stage: confirmation.stage,
     confirmedAt: confirmation.confirmedAt,
@@ -2231,6 +2274,7 @@ export function findMonthlyWorkloadConfirmation(db, teacherId, month = "2026-06"
 export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
   const teacher = findTeacher(db, teacherId);
   if (!teacher) return null;
+  const term = termForMonth(db, month);
 
   const lessons = db.lessonInstances
     .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
@@ -2287,6 +2331,8 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
   return {
     teacher,
     month,
+    termId: term.id,
+    termName: term.name,
     generatedAt: new Date().toISOString(),
     summary: {
       plannedUnits: lessons.reduce((sum, lesson) => sum + lesson.units, 0),
@@ -2316,6 +2362,7 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
 
   const confirmations = ensureWorkloadConfirmations(db);
   const existing = findMonthlyWorkloadConfirmation(db, teacherId, month);
+  const term = termForMonth(db, month);
   if (existing?.status === "locked") {
     const error = new Error("本月工作量已锁定，不能重复确认");
     error.statusCode = 409;
@@ -2327,6 +2374,8 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
     id: existing?.id || `WLC-${teacherId}-${month.replace("-", "")}`,
     teacherId,
     month,
+    termId: term.id,
+    termName: term.name,
     status: "teacher_confirmed",
     stage: 1,
     confirmedAt: now,
@@ -2359,6 +2408,8 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
     actorName: actorAccount?.name || workload.teacher.name,
     teacherId,
     month,
+    termId: term.id,
+    termName: term.name,
   });
   return teacherMonthlyWorkload(db, teacherId, month);
 }

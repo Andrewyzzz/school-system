@@ -11,9 +11,12 @@ import {
   lockTeacherPayrollDetail,
   markNotificationRead,
   publicAccount,
+  queryTerms,
   queryNotifications,
   reviewTeacherPayrollDetail,
   revokeSession,
+  teacherLessonsForWeek,
+  teacherScheduleWeeks,
   unlockTeacherPayrollDetail,
   updateTeacherAssignment,
   updateTeacherSalaryProfile,
@@ -119,6 +122,9 @@ const teacher = db.teachers[0];
 const teacherAccount = db.accounts.find((account) => account.teacherId === teacher.id);
 const admin = actor(db, "admin");
 const finance = actor(db, "finance");
+const termContext = queryTerms(db);
+assert.equal(termContext.currentTerm.id, "TERM-2026-PHASE1");
+assert.equal(termContext.currentTerm.current, true);
 
 assert.equal(db.accounts.filter((account) => account.role === "teacher").length >= 1000, true);
 const teacherPublicAccount = publicAccount(teacherAccount, db);
@@ -175,6 +181,8 @@ const schedule = generateScheduleDraft(
   },
   admin,
 );
+assert.equal(schedule.config.termId, termContext.currentTerm.id);
+assert.equal(schedule.draft.termId, termContext.currentTerm.id);
 assert.equal(schedule.draft.conflicts.length, 0);
 assert.notEqual(schedule.draft.precheck.status, "blocked");
 assert.ok(schedule.draft.precheck.checks.length >= 1);
@@ -301,8 +309,20 @@ draftToProtect.generatedLessonCount = originalGeneratedCount;
 draftToProtect.unassignedCount = originalUnassignedCount;
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.ok(published.lessons.length > 0);
+assert.equal(published.version.termId, termContext.currentTerm.id);
+assert.ok(published.lessons.every((lesson) => lesson.termId === termContext.currentTerm.id));
 assert.ok(published.version?.id, "发布后应生成正式版本快照");
 assert.ok(published.lessons.every((lesson) => lesson.scheduleVersionId === published.version.id));
+assert.ok(
+  teacherScheduleWeeks(db, published.lessons[0].teacherId, { termId: termContext.currentTerm.id }).length >= 1,
+  "老师端应能按当前学期读取已发布周次",
+);
+assert.ok(
+  teacherLessonsForWeek(db, published.lessons[0].teacherId, published.config.weekStart, {
+    termId: termContext.currentTerm.id,
+  }).every((lesson) => lesson.termId === termContext.currentTerm.id),
+  "老师端周课表应限定在当前学期",
+);
 assert.ok(
   published.lessons.filter((lesson) => lesson.subjectId === "pe").every((lesson) => lesson.roomType === "playground"),
   "发布后的体育课应保留操场类型",

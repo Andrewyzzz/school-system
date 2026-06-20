@@ -214,6 +214,10 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
   }));
 
   return {
+    termId: "TERM-2026-PHASE1",
+    termName: "2026年第一阶段试运行学期",
+    termStartDate: "2026-06-15",
+    termEndDate: "2026-07-31",
     divisionId: division.id,
     divisionName: division.name,
     gradeId: grade.id,
@@ -2887,6 +2891,7 @@ function ensureFinanceTeacherDetail(teacherId, { generatePayroll = false } = {})
 
 function backendSchedulingOptions() {
   return {
+    termId: state.schedulingConfig.termId || "",
     divisionId: state.selectedSchedulingDivisionId,
     gradeId: state.selectedSchedulingGradeId,
   };
@@ -5127,7 +5132,7 @@ function renderAdminScheduling() {
   );
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
-    `当前为${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
+    `当前为${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
   document.querySelector("#adminScopeText").textContent =
     `${config.divisionName}${config.gradeName} ${config.classCount} 个班，${config.subjects
       .map((subject) => subject.name)

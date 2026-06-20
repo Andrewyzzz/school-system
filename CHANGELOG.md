@@ -2,6 +2,31 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-20 - 增加第一阶段学期上下文
+
+- 类型：功能 / 后端 / 前端 / 测试 / 文档
+- 影响范围：学期制流程 / 行政排课 / 老师课表 / 月度工作量 / 薪资结算
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/server.js`
+  - `node --check server/storage.js`
+  - `node --check server/scheduling.js`
+  - `node --check tests/phase1-production.test.js`
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`（3 个规模均为 OR-Tools CP-SAT，fallback 0，冲突 0，未排 0）
+- 内容：
+  - 新增学期模型和 `GET /api/terms`，当前默认学期为 `2026年第一阶段试运行学期`。
+  - 排课配置、草稿、正式版本和发布课次增加 `termId`、`termName`，按“学期 + 学部 + 年级 + 周次”隔离数据。
+  - 老师端课表默认读取当前学期的已发布周次，避免历史学期课表混入当前课表。
+  - 月度工作量确认和教师薪资明细携带学期上下文，保留按月份结算的财务口径。
+  - 第一阶段 TODO 增加“学期制闭环”，记录后续学期管理页面、新学期复制配置和历史归档策略。
+- 注意事项：
+  - 当前只启用一个默认学期，尚未开放前端新建/切换/归档学期；后续正式多学期运营时需要补学期管理页面。
+
 ## 2026-06-20 - 增加行政排课预检与诊断面板
 
 - 类型：功能 / 前端 / 后端 / 测试 / 排课

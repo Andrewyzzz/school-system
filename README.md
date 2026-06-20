@@ -54,6 +54,7 @@ http://127.0.0.1:4173/api/health
 
 - `POST /api/auth/login`：登录，返回 Token
 - `GET /api/me`：查看当前账号
+- `GET /api/terms`：读取当前学期和学期列表，排课、老师课表、月度工作量和薪资结算共用同一学期上下文
 - `POST /api/auth/change-password`：当前账号修改密码
 - `GET /api/reference` / `GET /api/reference/:kind`：读取学部、年级、班级、科目、教室、薪资规则和任课关系等基础配置
 - `GET /api/payroll-rules` / `PATCH /api/payroll-rules`：读取和更新任课老师薪资规则
@@ -63,7 +64,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/import/preview`：行政预览并校验教师导入 CSV
 - `POST /api/teachers/import/commit`：行政确认导入教师档案和老师账号
 - `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
-- `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
+- `GET /api/scheduling/config`：行政读取当前学期下的排课学部、年级、班级、科目、老师和当前草稿
 - `GET /api/scheduling/precheck`：行政执行生成前排课预检，返回阻塞项、提醒项和修复建议
 - `POST /api/scheduling/course-rules`：行政保存年级课程、周课时、每节时长和课程级排课限制
 - `POST /api/scheduling/generate`：行政同步生成无教师/班级/教室时间冲突的排课草稿，保留用于兼容和测试
@@ -72,7 +73,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/scheduling/adjust`：行政调整草稿中的任课老师、日期、节次或教室，并重新校验冲突
 - `POST /api/scheduling/lock`：行政锁定或解锁草稿中的某节课，重排时保留已锁定课节
 - `POST /api/scheduling/regenerate-unlocked`：行政保留已锁定课节，重新自动排未锁定课程
-- `POST /api/scheduling/publish`：行政确认发布课表，生成老师端课次任务
+- `POST /api/scheduling/publish`：行政确认发布课表，生成带学期归属的老师端课次任务
 - `GET /api/classrooms/:roomId/dynamic-qr`：教室电脑按大屏密钥获取短时有效动态签到二维码
 - `GET /api/classrooms/:roomId/qrcode`：行政查看教室大屏地址和二维码绑定信息
 - `GET /api/teachers/me`：老师查看本人教师信息

@@ -51,6 +51,7 @@ import {
   queryPersonnel,
   queryTeacherAttendanceRecords,
   queryTeacherAssignments,
+  queryTerms,
   queryTeachers,
   referenceCatalog,
   resetAccountPassword,
@@ -347,6 +348,13 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db);
       if (!auth) return;
       sendJson(res, 200, referenceCatalog(db));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/terms") {
+      const auth = requireAuth(req, res, db);
+      if (!auth) return;
+      sendJson(res, 200, queryTerms(db));
       return;
     }
 
@@ -746,7 +754,10 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts[3] === "schedule") {
-        const availableWeeks = teacherScheduleWeeks(db, teacherId);
+        const termId = url.searchParams.get("termId") || "";
+        const termContext = queryTerms(db);
+        const activeTermId = termId || termContext.currentTerm.id;
+        const availableWeeks = teacherScheduleWeeks(db, teacherId, { termId: activeTermId });
         const requestedWeekStart = url.searchParams.get("weekStart");
         const weekStart =
           requestedWeekStart && requestedWeekStart !== "auto"
@@ -754,9 +765,10 @@ async function handleApi(req, res, db, url) {
             : availableWeeks[0]?.weekStart || "2026-06-15";
         sendJson(res, 200, {
           teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher,
+          currentTerm: termContext.currentTerm,
           weekStart,
           availableWeeks,
-          lessons: teacherLessonsForWeek(db, teacherId, weekStart),
+          lessons: teacherLessonsForWeek(db, teacherId, weekStart, { termId: activeTermId }),
         });
         return;
       }
