@@ -31,6 +31,7 @@ function scheduleJobMessage(job) {
   if (job.status === "queued") return "排课任务已进入队列";
   if (job.status === "running") return job.message || "正在生成排课草稿";
   if (job.status === "completed") return "排课草稿已生成";
+  if (job.status === "cancelled") return "排课任务已取消";
   if (job.status === "failed") return job.error?.message || "排课任务失败";
   return job.message || "";
 }
@@ -83,6 +84,8 @@ function publicScheduleGenerationJob(job, options = {}) {
     updatedAt: job.updatedAt,
     completedAt: job.completedAt,
     failedAt: job.failedAt,
+    cancelledAt: job.cancelledAt,
+    cancelledByAccountId: job.cancelledByAccountId,
     createdByAccountId: job.createdByAccountId,
     error: job.error || null,
     summary: job.result?.draft
@@ -139,13 +142,18 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
     startedAt: "",
     completedAt: "",
     failedAt: "",
+    cancelledAt: "",
+    cancelledByAccountId: "",
     createdByAccountId: actorAccount?.id || "",
     error: null,
     result: null,
   };
   jobs.set(job.id, job);
 
-  setTimeout(() => {
+  job.startTimer = setTimeout(() => {
+    delete job.startTimer;
+    if (job.status === "cancelled") return;
+
     job.status = "running";
     job.phase = "starting";
     job.progress = 10;
@@ -163,6 +171,8 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
     job.worker = worker;
 
     worker.on("message", async (message) => {
+      if (job.status === "cancelled") return;
+
       if (message.type === "progress") {
         job.phase = message.phase || job.phase;
         job.progress = Number(message.progress || job.progress);
@@ -206,6 +216,8 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
     });
 
     worker.on("error", (error) => {
+      if (job.status === "cancelled") return;
+
       job.status = "failed";
       job.phase = "worker_error";
       job.progress = 100;
@@ -219,6 +231,7 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
 
     worker.on("exit", (code) => {
       delete job.worker;
+      if (job.status === "cancelled") return;
       if (code !== 0 && !["completed", "failed"].includes(job.status)) {
         job.status = "failed";
         job.phase = "worker_exit";
@@ -237,4 +250,41 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
     job,
     reused: false,
   };
+}
+
+export async function cancelScheduleGenerationJob(jobId, actorAccount = null) {
+  pruneScheduleJobs();
+  const job = jobs.get(jobId) || null;
+  if (!job) return { job: null, cancelled: false, reason: "missing" };
+  if (!["queued", "running"].includes(job.status)) {
+    return { job, cancelled: false, reason: "not_cancellable" };
+  }
+
+  if (job.startTimer) {
+    clearTimeout(job.startTimer);
+    delete job.startTimer;
+  }
+
+  const worker = job.worker || null;
+  job.status = "cancelled";
+  job.phase = "cancelled";
+  job.progress = 100;
+  job.message = "排课任务已取消";
+  job.cancelledAt = nowIso();
+  job.cancelledByAccountId = actorAccount?.id || "";
+  job.updatedAt = job.cancelledAt;
+  job.error = null;
+
+  if (worker) {
+    try {
+      await worker.terminate();
+    } catch (error) {
+      job.error = {
+        message: error?.message || "排课任务取消时终止 worker 失败",
+        details: null,
+      };
+    }
+  }
+
+  return { job, cancelled: true, reason: "cancelled" };
 }

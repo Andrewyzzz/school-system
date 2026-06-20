@@ -2,6 +2,26 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-20 - 支持取消异步排课任务
+
+- 类型：功能 / 前端 / 后端 / 测试 / 排课
+- 影响范围：行政排课 / 异步任务 / worker / 前端进度 / 文档
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/server.js`
+  - `node --check server/schedulingJobs.js`
+  - `node --check tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-jobs.test.js`
+- 内容：
+  - 新增 `POST /api/scheduling/generate-jobs/:jobId/cancel`，支持取消 queued/running 状态的排课任务。
+  - 后端取消时会清理排队启动定时器或终止正在运行的 worker，任务状态变为 `cancelled`。
+  - 前端排课进度卡新增“取消排课”按钮，取消后停止轮询并展示取消状态。
+  - 异步任务测试新增取消场景，验证取消任务不会保存数据库，也不会写入排课草稿。
+- 注意事项：
+  - 当前取消是单机内存任务取消；后续如果升级为数据库/Redis 任务表，需要把 cancelled 状态持久化。
+
 ## 2026-06-20 - 增加排课异步任务与前端进度轮询
 
 - 类型：功能 / 前端 / 后端 / 测试 / 排课

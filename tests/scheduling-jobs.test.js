@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createInitialData, updateTeacherAssignment } from "../server/storage.js";
 import { updateGradeClassStructure } from "../server/scheduling.js";
 import {
+  cancelScheduleGenerationJob,
   getScheduleGenerationJob,
   scheduleGenerationJobResponse,
   startScheduleGenerationJob,
@@ -91,5 +92,47 @@ assert.ok(response.result?.draft, "expected completed job response to include dr
 assert.equal(response.summary.unassignedCount, 0);
 assert.equal(response.summary.conflictCount, 0);
 assert.ok(db.scheduleDrafts.some((draft) => draft.id === response.result.draft.id), "expected draft to be applied to main database");
+
+const cancelDb = createInitialData({ teacherCount: 160 });
+const cancelAdmin = actor(cancelDb, "admin");
+updateGradeClassStructure(
+  cancelDb,
+  {
+    stageId: "primary",
+    grade: 1,
+    regularCount: 1,
+    experimentalCount: 0,
+  },
+  cancelAdmin,
+);
+configureClassTeachers(cancelDb, { stageId: "primary", grade: 1 }, cancelAdmin);
+
+let cancelSaved = false;
+const initialCancelDraftCount = cancelDb.scheduleDrafts.length;
+const { job: cancellableJob } = startScheduleGenerationJob(
+  cancelDb,
+  {
+    divisionId: "elementary",
+    gradeId: "elementary-g1",
+  },
+  cancelAdmin,
+  {
+    saveDatabase: async () => {
+      cancelSaved = true;
+    },
+  },
+);
+const cancelResult = await cancelScheduleGenerationJob(cancellableJob.id, cancelAdmin);
+assert.equal(cancelResult.cancelled, true);
+assert.equal(cancelResult.job.status, "cancelled");
+assert.equal(cancelResult.job.cancelledByAccountId, cancelAdmin.id);
+
+await new Promise((resolve) => {
+  setTimeout(resolve, 50);
+});
+
+assert.equal(cancelSaved, false, "cancelled job should not persist database");
+assert.equal(cancelDb.scheduleDrafts.length, initialCancelDraftCount, "cancelled job should not write schedule drafts");
+assert.equal(scheduleGenerationJobResponse(cancelResult.job).status, "cancelled");
 
 console.log("scheduling job checks passed");

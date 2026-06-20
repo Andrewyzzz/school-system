@@ -6,6 +6,7 @@ import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAtte
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
+  cancelScheduleGenerationJob,
   getScheduleGenerationJob,
   scheduleGenerationJobResponse,
   startScheduleGenerationJob,
@@ -544,6 +545,22 @@ async function handleApi(req, res, db, url) {
       });
       sendJson(res, reused ? 200 : 202, {
         job: scheduleGenerationJobResponse(job),
+      });
+      return;
+    }
+
+    if (req.method === "POST" && parts[0] === "api" && parts[1] === "scheduling" && parts[2] === "generate-jobs" && parts[3] && parts[4] === "cancel") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = await cancelScheduleGenerationJob(decodeURIComponent(parts[3]), auth.account);
+      if (!result.job) {
+        sendError(res, 404, "排课任务不存在或已过期");
+        return;
+      }
+      sendJson(res, 200, {
+        job: scheduleGenerationJobResponse(result.job),
+        cancelled: result.cancelled,
+        reason: result.reason,
       });
       return;
     }

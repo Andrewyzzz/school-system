@@ -2964,8 +2964,13 @@ function schedulingJobProgressText(job) {
       ? `已完成 · ${summary.generatedLessonCount}/${summary.requiredLessonCount} 节 · 冲突 ${summary.conflictCount}`
       : "已完成";
   }
+  if (job.status === "cancelled") return "已取消";
   if (job.status === "failed") return job.error?.message || "排课任务失败";
   return job.message || "";
+}
+
+function schedulingJobIsActive(job) {
+  return job && ["queued", "running"].includes(job.status);
 }
 
 async function pollBackendScheduleJob(jobId) {
@@ -2976,7 +2981,7 @@ async function pollBackendScheduleJob(jobId) {
     const job = result.job || null;
     schedulingBackendState = {
       ...schedulingBackendState,
-      loading: job ? ["queued", "running"].includes(job.status) : false,
+      loading: schedulingJobIsActive(job),
       error: job?.status === "failed" ? job.error?.message || "后端生成排课失败" : "",
       job,
     };
@@ -3000,7 +3005,14 @@ async function pollBackendScheduleJob(jobId) {
       return;
     }
 
-    if (job) {
+    if (job?.status === "cancelled") {
+      clearSchedulingJobPolling();
+      showToast("排课任务已取消");
+      render();
+      return;
+    }
+
+    if (schedulingJobIsActive(job)) {
       renderAdminScheduling();
       schedulingJobPollTimer = window.setTimeout(() => pollBackendScheduleJob(jobId), 1200);
     }
@@ -3015,6 +3027,46 @@ async function pollBackendScheduleJob(jobId) {
     showToast(schedulingBackendState.error);
     render();
   }
+}
+
+async function cancelBackendScheduleJob() {
+  const jobId = schedulingBackendState.job?.id;
+  if (!jobId || !schedulingJobIsActive(schedulingBackendState.job)) {
+    showToast("当前没有可取消的排课任务");
+    return;
+  }
+
+  clearSchedulingJobPolling();
+  schedulingBackendState = {
+    ...schedulingBackendState,
+    loading: true,
+    error: "",
+  };
+  renderAdminScheduling();
+
+  try {
+    const result = await apiRequest(`/api/scheduling/generate-jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+    });
+    const job = result.job || null;
+    schedulingBackendState = {
+      loaded: true,
+      loading: schedulingJobIsActive(job),
+      error: "",
+      job,
+    };
+    showToast(result.cancelled ? "排课任务已取消" : "排课任务当前不能取消");
+  } catch (error) {
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "取消排课任务失败",
+      job: schedulingBackendState.job || null,
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
 }
 
 async function generateBackendSchedule() {
@@ -5000,6 +5052,9 @@ function renderAdminScheduling() {
     } else if (schedulingBackendState.error) {
       status.textContent = "后端异常";
       status.className = "status-pill warning";
+    } else if (schedulingBackendState.job?.status === "cancelled") {
+      status.textContent = "排课已取消";
+      status.className = "status-pill warning";
     } else if (schedulingBackendState.loaded) {
       status.textContent = `${scheduleStatusText(draft.status)} · 后端`;
     }
@@ -5072,10 +5127,15 @@ function renderAdminScheduling() {
         </article>`
       : "";
   const schedulingJobHtml =
-    schedulingBackendState.loading && schedulingBackendState.job
+    schedulingBackendState.job && (schedulingJobIsActive(schedulingBackendState.job) || schedulingBackendState.job.status === "cancelled")
       ? `<div class="check-success schedule-job-progress">
           <strong>${escapeHtml(schedulingJobProgressText(schedulingBackendState.job))}</strong>
-          <span>任务号 ${escapeHtml(schedulingBackendState.job.id)}，页面会自动刷新排课结果。</span>
+          <span>任务号 ${escapeHtml(schedulingBackendState.job.id)}${schedulingJobIsActive(schedulingBackendState.job) ? "，页面会自动刷新排课结果。" : "，可重新发起排课。"}</span>
+          ${
+            schedulingJobIsActive(schedulingBackendState.job)
+              ? `<button class="ghost-button" data-cancel-schedule-job type="button">取消排课</button>`
+              : ""
+          }
         </div>`
       : "";
   document.querySelector("#conflictList").innerHTML =
@@ -8435,6 +8495,12 @@ document.addEventListener("click", async (event) => {
   const rollbackVersionButton = event.target.closest("[data-rollback-schedule-version]");
   if (rollbackVersionButton) {
     await rollbackBackendScheduleVersion(rollbackVersionButton.dataset.rollbackScheduleVersion);
+    return;
+  }
+
+  const cancelScheduleJobButton = event.target.closest("[data-cancel-schedule-job]");
+  if (cancelScheduleJobButton) {
+    await cancelBackendScheduleJob();
     return;
   }
 
