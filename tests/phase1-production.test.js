@@ -26,6 +26,7 @@ import {
   generateScheduleDraft,
   listScheduleVersions,
   publishScheduleDraft,
+  previewSchedulePrecheck,
   regenerateUnlockedScheduleAssignments,
   rollbackScheduleVersion,
   updateGradeClassStructure,
@@ -152,6 +153,16 @@ assert.throws(
       admin,
     ),
   /请先补齐任课老师配置/,
+);
+
+const missingTeacherPrecheck = previewSchedulePrecheck(db, {
+  divisionId: "elementary",
+  gradeId: "elementary-g1",
+}).precheck;
+assert.equal(missingTeacherPrecheck.status, "blocked");
+assert.ok(
+  missingTeacherPrecheck.checks.some((check) => check.key === "class_subject_teacher_missing"),
+  "预检应提前提示班级任课老师未配置",
 );
 
 configureClassTeachers(db, { stageId: "primary", grade: 1 }, admin);

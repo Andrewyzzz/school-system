@@ -2214,6 +2214,19 @@ export function buildSchedulePrecheck(config, options = {}) {
     );
   }
 
+  const missingTeacherCells = missingTeacherAssignmentCells(config);
+  if (missingTeacherCells.length) {
+    checks.push(
+      precheckItem(
+        "error",
+        "class_subject_teacher_missing",
+        "存在班级任课老师未配置",
+        `还有 ${missingTeacherCells.length} 个班级课程没有指定任课老师，请先在“班级任课老师”中补齐。`,
+        { missingTeacherAssignments: missingTeacherCells.slice(0, 20), missingCount: missingTeacherCells.length },
+      ),
+    );
+  }
+
   const weeklyPerClass = weeklyLessonsPerClass(config);
   if (weeklyPerClass > slots.length) {
     checks.push(
@@ -2446,6 +2459,16 @@ export function buildSchedulePrecheck(config, options = {}) {
     taskCount: tasks.length,
     requiredLessonCount: requiredScheduleLessonCount(config),
     checks,
+  };
+}
+
+export function previewSchedulePrecheck(db, options = {}) {
+  ensureSchedulingStore(db);
+  const config = buildSchedulingConfig(db, options);
+  const externalAssignments = globalTeacherBusyAssignments(db, config);
+  return {
+    config,
+    precheck: buildSchedulePrecheck(config, { externalAssignments }),
   };
 }
 

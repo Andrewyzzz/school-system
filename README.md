@@ -64,6 +64,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/import/commit`：行政确认导入教师档案和老师账号
 - `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
 - `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
+- `GET /api/scheduling/precheck`：行政执行生成前排课预检，返回阻塞项、提醒项和修复建议
 - `POST /api/scheduling/course-rules`：行政保存年级课程、周课时、每节时长和课程级排课限制
 - `POST /api/scheduling/generate`：行政同步生成无教师/班级/教室时间冲突的排课草稿，保留用于兼容和测试
 - `POST /api/scheduling/generate-jobs` / `GET /api/scheduling/generate-jobs/:jobId`：行政异步创建排课任务并轮询进度，正式页面使用该方式生成大规模课表

@@ -14,7 +14,6 @@ import {
 import {
   approveScheduleChangeRequest,
   adjustScheduleAssignment,
-  buildSchedulingConfig,
   createScheduleChangeRequest,
   createScheduleConstraint,
   createGradeCourse,
@@ -23,6 +22,7 @@ import {
   findScheduleDraft,
   generateScheduleDraft,
   listScheduleVersions,
+  previewSchedulePrecheck,
   publishScheduleDraft,
   regenerateUnlockedScheduleAssignments,
   rollbackScheduleVersion,
@@ -220,6 +220,19 @@ function teacherWorkloadWithoutSalaryDetails(workload) {
     pendingLines: workload.pendingLines || [],
     exceptionLines: workload.exceptionLines || [],
     confirmation: workload.confirmation || null,
+  };
+}
+
+function attachSchedulingPrecheck(db, result) {
+  if (!result?.config) return result;
+  const precheckResult = previewSchedulePrecheck(db, {
+    divisionId: result.config.divisionId,
+    gradeId: result.config.gradeId,
+  });
+  return {
+    ...result,
+    config: precheckResult.config,
+    precheck: precheckResult.precheck,
   };
 }
 
@@ -444,7 +457,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = updateGradeCourseRules(db, body, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -454,7 +467,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = createGradeCourse(db, body, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -471,7 +484,7 @@ async function handleApi(req, res, db, url) {
         auth.account,
       );
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -481,7 +494,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = createScheduleConstraint(db, body, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -490,7 +503,7 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const result = deleteScheduleConstraint(db, { constraintId: decodeURIComponent(parts[3]) }, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -500,7 +513,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = updateTeacherScheduleRule(db, body, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 
@@ -508,10 +521,24 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const options = Object.fromEntries(url.searchParams);
+      const precheckResult = previewSchedulePrecheck(db, options);
       sendJson(res, 200, {
-        config: buildSchedulingConfig(db, options),
+        config: precheckResult.config,
         draft: findScheduleDraft(db, options),
         versions: listScheduleVersions(db, options),
+        precheck: precheckResult.precheck,
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/scheduling/precheck") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const options = Object.fromEntries(url.searchParams);
+      const result = previewSchedulePrecheck(db, options);
+      sendJson(res, 200, {
+        config: result.config,
+        precheck: result.precheck,
       });
       return;
     }
@@ -522,7 +549,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = updateGradeClassStructure(db, body, auth.account);
       await saveDatabase(db);
-      sendJson(res, 200, result);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
     }
 

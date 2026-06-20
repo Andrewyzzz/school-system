@@ -561,8 +561,39 @@
           <section class="panel schedule-generate-panel">
             <div class="panel-heading">
               <div>
+                <h2>排课预检</h2>
+                <p>生成前先检查班级、课程、老师、教室和硬约束是否具备可行条件。</p>
+              </div>
+              <span class="status-pill" id="schedulePrecheckStatus">等待预检</span>
+            </div>
+            <div class="summary-grid admin-scope-summary">
+              <article class="metric">
+                <span>阻塞项</span>
+                <strong id="schedulePrecheckBlockingCount">0</strong>
+                <small>必须处理后才能生成</small>
+              </article>
+              <article class="metric">
+                <span>提醒项</span>
+                <strong id="schedulePrecheckWarningCount">0</strong>
+                <small>可能影响质量或耗时</small>
+              </article>
+              <article class="metric">
+                <span>课时任务</span>
+                <strong id="schedulePrecheckTaskCount">0</strong>
+                <small id="schedulePrecheckLessonCount">等待读取</small>
+              </article>
+            </div>
+            <div class="diagnostic-list" id="schedulePrecheckList"></div>
+            <div class="admin-schedule-actions compact-actions">
+              <button class="ghost-button" id="refreshSchedulePrecheck" type="button">重新预检</button>
+            </div>
+          </section>
+
+          <section class="panel schedule-generate-panel">
+            <div class="panel-heading">
+              <div>
                 <h2>生成与发布</h2>
-                <p>确认课程、硬约束和每个班的任课老师后，一键生成排课草稿，再发布到老师端。</p>
+                <p>预检通过后生成排课草稿，再发布到老师端。</p>
               </div>
             </div>
             <div class="rule-list">

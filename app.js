@@ -771,6 +771,7 @@ let schedulingBackendState = {
   loading: false,
   error: "",
   job: null,
+  precheck: null,
 };
 let schedulingJobPollTimer = null;
 let classroomScreenState = {
@@ -2915,6 +2916,18 @@ function applyBackendScheduleResult(result) {
   if (Array.isArray(result.versions)) {
     state.scheduleVersions = result.versions;
   }
+
+  if (result.precheck) {
+    schedulingBackendState = {
+      ...schedulingBackendState,
+      precheck: result.precheck,
+    };
+  } else if (result.draft?.precheck) {
+    schedulingBackendState = {
+      ...schedulingBackendState,
+      precheck: result.draft.precheck,
+    };
+  }
 }
 
 async function loadBackendSchedulingContext(options = backendSchedulingOptions()) {
@@ -2926,6 +2939,7 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
     const result = await apiRequest(`/api/scheduling/config?${params.toString()}`);
     applyBackendScheduleResult(result);
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: false,
       error: "",
@@ -2933,6 +2947,7 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
     };
   } catch (error) {
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: false,
       error: error.message || "后端排课配置加载失败",
@@ -2944,6 +2959,35 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
   if (state.activeView === "adminScheduling") {
     render();
   }
+}
+
+async function refreshBackendSchedulePrecheck() {
+  if (!backendMode() || currentRole() !== "admin") return;
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  renderAdminScheduling();
+
+  try {
+    const params = new URLSearchParams(backendSchedulingOptions());
+    const result = await apiRequest(`/api/scheduling/precheck?${params.toString()}`);
+    applyBackendScheduleResult(result);
+    schedulingBackendState = {
+      ...schedulingBackendState,
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+    showToast(result.precheck?.blockingCount ? "预检发现阻塞项" : "排课预检已通过");
+  } catch (error) {
+    schedulingBackendState = {
+      ...schedulingBackendState,
+      loaded: true,
+      loading: false,
+      error: error.message || "排课预检失败",
+    };
+    showToast(schedulingBackendState.error);
+  }
+
+  render();
 }
 
 function clearSchedulingJobPolling() {
@@ -2989,7 +3033,7 @@ async function pollBackendScheduleJob(jobId) {
     if (job?.status === "completed") {
       clearSchedulingJobPolling();
       if (job.result) applyBackendScheduleResult(job.result);
-      schedulingBackendState = { loaded: true, loading: false, error: "", job };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "", job };
       const summary = job.summary || {};
       showToast(
         `${summary.solverAlgorithm === "ortools-cp-sat" ? "CP-SAT" : "高级算法"}已生成 ${summary.generatedLessonCount || 0} 节课表`,
@@ -3019,6 +3063,7 @@ async function pollBackendScheduleJob(jobId) {
   } catch (error) {
     clearSchedulingJobPolling();
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: false,
       error: error.message || "排课任务状态查询失败",
@@ -3050,6 +3095,7 @@ async function cancelBackendScheduleJob() {
     });
     const job = result.job || null;
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: schedulingJobIsActive(job),
       error: "",
@@ -3058,6 +3104,7 @@ async function cancelBackendScheduleJob() {
     showToast(result.cancelled ? "排课任务已取消" : "排课任务当前不能取消");
   } catch (error) {
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: false,
       error: error.message || "取消排课任务失败",
@@ -3081,6 +3128,7 @@ async function generateBackendSchedule() {
     });
     const job = result.job || null;
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: true,
       error: "",
@@ -3093,6 +3141,7 @@ async function generateBackendSchedule() {
     }
   } catch (error) {
     schedulingBackendState = {
+      ...schedulingBackendState,
       loaded: true,
       loading: false,
       error: error.message || "后端生成排课失败",
@@ -3114,7 +3163,7 @@ async function publishBackendSchedule() {
       body: backendSchedulingOptions(),
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     await loadBackendNotifications();
     showToast(`后端已发布 ${result.lessons?.length || 0} 节课到老师端`);
   } catch (error) {
@@ -3143,7 +3192,7 @@ async function rollbackBackendScheduleVersion(versionId) {
       },
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     await loadBackendNotifications();
     showToast(`已回滚到 V${result.version?.versionNumber || ""}，老师端课表已同步`);
   } catch (error) {
@@ -3353,7 +3402,7 @@ async function saveAdminClassStructure() {
         },
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       showToast("班级结构已保存，请重新配置老师并生成排课");
     } catch (error) {
       schedulingBackendState = {
@@ -3392,7 +3441,7 @@ async function saveAdminCourseRules() {
         },
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       showToast("课程规则已保存，重新生成排课时生效");
     } catch (error) {
       schedulingBackendState = {
@@ -3497,7 +3546,7 @@ async function addAdminGradeCourse() {
         },
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       document.querySelector("#newCourseName").value = "";
       document.querySelector("#newCourseWeekly").value = "2";
       document.querySelector("#newCourseDuration").value = "40";
@@ -3537,7 +3586,7 @@ async function deleteAdminGradeCourse(subjectId) {
         method: "DELETE",
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       showToast("课程已从当前年级删除");
     } catch (error) {
       schedulingBackendState = {
@@ -3590,7 +3639,7 @@ async function addAdminScheduleConstraint() {
         },
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       document.querySelector("#constraintReasonInput").value = "";
       showToast("硬约束已添加，重新生成排课时生效");
     } catch (error) {
@@ -3628,7 +3677,7 @@ async function deleteAdminScheduleConstraint(constraintId) {
         method: "DELETE",
       });
       applyBackendScheduleResult(result);
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       showToast("硬约束已删除");
     } catch (error) {
       schedulingBackendState = {
@@ -3709,7 +3758,7 @@ async function adjustBackendSchedule() {
     });
     applyBackendScheduleResult(result);
     state.selectedScheduleAssignmentId = assignmentId;
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     const conflicts = result.draft?.conflicts?.length || 0;
     showToast(conflicts ? `调整已保存，发现 ${conflicts} 个冲突` : "调整已保存，当前无冲突");
   } catch (error) {
@@ -3824,7 +3873,7 @@ async function toggleBackendAssignmentLock() {
     });
     applyBackendScheduleResult(result);
     state.selectedScheduleAssignmentId = assignmentId;
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     showToast(result.assignment?.locked ? "课节已锁定，重排时会保留" : "课节已解锁，可参与重新排课");
   } catch (error) {
     schedulingBackendState = {
@@ -3879,7 +3928,7 @@ async function regenerateBackendUnlockedSchedule() {
       },
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     const preservedCount = result.draft?.preservedCount ?? result.draft?.lockedCount ?? 0;
     const conflicts = result.draft?.conflicts?.length || 0;
     const scopeText = scheduleReplanScopeText(result.draft?.replanScope || replanScope);
@@ -3999,10 +4048,10 @@ async function saveTeacherScheduleRule() {
       },
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     showToast("老师时间规则已保存，重新生成排课时生效");
   } catch (error) {
-    schedulingBackendState = { loaded: true, loading: false, error: error.message || "老师规则保存失败" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: error.message || "老师规则保存失败" };
     showToast(schedulingBackendState.error);
   }
   render();
@@ -4039,10 +4088,10 @@ async function submitScheduleChangeRequest() {
       },
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     showToast("调课/代课申请已提交，等待审批");
   } catch (error) {
-    schedulingBackendState = { loaded: true, loading: false, error: error.message || "调课申请提交失败" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: error.message || "调课申请提交失败" };
     showToast(schedulingBackendState.error);
   }
   render();
@@ -4057,12 +4106,12 @@ async function approveScheduleChangeRequest(requestId) {
       method: "POST",
     });
     applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
     showToast("调课/代课已审批通过，并同步到老师端");
     await loadBackendSchedulingContext();
     await loadBackendNotifications();
   } catch (error) {
-    schedulingBackendState = { loaded: true, loading: false, error: error.message || "调课审批失败" };
+    schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: error.message || "调课审批失败" };
     showToast(schedulingBackendState.error);
   }
   render();
@@ -4108,10 +4157,10 @@ async function moveScheduleAssignmentToSlot(assignmentId, date, period) {
       });
       applyBackendScheduleResult(result);
       state.selectedScheduleAssignmentId = assignmentId;
-      schedulingBackendState = { loaded: true, loading: false, error: "" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       showToast("拖拽调整已保存并重新校验");
     } catch (error) {
-      schedulingBackendState = { loaded: true, loading: false, error: error.message || "拖拽调整失败" };
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: error.message || "拖拽调整失败" };
       showToast(schedulingBackendState.error);
     }
     render();
@@ -5112,10 +5161,21 @@ function renderAdminScheduling() {
   document.querySelector("#subjectConfigList").innerHTML = adminSubjectConfigItem(config);
   renderTeacherRulePanel(config);
   const missingTeacherAssignments = missingClassSubjectTeacherAssignments(config);
+  const precheck = schedulingBackendState.precheck || draft.precheck || null;
+  const precheckBlocked = Number(precheck?.blockingCount || 0) > 0;
   const unassignedCount = Math.max(
     Number(draft.unassignedCount || 0),
     Number(draft.requiredLessonCount || requiredScheduleLessonCount()) - Number(assignments.length || 0),
   );
+  document.querySelector("#schedulePrecheckStatus").textContent = schedulePrecheckStatusText(precheck);
+  document.querySelector("#schedulePrecheckStatus").className = schedulePrecheckStatusClass(precheck);
+  document.querySelector("#schedulePrecheckBlockingCount").textContent = Number(precheck?.blockingCount || 0);
+  document.querySelector("#schedulePrecheckWarningCount").textContent = Number(precheck?.warningCount || 0);
+  document.querySelector("#schedulePrecheckTaskCount").textContent = Number(precheck?.taskCount || 0);
+  document.querySelector("#schedulePrecheckLessonCount").textContent = precheck
+    ? `${Number(precheck.requiredLessonCount || 0)} 节课时任务`
+    : "等待读取";
+  document.querySelector("#schedulePrecheckList").innerHTML = schedulePrecheckListHtml(precheck);
   const completionWarningHtml =
     assignments.length > 0 && unassignedCount > 0
       ? `<article class="warning-item diagnostic-item">
@@ -5159,7 +5219,7 @@ function renderAdminScheduling() {
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
   const generateButton = document.querySelector("#generateSchedule");
-  generateButton.disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0;
+  generateButton.disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0 || precheckBlocked;
   generateButton.innerHTML = schedulingBackendState.loading
     ? `<span aria-hidden="true">…</span>生成中`
     : `<span aria-hidden="true">✓</span>一键生成排课`;
@@ -5176,6 +5236,7 @@ function renderAdminScheduling() {
   document.querySelector("#addScheduleConstraint").disabled =
     schedulingBackendState.loading || !(config.courseRules || []).some((rule) => rule.enabled);
   document.querySelector("#saveTeacherRule").disabled = schedulingBackendState.loading || !(config.teachers || []).length;
+  document.querySelector("#refreshSchedulePrecheck").disabled = schedulingBackendState.loading;
   document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
     button.disabled = schedulingBackendState.loading;
   });
@@ -6457,6 +6518,32 @@ function scheduleDiagnosticItem(diagnostic) {
       <p>${escapeHtml(diagnostic.text)}</p>
     </article>
   `;
+}
+
+function schedulePrecheckStatusText(precheck) {
+  if (!precheck) return "等待预检";
+  if (precheck.status === "blocked") return "存在阻塞项";
+  if (precheck.status === "warning") return "可生成但需关注";
+  return "预检通过";
+}
+
+function schedulePrecheckStatusClass(precheck) {
+  if (!precheck) return "status-pill";
+  if (precheck.status === "blocked") return "status-pill warning";
+  if (precheck.status === "warning") return "status-pill warning";
+  return "status-pill done";
+}
+
+function schedulePrecheckListHtml(precheck) {
+  const checks = precheck?.checks || [];
+  if (!precheck) return `<div class="empty-state">排课配置加载后会自动执行预检。</div>`;
+  if (!checks.length) return `<div class="empty-state">暂无预检结果。</div>`;
+  const priority = { error: 0, warning: 1, ok: 2, info: 3 };
+  return checks
+    .slice()
+    .sort((a, b) => (priority[a.severity] ?? 4) - (priority[b.severity] ?? 4))
+    .map(scheduleDiagnosticItem)
+    .join("");
 }
 
 function scheduleQualityHtml(draft) {
@@ -8609,6 +8696,7 @@ document.querySelector("#scanNextLesson").addEventListener("click", async (event
 
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
+document.querySelector("#refreshSchedulePrecheck").addEventListener("click", refreshBackendSchedulePrecheck);
 document.querySelector("#saveClassStructure").addEventListener("click", saveAdminClassStructure);
 document.querySelector("#saveCourseRules").addEventListener("click", saveAdminCourseRules);
 document.querySelector("#addGradeCourse").addEventListener("click", addAdminGradeCourse);
