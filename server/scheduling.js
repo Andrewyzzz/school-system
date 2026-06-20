@@ -1520,6 +1520,8 @@ function normalizeLockedAssignment(config, assignment) {
 
 const ADVANCED_SOLVER_DEFAULTS = {
   attempts: 18,
+  greedyAttempts: 10,
+  greedyCandidateWindow: 4,
   candidateLimit: 10,
   maxNodesPerAttempt: 26000,
   timeoutMs: 4500,
@@ -1688,6 +1690,11 @@ function buildScheduleTasks(config, lockedAssignments = []) {
       for (let index = 0; index < remaining; index += 1) {
         const lessonNumber = (existingCounts.get(countKey) || 0) + 1;
         const nextId = nextAssignmentId(usedIds, schoolClass.id, subject.id, lessonNumber);
+        const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
+        const roomConstraintWeight = requiredRoomType === "homeroom" ? 0 : 100;
+        const dailyCapWeight = Number(subject.maxPerClassPerDay || 0) > 0 ? 70 : 0;
+        const noConsecutiveWeight = subject.allowConsecutive === false ? 50 : 0;
+        const preferredSlotWeight = Array.isArray(subject.preferredPeriods) && subject.preferredPeriods.length ? 20 : 0;
         existingCounts.set(countKey, nextId.index);
         tasks.push({
           id: nextId.id,
@@ -1702,8 +1709,15 @@ function buildScheduleTasks(config, lockedAssignments = []) {
           subject,
           teacherIds: taskTeacherIds,
           durationMinutes: subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
-          requiredRoomType: normalizeRoomType(subject.requiredRoomType, "homeroom"),
-          difficulty: 80 - Math.min(taskTeacherIds.length, 12) * 5 + Number(subject.weeklyLessons || 0) * 3,
+          requiredRoomType,
+          difficulty:
+            100 +
+            roomConstraintWeight +
+            dailyCapWeight +
+            noConsecutiveWeight +
+            preferredSlotWeight -
+            Math.min(taskTeacherIds.length, 12) * 5 +
+            Number(subject.weeklyLessons || 0) * 3,
         });
       }
     });
@@ -2100,6 +2114,63 @@ function solveScheduleAttempt(config, tasks, options, attemptIndex, deadline) {
   };
 }
 
+function solveGreedyScheduleConstruction(config, tasks, options, attemptIndex, deadline) {
+  const random = seededRandom(options.seed + 0x9e3779b9 + attemptIndex * 7919);
+  const slots = [...options.slots].sort(() => random() - 0.5);
+  const state = createSolverState(config, options.lockedAssignments, options.externalAssignments);
+  const remaining = [...tasks].sort((a, b) => b.difficulty - a.difficulty || random() - 0.5);
+  let nodes = 0;
+  let stoppedByLimit = false;
+  let skippedCount = 0;
+
+  while (remaining.length) {
+    if (Date.now() > deadline || nodes >= options.maxNodesPerAttempt) {
+      stoppedByLimit = true;
+      break;
+    }
+    nodes += 1;
+
+    let selected = null;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const task = remaining[index];
+      const candidates = buildCandidateList(config, state, task, slots, random);
+      const zeroCandidatePenalty = candidates.length ? 0 : 100000;
+      const weight = zeroCandidatePenalty + candidates.length * 100 - task.difficulty + random() * 1.5;
+      if (!selected || weight < selected.weight) {
+        selected = { index, task, candidates, weight };
+        if (candidates.length === 1) break;
+      }
+    }
+
+    if (!selected) break;
+
+    remaining.splice(selected.index, 1);
+    if (!selected.candidates.length) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const candidateWindow = Math.min(
+      selected.candidates.length,
+      Math.max(1, Number(options.greedyCandidateWindow || 1)),
+    );
+    const candidateIndex = attemptIndex === 0 ? 0 : Math.floor(random() * candidateWindow);
+    const assignment = assignmentFromCandidate(config, selected.task, selected.candidates[candidateIndex]);
+    state.assignments.push(assignment);
+    markSolverAssignment(state, assignment);
+  }
+
+  const success = remaining.length === 0 && skippedCount === 0 && !stoppedByLimit;
+  return {
+    assignments: state.assignments.map((assignment) => ({ ...assignment })),
+    success,
+    nodes,
+    stoppedByLimit,
+    skippedCount,
+    score: scheduleQualityScore(config, state.assignments),
+  };
+}
+
 function buildScheduleDiagnostics(config, options = {}) {
   return buildSchedulePrecheck(config, options).checks.slice(0, 12);
 }
@@ -2271,6 +2342,42 @@ export function buildSchedulePrecheck(config, options = {}) {
     }
   });
 
+  const roomTypeDemand = new Map();
+  config.subjects.forEach((subject) => {
+    const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
+    if (requiredRoomType === "homeroom") return;
+    const demand = config.classes.length * Number(subject.weeklyLessons || 0);
+    roomTypeDemand.set(requiredRoomType, (roomTypeDemand.get(requiredRoomType) || 0) + demand);
+  });
+
+  roomTypeDemand.forEach((demand, requiredRoomType) => {
+    const candidateRooms = (config.rooms || []).filter(
+      (room) => normalizeRoomType(room.roomType || room.type, "homeroom") === requiredRoomType,
+    );
+    const capacity = candidateRooms.length * slots.length;
+    if (demand > capacity) {
+      checks.push(
+        precheckItem(
+          "error",
+          `room_type_capacity_${requiredRoomType}`,
+          `${roomTypeName(requiredRoomType)}总容量不足`,
+          `所有需要${roomTypeName(requiredRoomType)}的课程本周合计 ${demand} 节，当前 ${candidateRooms.length} 间${roomTypeName(requiredRoomType)}最多提供 ${capacity} 个课位，请增加教室、减少课时或调整课程教室要求。`,
+          { requiredRoomType, demand, roomCount: candidateRooms.length, availableRoomSlots: capacity },
+        ),
+      );
+    } else if (demand > capacity * 0.8) {
+      checks.push(
+        precheckItem(
+          "warning",
+          `room_type_capacity_tight_${requiredRoomType}`,
+          `${roomTypeName(requiredRoomType)}总容量偏紧`,
+          `所有需要${roomTypeName(requiredRoomType)}的课程本周合计 ${demand} 节，当前容量 ${capacity} 个课位，排课会更依赖算法质量和禁排配置。`,
+          { requiredRoomType, demand, roomCount: candidateRooms.length, availableRoomSlots: capacity },
+        ),
+      );
+    }
+  });
+
   const state = createSolverState(config, lockedAssignments, externalAssignments);
   const tasks = buildScheduleTasks(config, lockedAssignments);
   let zeroCandidateCount = 0;
@@ -2395,7 +2502,48 @@ function generateHeuristicScheduleSolution(config, options = {}) {
   const requiredCount = requiredScheduleLessonCount(config);
   let best = null;
   let attemptsRun = 0;
+  let greedyAttemptsRun = 0;
+  let backtrackingAttemptsRun = 0;
   let totalNodes = 0;
+
+  function recordAttempt(attempt) {
+    attemptsRun += 1;
+    totalNodes += attempt.nodes;
+    const conflicts = validateScheduleConflicts(attempt.assignments, { externalAssignments, config });
+    const unassignedCount = Math.max(requiredCount - attempt.assignments.length, 0);
+    const quality = unassignedCount * 100000 + conflicts.length * 25000 + attempt.score;
+    if (!best || quality < best.quality) {
+      best = {
+        ...attempt,
+        conflicts,
+        unassignedCount,
+        quality,
+      };
+    }
+  }
+
+  const greedyAttemptLimit = Math.max(1, Number(solverOptions.greedyAttempts || 0));
+  for (let attemptIndex = 0; attemptIndex < greedyAttemptLimit; attemptIndex += 1) {
+    if (Date.now() > deadline && best) break;
+    const attempt = solveGreedyScheduleConstruction(
+      config,
+      tasks,
+      {
+        ...solverOptions,
+        lockedAssignments,
+        externalAssignments,
+        slots: schedulingSlots(config),
+        seed,
+      },
+      attemptIndex,
+      deadline,
+    );
+    greedyAttemptsRun += 1;
+    recordAttempt(attempt);
+    if (best.unassignedCount === 0 && best.conflicts.length === 0 && Date.now() > startedAt + solverOptions.timeoutMs * 0.35) {
+      break;
+    }
+  }
 
   for (let attemptIndex = 0; attemptIndex < solverOptions.attempts; attemptIndex += 1) {
     if (Date.now() > deadline && best) break;
@@ -2412,19 +2560,8 @@ function generateHeuristicScheduleSolution(config, options = {}) {
       attemptIndex,
       deadline,
     );
-    attemptsRun += 1;
-    totalNodes += attempt.nodes;
-    const conflicts = validateScheduleConflicts(attempt.assignments, { externalAssignments, config });
-    const unassignedCount = Math.max(requiredCount - attempt.assignments.length, 0);
-    const quality = unassignedCount * 100000 + conflicts.length * 25000 + attempt.score;
-    if (!best || quality < best.quality) {
-      best = {
-        ...attempt,
-        conflicts,
-        unassignedCount,
-        quality,
-      };
-    }
+    backtrackingAttemptsRun += 1;
+    recordAttempt(attempt);
     if (best.unassignedCount === 0 && best.conflicts.length === 0 && Date.now() > startedAt + solverOptions.timeoutMs * 0.55) {
       break;
     }
@@ -2444,6 +2581,8 @@ function generateHeuristicScheduleSolution(config, options = {}) {
       algorithm: "advanced-constraint-search",
       description: "硬约束求解 + MRV 最难课节优先 + 多轮扰动搜索 + 有限回溯 + 软约束评分",
       attemptsRun,
+      greedyAttemptsRun,
+      backtrackingAttemptsRun,
       totalNodes,
       score: Math.round(best?.score || scheduleQualityScore(config, assignments)),
       qualityReport,

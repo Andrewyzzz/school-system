@@ -2,6 +2,25 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-20 - 强化大规模排课容量预检与 benchmark
+
+- 类型：功能 / 测试 / 工程化 / 排课
+- 影响范围：排课前预检 / OR-Tools CP-SAT / fallback / 大规模验收 / 文档
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check server/scheduling.js`
+  - `node --check tests/scheduling-solver-benchmark.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`
+- 内容：
+  - 排课前预检新增“按教室类型汇总容量”校验，能识别物理、化学共同占用实验室导致的总容量不足。
+  - 高级 fallback 新增多轮贪心构造尝试，并优先处理专用教室、每日上限、不可连续等高约束课程。
+  - 大规模 benchmark 从允许部分成功升级为必须排满，高中 16 班、1500 名老师、352 节课要求未排 0、冲突 0。
+  - benchmark 新增不可行配置断言：实验室总容量不足时必须在求解前被预检阻塞。
+  - 更新最高标准排课 TODO 与第一阶段 TODO 的当前完成状态。
+- 注意事项：
+  - 高中 16 班大规模 benchmark 当前由 OR-Tools CP-SAT 主求解器完成，耗时约 30 秒；更大规模或多学部并发排课后续应异步任务化并展示进度。
+
 ## 2026-06-19 - 增加排课求解 benchmark 测试
 
 - 类型：测试 / 工程化 / 排课

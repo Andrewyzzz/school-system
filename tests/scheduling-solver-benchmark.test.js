@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { createInitialData, updateTeacherAssignment } from "../server/storage.js";
-import { generateScheduleDraft, updateGradeClassStructure } from "../server/scheduling.js";
+import {
+  buildSchedulePrecheck,
+  buildSchedulingConfig,
+  generateScheduleDraft,
+  updateGradeClassStructure,
+} from "../server/scheduling.js";
 
 function actor(db, username) {
   const account = db.accounts.find((item) => item.username === username);
@@ -91,6 +96,37 @@ function runScenario(definition) {
   return summary;
 }
 
+function assertAggregatedRoomCapacityPrecheck() {
+  const db = createInitialData({ teacherCount: 1500 });
+  const admin = actor(db, "admin");
+  updateGradeClassStructure(
+    db,
+    {
+      stageId: "high",
+      grade: 11,
+      regularCount: 14,
+      experimentalCount: 2,
+    },
+    admin,
+  );
+  db.rooms.push({
+    id: "BENCH-high-playground-only",
+    name: "高中备用操场",
+    stageId: "high",
+    roomType: "playground",
+    active: true,
+  });
+  configureClassTeachers(db, { stageId: "high", grade: 11 }, admin);
+
+  const config = buildSchedulingConfig(db, { divisionId: "high", gradeId: "high-g2" });
+  const precheck = buildSchedulePrecheck(config);
+  assert.equal(precheck.status, "blocked", "insufficient shared room capacity should block scheduling");
+  assert.ok(
+    precheck.checks.some((item) => item.key === "room_type_capacity_lab"),
+    "lab capacity should be checked across physics and chemistry together",
+  );
+}
+
 const scenarios = [
   {
     name: "small-primary-10-classes",
@@ -121,12 +157,16 @@ const scenarios = [
     grade: 11,
     regularCount: 14,
     experimentalCount: 2,
-    extraRooms: [{ name: "高中备用操场", roomType: "playground" }],
-    allowPartial: true,
+    extraRooms: [
+      { name: "高中物理备用实验室", roomType: "lab" },
+      { name: "高中化学备用实验室", roomType: "lab" },
+      { name: "高中备用操场", roomType: "playground" },
+    ],
   },
 ];
 
 const summaries = scenarios.map(runScenario);
+assertAggregatedRoomCapacityPrecheck();
 const cpSatRuns = summaries.filter((item) => item.algorithm === "ortools-cp-sat").length;
 const fallbackRuns = summaries.filter((item) => item.fallbackTriggered).length;
 const averageElapsedMs = Math.round(summaries.reduce((sum, item) => sum + item.elapsedMs, 0) / summaries.length);
