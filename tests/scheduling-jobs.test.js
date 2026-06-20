@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createInitialData, updateTeacherAssignment } from "../server/storage.js";
-import { updateGradeClassStructure } from "../server/scheduling.js";
+import { buildSchedulingConfig, updateGradeClassStructure } from "../server/scheduling.js";
 import {
   cancelScheduleGenerationJob,
   getScheduleGenerationJob,
@@ -14,10 +14,20 @@ function actor(db, username) {
   return account;
 }
 
-function configureClassTeachers(db, { stageId, grade }, actorAccount) {
-  const activeClasses = db.classes.filter(
-    (schoolClass) => schoolClass.stageId === stageId && Number(schoolClass.grade) === Number(grade) && schoolClass.active,
-  );
+function schedulingScopeForStageGrade(stageId, grade) {
+  const divisionId = stageId === "primary" ? "elementary" : stageId;
+  const gradeId =
+    stageId === "primary"
+      ? `elementary-g${grade}`
+      : stageId === "middle"
+        ? `middle-g${Number(grade) - 6}`
+        : `high-g${Number(grade) - 9}`;
+  return { divisionId, gradeId };
+}
+
+function configureClassTeachers(db, { stageId, grade, termId = "" }, actorAccount) {
+  const { divisionId, gradeId } = schedulingScopeForStageGrade(stageId, grade);
+  const activeClasses = buildSchedulingConfig(db, { termId, divisionId, gradeId }).classes;
   db.subjects.forEach((subject) => {
     const teachers = db.teachers.filter(
       (item) => item.status === "active" && item.stageId === stageId && item.primarySubjectId === subject.id,

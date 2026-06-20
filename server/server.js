@@ -109,6 +109,12 @@ function sendError(res, statusCode, message, details = null) {
   });
 }
 
+function roomsForTerm(db, termId = "") {
+  const scopedRooms = (db.rooms || []).filter((room) => room.termId === termId);
+  if (scopedRooms.length) return scopedRooms;
+  return (db.rooms || []).filter((room) => !room.termId);
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -434,7 +440,8 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/classrooms") {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin", "classroom"]);
       if (!auth) return;
-      sendJson(res, 200, { rooms: db.rooms });
+      const termId = url.searchParams.get("termId") || queryTerms(db).currentTerm.id;
+      sendJson(res, 200, { rooms: roomsForTerm(db, termId), termId });
       return;
     }
 
@@ -453,7 +460,8 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const roomId = decodeURIComponent(parts[2] || "");
-      const room = db.rooms.find((item) => item.id === roomId);
+      const termId = url.searchParams.get("termId") || queryTerms(db).currentTerm.id;
+      const room = roomsForTerm(db, termId).find((item) => item.id === roomId);
       if (!room) {
         sendError(res, 404, "教室不存在");
         return;
@@ -528,6 +536,7 @@ async function handleApi(req, res, db, url) {
       const result = deleteGradeCourse(
         db,
         {
+          termId: url.searchParams.get("termId"),
           subjectId: decodeURIComponent(parts[3]),
           stageId: url.searchParams.get("stageId"),
           grade: url.searchParams.get("grade"),
@@ -552,7 +561,11 @@ async function handleApi(req, res, db, url) {
     if (req.method === "DELETE" && parts[0] === "api" && parts[1] === "scheduling" && parts[2] === "constraints" && parts[3]) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
-      const result = deleteScheduleConstraint(db, { constraintId: decodeURIComponent(parts[3]) }, auth.account);
+      const result = deleteScheduleConstraint(
+        db,
+        { termId: url.searchParams.get("termId"), constraintId: decodeURIComponent(parts[3]) },
+        auth.account,
+      );
       await saveDatabase(db);
       sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;

@@ -2,6 +2,31 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 学期配置独立化
+
+- 类型：功能 / 后端 / 前端 / 测试 / 文档
+- 影响范围：学期管理 / 排课配置 / 任课配置 / 教室二维码库 / 测试基准
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check server/scheduling.js`
+  - `node --check server/storage.js`
+  - `node --check server/server.js`
+  - `node --check app.js`
+  - `node --check tests/phase1-production.test.js`
+  - `node --check tests/scheduling-jobs.test.js`
+  - `node --check tests/scheduling-solver-benchmark.test.js`
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`（3 个规模均为 OR-Tools CP-SAT，fallback 0，冲突 0，未排 0，平均耗时 13.1 秒，平均评分 68）
+- 内容：
+  - 新建学期时真实复制班级、教室、课程规则、任课配置、硬约束和老师时间规则，不再只记录摘要。
+  - 排课配置读取改为“优先当前学期，兼容旧模板数据”，支持新学期局部修改后继续继承未修改配置。
+  - 课程规则、班级结构、任课关系、硬约束、老师时间规则保存时写入当前学期，避免污染旧学期。
+  - 教室二维码库按当前学期过滤，避免多学期教室重复显示。
+  - 生产测试新增“新学期改班级数和课程规则不影响旧学期”的断言。
+
 ## 2026-06-21 - 完成学期管理闭环
 
 - 类型：功能 / 前端 / 后端 / 测试 / 文档

@@ -2904,6 +2904,10 @@ function backendSchedulingOptions() {
   };
 }
 
+function currentSchedulingTermId() {
+  return termManagementState.currentTerm?.id || state.schedulingConfig.termId || "";
+}
+
 function applyTermContext(result = {}) {
   termManagementState = {
     ...termManagementState,
@@ -3540,6 +3544,7 @@ async function saveAdminClassStructure() {
       const result = await apiRequest("/api/scheduling/class-structure", {
         method: "POST",
         body: {
+          termId: currentSchedulingTermId(),
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           regularCount,
@@ -3580,6 +3585,7 @@ async function saveAdminCourseRules() {
       const result = await apiRequest("/api/scheduling/course-rules", {
         method: "POST",
         body: {
+          termId: currentSchedulingTermId(),
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           rules,
@@ -3682,6 +3688,7 @@ async function addAdminGradeCourse() {
       const result = await apiRequest("/api/scheduling/courses", {
         method: "POST",
         body: {
+          termId: currentSchedulingTermId(),
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           subjectName,
@@ -3724,6 +3731,7 @@ async function deleteAdminGradeCourse(subjectId) {
     renderAdminScheduling();
     try {
       const params = new URLSearchParams({
+        termId: currentSchedulingTermId(),
         stageId: state.schedulingConfig.stageId,
         grade: String(state.schedulingConfig.grade),
       });
@@ -3775,6 +3783,7 @@ async function addAdminScheduleConstraint() {
       const result = await apiRequest("/api/scheduling/constraints", {
         method: "POST",
         body: {
+          termId: currentSchedulingTermId(),
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           subjectId,
@@ -3818,7 +3827,8 @@ async function deleteAdminScheduleConstraint(constraintId) {
     schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
     renderAdminScheduling();
     try {
-      const result = await apiRequest(`/api/scheduling/constraints/${encodeURIComponent(constraintId)}`, {
+      const params = new URLSearchParams({ termId: currentSchedulingTermId() });
+      const result = await apiRequest(`/api/scheduling/constraints/${encodeURIComponent(constraintId)}?${params.toString()}`, {
         method: "DELETE",
       });
       applyBackendScheduleResult(result);
@@ -4181,6 +4191,7 @@ async function saveTeacherScheduleRule() {
     const result = await apiRequest("/api/scheduling/teacher-rules", {
       method: "POST",
       body: {
+        termId: currentSchedulingTermId(),
         stageId: state.schedulingConfig.stageId,
         gradeId: state.schedulingConfig.gradeId,
         grade: state.schedulingConfig.grade,
@@ -6300,6 +6311,7 @@ async function saveClassSubjectTeacherAssignments() {
         apiRequest("/api/scheduling/teacher-assignments", {
           method: "POST",
           body: {
+            termId: currentSchedulingTermId(),
             stageId: state.schedulingConfig.stageId,
             grade: state.schedulingConfig.grade,
             subjectId: payload.subjectId,

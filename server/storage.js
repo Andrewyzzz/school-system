@@ -886,16 +886,108 @@ function createTermId(schoolYear, semester) {
   return `TERM-${suffix || Date.now()}`;
 }
 
-function copiedConfigSummary(db) {
+function scopedStorageConfigId(prefix, termId, ...parts) {
+  const suffix = [termId, ...parts]
+    .filter(Boolean)
+    .join("-")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  return `${prefix}-${suffix}`;
+}
+
+function sourceTermRows(rows = [], sourceTermId = "") {
+  const scopedRows = rows.filter((row) => row.termId === sourceTermId);
+  if (scopedRows.length) return scopedRows;
+  return rows.filter((row) => !row.termId);
+}
+
+function mergedSourceTermRows(rows = [], sourceTermId = "", keyFn = (row) => row.id) {
+  const merged = new Map();
+  rows
+    .filter((row) => !row.termId)
+    .forEach((row) => {
+      merged.set(keyFn(row), row);
+    });
+  rows
+    .filter((row) => row.termId === sourceTermId)
+    .forEach((row) => {
+      merged.set(keyFn(row), row);
+    });
+  return Array.from(merged.values());
+}
+
+function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
+  const sourceClasses = sourceTermRows(db.classes || [], sourceTermId).filter((schoolClass) => schoolClass.active !== false);
+  const sourceCourseRules = sourceTermRows(db.gradeCourseRules || [], sourceTermId);
+  const sourceAssignments = sourceTermRows(db.teacherAssignments || [], sourceTermId);
+  const sourceTeacherRules = sourceTermRows(db.teacherScheduleRules || [], sourceTermId);
+  const sourceConstraints = sourceTermRows(db.scheduleConstraints || [], sourceTermId);
   return {
-    courseRuleCount: (db.gradeCourseRules || []).length,
-    teacherAssignmentCount: (db.teacherAssignments || []).filter(
+    courseRuleCount: sourceCourseRules.length,
+    teacherAssignmentCount: sourceAssignments.filter(
       (assignment) => Object.values(assignment.classTeacherIds || {}).flat().length > 0,
     ).length,
-    teacherRuleCount: (db.teacherScheduleRules || []).length,
-    constraintCount: (db.scheduleConstraints || []).filter((constraint) => constraint.active !== false).length,
-    classCount: (db.classes || []).filter((schoolClass) => schoolClass.active !== false).length,
+    teacherRuleCount: sourceTeacherRules.length,
+    constraintCount: sourceConstraints.filter((constraint) => constraint.active !== false).length,
+    classCount: sourceClasses.length,
   };
+}
+
+function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) {
+  const now = new Date().toISOString();
+  const withScope = (row) => ({
+    ...row,
+    termId: targetTerm.id,
+    termName: targetTerm.name,
+    copiedFromTermId: sourceTermId,
+    copiedAt: now,
+  });
+  const replaceTargetRows = (key, rows) => {
+    db[key] = (db[key] || []).filter((row) => row.termId !== targetTerm.id);
+    db[key].push(...rows);
+  };
+
+  replaceTargetRows("classes", sourceTermRows(db.classes || [], sourceTermId).map(withScope));
+  replaceTargetRows("rooms", sourceTermRows(db.rooms || [], sourceTermId).map(withScope));
+  replaceTargetRows(
+    "gradeCourseRules",
+    sourceTermRows(db.gradeCourseRules || [], sourceTermId).map((row) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("CR", targetTerm.id, row.stageId, row.grade, row.subjectId),
+    })),
+  );
+  replaceTargetRows(
+    "teacherAssignments",
+    sourceTermRows(db.teacherAssignments || [], sourceTermId).map((row) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("TA", targetTerm.id, row.stageId, row.grade, row.subjectId),
+    })),
+  );
+  replaceTargetRows(
+    "scheduleConstraints",
+    sourceTermRows(db.scheduleConstraints || [], sourceTermId).map((row, index) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("SC", targetTerm.id, row.stageId, row.grade, row.subjectId, index + 1),
+    })),
+  );
+  replaceTargetRows(
+    "teacherScheduleRules",
+    sourceTermRows(db.teacherScheduleRules || [], sourceTermId).map((row) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("TSR", targetTerm.id, row.stageId, row.teacherId),
+    })),
+  );
+
+  appendAuditLog(db, {
+    action: "term_config_clone",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    sourceTermId,
+    termId: targetTerm.id,
+    termName: targetTerm.name,
+    ...copiedConfigSummary(db, targetTerm.id),
+  });
 }
 
 export function createAcademicTerm(db, options = {}, actorAccount = null) {
@@ -921,6 +1013,7 @@ export function createAcademicTerm(db, options = {}, actorAccount = null) {
   const copyFromTermId = normalizeTermText(options.copyFromTermId, currentTerm(db).id);
   const makeCurrent = Boolean(options.current);
   const now = new Date().toISOString();
+  const copyConfig = options.copyConfig !== false;
   const term = {
     id,
     name,
@@ -930,8 +1023,8 @@ export function createAcademicTerm(db, options = {}, actorAccount = null) {
     endDate,
     status: makeCurrent ? "active" : "planned",
     current: makeCurrent,
-    copiedFromTermId: options.copyConfig === false ? "" : copyFromTermId,
-    copiedConfigSummary: options.copyConfig === false ? null : copiedConfigSummary(db),
+    copiedFromTermId: copyConfig ? copyFromTermId : "",
+    copiedConfigSummary: copyConfig ? copiedConfigSummary(db, copyFromTermId) : null,
     divisionWeekStarts:
       options.divisionWeekStarts && typeof options.divisionWeekStarts === "object" && !Array.isArray(options.divisionWeekStarts)
         ? { ...options.divisionWeekStarts }
@@ -949,6 +1042,9 @@ export function createAcademicTerm(db, options = {}, actorAccount = null) {
     }));
   }
   db.terms.push(term);
+  if (copyConfig) {
+    cloneTermConfigRows(db, copyFromTermId, term, actorAccount);
+  }
   db.meta.updatedAt = now;
   appendAuditLog(db, {
     action: "term_create",
@@ -1588,15 +1684,23 @@ export function updateTeacherSalaryProfile(db, teacherId, profilePatch = {}, act
 }
 
 export function queryTeacherAssignments(db, options = {}) {
+  const term = currentTerm(db, options.termId);
   const stageId = String(options.stageId || "").trim();
   const grade = options.grade ? Number(options.grade) : null;
   const subjectId = String(options.subjectId || "").trim();
-  return (db.teacherAssignments || [])
+  const scopedAssignments = mergedSourceTermRows(
+    db.teacherAssignments || [],
+    term.id,
+    (assignment) => `${assignment.stageId}:${assignment.grade}:${assignment.subjectId}`,
+  );
+  return scopedAssignments
     .filter((assignment) => !stageId || assignment.stageId === stageId)
     .filter((assignment) => !grade || assignment.grade === grade)
     .filter((assignment) => !subjectId || assignment.subjectId === subjectId)
     .map((assignment) => ({
       ...assignment,
+      termId: assignment.termId || term.id,
+      termName: assignment.termName || term.name,
       subjectName: db.subjects.find((subject) => subject.id === assignment.subjectId)?.name || assignment.subjectId,
       teachers: (assignment.teacherIds || [])
         .map((teacherId) => findTeacher(db, teacherId))
@@ -1612,6 +1716,8 @@ export function queryTeacherAssignments(db, options = {}) {
 }
 
 export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
+  const term = currentTerm(db, options.termId);
+  ensureEditableTerm(term, "修改任课配置");
   const stageId = String(options.stageId || "").trim();
   const grade = Number(options.grade);
   const subjectId = String(options.subjectId || "").trim();
@@ -1629,7 +1735,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     error.statusCode = 400;
     throw error;
   }
-  const activeClasses = (db.classes || []).filter(
+  const activeClasses = sourceTermRows(db.classes || [], term.id).filter(
     (schoolClass) => schoolClass.stageId === stageId && Number(schoolClass.grade) === grade && schoolClass.active,
   );
   const activeClassIds = new Set(activeClasses.map((schoolClass) => schoolClass.id));
@@ -1679,10 +1785,18 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     throw error;
   }
   const now = new Date().toISOString();
-  const id = `TA-${stageId}-${grade}-${subjectId}`;
-  const existing = (db.teacherAssignments || []).find((assignment) => assignment.id === id);
+  const id = scopedStorageConfigId("TA", term.id, stageId, grade, subjectId);
+  const existing = (db.teacherAssignments || []).find(
+    (assignment) =>
+      assignment.termId === term.id &&
+      assignment.stageId === stageId &&
+      Number(assignment.grade) === grade &&
+      assignment.subjectId === subjectId,
+  );
   const next = {
     id,
+    termId: term.id,
+    termName: term.name,
     stageId,
     grade,
     subjectId,
@@ -1703,7 +1817,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
     createdAt: now,
   });
   db.meta.updatedAt = now;
-  return queryTeacherAssignments(db, { stageId, grade, subjectId })[0];
+  return queryTeacherAssignments(db, { termId: term.id, stageId, grade, subjectId })[0];
 }
 
 export function queryTeachers(db, query = {}) {

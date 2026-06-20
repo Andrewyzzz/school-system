@@ -28,6 +28,7 @@ import {
 import {
   approveScheduleChangeRequest,
   adjustScheduleAssignment,
+  buildSchedulingConfig,
   createScheduleChangeRequest,
   generateScheduleDraft,
   listScheduleVersions,
@@ -56,10 +57,20 @@ function prepareCompletedMonth(db, teacherId, month = "2026-06") {
   });
 }
 
-function configureClassTeachers(db, { stageId, grade }, actorAccount) {
-  const activeClasses = db.classes.filter(
-    (schoolClass) => schoolClass.stageId === stageId && Number(schoolClass.grade) === Number(grade) && schoolClass.active,
-  );
+function schedulingScopeForStageGrade(stageId, grade) {
+  const divisionId = stageId === "primary" ? "elementary" : stageId;
+  const gradeId =
+    stageId === "primary"
+      ? `elementary-g${grade}`
+      : stageId === "middle"
+        ? `middle-g${Number(grade) - 6}`
+        : `high-g${Number(grade) - 9}`;
+  return { divisionId, gradeId };
+}
+
+function configureClassTeachers(db, { stageId, grade, termId = "" }, actorAccount) {
+  const { divisionId, gradeId } = schedulingScopeForStageGrade(stageId, grade);
+  const activeClasses = buildSchedulingConfig(db, { termId, divisionId, gradeId }).classes;
   db.subjects.forEach((subject) => {
     const teachers = db.teachers.filter(
       (item) => item.status === "active" && item.stageId === stageId && item.primarySubjectId === subject.id,
@@ -147,6 +158,70 @@ assert.equal(createdTermResult.term.status, "planned");
 assert.ok(createdTermResult.term.copiedConfigSummary, "新学期应记录复制配置摘要");
 const switchedTermResult = setCurrentAcademicTerm(termDb, createdTermResult.term.id, termAdmin);
 assert.equal(switchedTermResult.currentTerm.id, createdTermResult.term.id);
+const oldTermConfigBefore = buildSchedulingConfig(termDb, {
+  termId: "TERM-2026-PHASE1",
+  divisionId: "elementary",
+  gradeId: "elementary-g1",
+});
+const newTermConfigBefore = buildSchedulingConfig(termDb, {
+  termId: createdTermResult.term.id,
+  divisionId: "elementary",
+  gradeId: "elementary-g1",
+});
+assert.equal(oldTermConfigBefore.classCount, 10);
+assert.equal(newTermConfigBefore.classCount, 10);
+updateGradeClassStructure(
+  termDb,
+  {
+    termId: createdTermResult.term.id,
+    stageId: "primary",
+    grade: 1,
+    regularCount: 6,
+    experimentalCount: 1,
+  },
+  termAdmin,
+);
+const newTermClassConfig = buildSchedulingConfig(termDb, {
+  termId: createdTermResult.term.id,
+  divisionId: "elementary",
+  gradeId: "elementary-g1",
+});
+const oldTermClassConfig = buildSchedulingConfig(termDb, {
+  termId: "TERM-2026-PHASE1",
+  divisionId: "elementary",
+  gradeId: "elementary-g1",
+});
+assert.equal(newTermClassConfig.classCount, 7);
+assert.equal(oldTermClassConfig.classCount, 10);
+updateGradeCourseRules(
+  termDb,
+  {
+    termId: createdTermResult.term.id,
+    stageId: "primary",
+    grade: 1,
+    rules: newTermClassConfig.courseRules.map((rule) => ({
+      ...rule,
+      weeklyLessons: rule.subjectId === "pe" ? 1 : rule.weeklyLessons,
+    })),
+  },
+  termAdmin,
+);
+assert.equal(
+  buildSchedulingConfig(termDb, {
+    termId: createdTermResult.term.id,
+    divisionId: "elementary",
+    gradeId: "elementary-g1",
+  }).courseRules.find((rule) => rule.subjectId === "pe")?.weeklyLessons,
+  1,
+);
+assert.equal(
+  buildSchedulingConfig(termDb, {
+    termId: "TERM-2026-PHASE1",
+    divisionId: "elementary",
+    gradeId: "elementary-g1",
+  }).courseRules.find((rule) => rule.subjectId === "pe")?.weeklyLessons,
+  2,
+);
 const archivedTermResult = archiveAcademicTerm(termDb, "TERM-2026-PHASE1", termAdmin);
 assert.equal(archivedTermResult.terms.find((term) => term.id === "TERM-2026-PHASE1")?.status, "archived");
 assert.throws(

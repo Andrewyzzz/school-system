@@ -200,6 +200,71 @@ function clearScheduleDraftForScope(db, division, grade, term = currentTerm(db))
   );
 }
 
+function termScopedRows(rows = [], term, predicate = () => true) {
+  const scopedRows = rows.filter((row) => row.termId === term.id && predicate(row));
+  if (scopedRows.length) return scopedRows;
+  return rows.filter((row) => !row.termId && predicate(row));
+}
+
+function termMergedRows(rows = [], term, predicate = () => true, keyFn = (row) => row.id) {
+  const merged = new Map();
+  rows
+    .filter((row) => !row.termId && predicate(row))
+    .forEach((row) => {
+      merged.set(keyFn(row), row);
+    });
+  rows
+    .filter((row) => row.termId === term.id && predicate(row))
+    .forEach((row) => {
+      merged.set(keyFn(row), row);
+    });
+  return Array.from(merged.values());
+}
+
+function itemMatchesTerm(item, term) {
+  return !item.termId || item.termId === term.id;
+}
+
+function itemBelongsToTerm(item, term) {
+  return item.termId === term.id;
+}
+
+function scopedConfigId(prefix, termId, ...parts) {
+  const suffix = [termId, ...parts]
+    .filter(Boolean)
+    .join("-")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  return `${prefix}-${suffix}`;
+}
+
+function findScopedRoom(db, roomId, term) {
+  return (
+    (db.rooms || []).find((room) => room.id === roomId && room.termId === term.id) ||
+    (db.rooms || []).find((room) => room.id === roomId && !room.termId) ||
+    (db.rooms || []).find((room) => room.id === roomId)
+  );
+}
+
+function schedulingRooms(db, division, classes, term) {
+  const roomBelongsToDivision = (room) => room.active !== false && room.stageId === division.stageId;
+  const termRows = (db.rooms || []).filter((room) => room.termId === term.id && roomBelongsToDivision(room));
+  const fallbackRows = (db.rooms || []).filter((room) => !room.termId && roomBelongsToDivision(room));
+  const baseRows = termRows.length ? termRows : fallbackRows;
+  const rowsById = new Map(baseRows.map((room) => [room.id, room]));
+  fallbackRows
+    .filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom")
+    .forEach((room) => {
+      if (!rowsById.has(room.id)) rowsById.set(room.id, room);
+    });
+  return Array.from(rowsById.values()).filter(
+    (room) =>
+      normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom" ||
+      classes.some((schoolClass) => schoolClass.roomId === room.id),
+  );
+}
+
 function teacherIdsForAssignment(assignment, classId = "") {
   if (!assignment) return [];
   if (classId && Array.isArray(assignment.classTeacherIds?.[classId]) && assignment.classTeacherIds[classId].length) {
@@ -212,8 +277,13 @@ function teacherIdsForAssignment(assignment, classId = "") {
   return Array.from(new Set([...(assignment.teacherIds || []), ...classTeacherIds].map(String).filter(Boolean)));
 }
 
-function assignmentTeachers(db, division, grade, subjectId, classId = "") {
-  const assignment = (db.teacherAssignments || []).find(
+function assignmentTeachers(db, division, grade, subjectId, classId = "", term = currentTerm(db)) {
+  const assignment = termMergedRows(
+    db.teacherAssignments || [],
+    term,
+    (item) => item.stageId === division.stageId && item.grade === grade.grade && item.subjectId === subjectId,
+    (item) => `${item.stageId}:${item.grade}:${item.subjectId}`,
+  ).find(
     (item) => item.stageId === division.stageId && item.grade === grade.grade && item.subjectId === subjectId,
   );
   const teacherIds = teacherIdsForAssignment(assignment, classId);
@@ -324,10 +394,14 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
   };
 }
 
-function schedulingCourseRules(db, division, grade) {
+function schedulingCourseRules(db, division, grade, term = currentTerm(db)) {
   const savedRules = new Map(
-    (db.gradeCourseRules || [])
-      .filter((rule) => rule.stageId === division.stageId && Number(rule.grade) === grade.grade)
+    termMergedRows(
+      db.gradeCourseRules || [],
+      term,
+      (rule) => rule.stageId === division.stageId && Number(rule.grade) === grade.grade,
+      (rule) => rule.subjectId,
+    )
       .map((rule) => [rule.subjectId, rule]),
   );
 
@@ -346,6 +420,8 @@ function schedulingCourseRules(db, division, grade) {
     const constraintFields = courseRuleConstraintFields(savedRule || {}, defaultRule || {});
     return {
       id: `CR-${division.stageId}-${grade.grade}-${subject.id}`,
+      termId: savedRule?.termId || term.id,
+      termName: savedRule?.termName || term.name,
       stageId: division.stageId,
       grade: grade.grade,
       subjectId: subject.id,
@@ -358,9 +434,12 @@ function schedulingCourseRules(db, division, grade) {
   });
 }
 
-function publicScheduleConstraints(db, division, grade) {
-  return (db.scheduleConstraints || [])
-    .filter((constraint) => constraint.stageId === division.stageId && Number(constraint.grade) === grade.grade)
+function publicScheduleConstraints(db, division, grade, term = currentTerm(db)) {
+  return termScopedRows(
+    db.scheduleConstraints || [],
+    term,
+    (constraint) => constraint.stageId === division.stageId && Number(constraint.grade) === grade.grade,
+  )
     .filter((constraint) => constraint.active !== false)
     .map((constraint) => {
       const subject = subjectById(db, constraint.subjectId);
@@ -373,10 +452,14 @@ function publicScheduleConstraints(db, division, grade) {
     });
 }
 
-function publicTeacherScheduleRules(db, division, subjects) {
+function publicTeacherScheduleRules(db, division, subjects, term = currentTerm(db)) {
   const teacherIds = new Set(subjects.flatMap((subject) => subject.teacherIds || []));
-  return (db.teacherScheduleRules || [])
-    .filter((rule) => rule.stageId === division.stageId && teacherIds.has(rule.teacherId))
+  return termMergedRows(
+    db.teacherScheduleRules || [],
+    term,
+    (rule) => rule.stageId === division.stageId && teacherIds.has(rule.teacherId),
+    (rule) => `${rule.stageId}:${rule.teacherId}`,
+  )
     .map((rule) => {
       const teacher = teacherById(db, rule.teacherId);
       return {
@@ -406,27 +489,36 @@ function publicScheduleChangeRequests(db, division, grade, term) {
     .slice(0, 20);
 }
 
-function schedulingSubjects(db, division, grade) {
-  return schedulingCourseRules(db, division, grade)
+function schedulingSubjects(db, division, grade, term = currentTerm(db)) {
+  return schedulingCourseRules(db, division, grade, term)
     .filter((rule) => rule.enabled && rule.weeklyLessons > 0)
     .map((rule) => {
       const subject = subjectById(db, rule.subjectId);
-      const assignment = (db.teacherAssignments || []).find(
+      const assignment = termMergedRows(
+        db.teacherAssignments || [],
+        term,
+        (item) =>
+          item.stageId === division.stageId &&
+          Number(item.grade) === Number(grade.grade) &&
+          item.subjectId === rule.subjectId,
+        (item) => `${item.stageId}:${item.grade}:${item.subjectId}`,
+      ).find(
         (item) =>
           item.stageId === division.stageId &&
           Number(item.grade) === Number(grade.grade) &&
           item.subjectId === rule.subjectId,
       );
-      const configuredTeachers = assignmentTeachers(db, division, grade, rule.subjectId);
+      const configuredTeachers = assignmentTeachers(db, division, grade, rule.subjectId, "", term);
       const availableTeachers = activeSubjectTeachers(db, division.stageId, rule.subjectId);
       const classTeacherIds = {};
-      db.classes
-        .filter(
-          (schoolClass) =>
-            schoolClass.stageId === division.stageId &&
-            Number(schoolClass.grade) === Number(grade.grade) &&
-            schoolClass.active,
-        )
+      termScopedRows(
+        db.classes || [],
+        term,
+        (schoolClass) =>
+          schoolClass.stageId === division.stageId &&
+          Number(schoolClass.grade) === Number(grade.grade) &&
+          schoolClass.active,
+      )
         .forEach((schoolClass, index) => {
           const configuredIds = teacherIdsForAssignment(assignment, schoolClass.id);
           classTeacherIds[schoolClass.id] = configuredIds;
@@ -453,11 +545,14 @@ function schedulingSubjects(db, division, grade) {
     .filter(Boolean);
 }
 
-function schedulingClasses(db, division, grade) {
-  return db.classes
-    .filter((schoolClass) => schoolClass.stageId === division.stageId && schoolClass.grade === grade.grade && schoolClass.active)
+function schedulingClasses(db, division, grade, term = currentTerm(db)) {
+  return termScopedRows(
+    db.classes || [],
+    term,
+    (schoolClass) => schoolClass.stageId === division.stageId && schoolClass.grade === grade.grade && schoolClass.active,
+  )
     .map((schoolClass) => {
-      const room = db.rooms.find((item) => item.id === schoolClass.roomId);
+      const room = findScopedRoom(db, schoolClass.roomId, term);
       return {
         id: schoolClass.id,
         name: schoolClass.name,
@@ -490,12 +585,13 @@ export function buildSchedulingConfig(db, options = {}) {
   const term = currentTerm(db, options.termId);
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
-  const courseRules = schedulingCourseRules(db, division, grade);
-  const subjects = schedulingSubjects(db, division, grade);
-  const classes = schedulingClasses(db, division, grade);
+  const courseRules = schedulingCourseRules(db, division, grade, term);
+  const subjects = schedulingSubjects(db, division, grade, term);
+  const classes = schedulingClasses(db, division, grade, term);
   const classStructure = gradeClassStructure(classes);
-  const constraints = publicScheduleConstraints(db, division, grade);
-  const teacherRules = publicTeacherScheduleRules(db, division, subjects);
+  const constraints = publicScheduleConstraints(db, division, grade, term);
+  const teacherRules = publicTeacherScheduleRules(db, division, subjects, term);
+  const scopedRooms = schedulingRooms(db, division, classes, term);
 
   return {
     divisionId: division.id,
@@ -513,9 +609,7 @@ export function buildSchedulingConfig(db, options = {}) {
     classCount: classes.length,
     classStructure,
     classes,
-    rooms: (db.rooms || [])
-      .filter((room) => room.active !== false && room.stageId === division.stageId)
-      .filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom" || classes.some((schoolClass) => schoolClass.roomId === room.id))
+    rooms: scopedRooms
       .map((room) => ({
         id: room.id,
         name: room.name,
@@ -555,6 +649,7 @@ function classTypeLabel(classType) {
 }
 
 function buildClassAndRoomRows(division, grade, options = {}) {
+  const term = options.term || null;
   const regularCount = normalizeClassCount(options.regularCount, 1, { min: 0, max: 30 });
   const experimentalCount = normalizeClassCount(options.experimentalCount, 0, { min: 0, max: 10 });
   if (regularCount + experimentalCount < 1) {
@@ -579,6 +674,8 @@ function buildClassAndRoomRows(division, grade, options = {}) {
         : `${division.shortName || division.name}${grade.name}-${pad(index)}`;
     classRows.push({
       id: classId,
+      termId: term?.id || "",
+      termName: term?.name || "",
       stageId: division.stageId,
       stageName: division.name,
       grade: grade.grade,
@@ -591,6 +688,8 @@ function buildClassAndRoomRows(division, grade, options = {}) {
     });
     roomRows.push({
       id: roomId,
+      termId: term?.id || "",
+      termName: term?.name || "",
       stageId: division.stageId,
       name: roomName,
       roomType: "homeroom",
@@ -611,9 +710,14 @@ function buildClassAndRoomRows(division, grade, options = {}) {
   return { classRows, roomRows, regularCount, experimentalCount };
 }
 
-function pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds) {
+function pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds, term = currentTerm(db)) {
   (db.teacherAssignments || [])
-    .filter((assignment) => assignment.stageId === division.stageId && Number(assignment.grade) === Number(grade.grade))
+    .filter(
+      (assignment) =>
+        itemBelongsToTerm(assignment, term) &&
+        assignment.stageId === division.stageId &&
+        Number(assignment.grade) === Number(grade.grade),
+    )
     .forEach((assignment) => {
       if (!assignment.classTeacherIds || typeof assignment.classTeacherIds !== "object" || Array.isArray(assignment.classTeacherIds)) {
         assignment.classTeacherIds = {};
@@ -630,34 +734,46 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "修改班级结构");
-  const previousClasses = schedulingClasses(db, division, grade);
+  const previousClasses = schedulingClasses(db, division, grade, term);
   const previousStructure = gradeClassStructure(previousClasses);
   const { classRows, roomRows, regularCount, experimentalCount } = buildClassAndRoomRows(division, grade, {
+    term,
     regularCount: options.regularCount ?? previousStructure.regularCount,
     experimentalCount: options.experimentalCount ?? previousStructure.experimentalCount,
   });
   const scopeClassIds = new Set(
     (db.classes || [])
-      .filter((schoolClass) => schoolClass.stageId === division.stageId && Number(schoolClass.grade) === Number(grade.grade))
+      .filter(
+        (schoolClass) =>
+          itemBelongsToTerm(schoolClass, term) &&
+          schoolClass.stageId === division.stageId &&
+          Number(schoolClass.grade) === Number(grade.grade),
+      )
       .map((schoolClass) => schoolClass.id),
   );
   const scopeRoomIds = new Set(
     (db.rooms || [])
-      .filter((room) => room.stageId === division.stageId && scopeClassIds.has(String(room.id).replace(/^ROOM/, "CLS")))
+      .filter((room) => itemBelongsToTerm(room, term) && room.stageId === division.stageId && scopeClassIds.has(String(room.id).replace(/^ROOM/, "CLS")))
       .map((room) => room.id),
   );
   classRows.forEach((schoolClass) => scopeRoomIds.add(schoolClass.roomId));
   db.classes = (db.classes || []).filter(
-    (schoolClass) => !(schoolClass.stageId === division.stageId && Number(schoolClass.grade) === Number(grade.grade)),
+    (schoolClass) =>
+      !(
+        itemBelongsToTerm(schoolClass, term) &&
+        schoolClass.stageId === division.stageId &&
+        Number(schoolClass.grade) === Number(grade.grade)
+      ),
   );
-  db.rooms = (db.rooms || []).filter((room) => !scopeRoomIds.has(room.id));
+  db.rooms = (db.rooms || []).filter((room) => !(itemBelongsToTerm(room, term) && scopeRoomIds.has(room.id)));
   db.classes.push(...classRows);
   db.rooms.push(...roomRows);
 
   const validClassIds = new Set(classRows.map((schoolClass) => schoolClass.id));
-  pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds);
-  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
+  pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds, term);
+  clearScheduleDraftForScope(db, division, grade, term);
   db.scheduleChangeRequests = (db.scheduleChangeRequests || []).filter(
     (request) => !(request.termId === scopeConfig.termId && request.divisionId === division.id && request.gradeId === grade.id),
   );
@@ -685,6 +801,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "修改课程规则");
   const rules = Array.isArray(options.rules) ? options.rules : [];
   if (!rules.length) {
@@ -700,7 +817,9 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
     if (!subject) return;
     const defaultRule = defaultCourseRule(division, subjectId) || {};
     bySubject.set(subjectId, {
-      id: `CR-${division.stageId}-${grade.grade}-${subjectId}`,
+      id: scopedConfigId("CR", term.id, division.stageId, grade.grade, subjectId),
+      termId: term.id,
+      termName: term.name,
       stageId: division.stageId,
       grade: grade.grade,
       subjectId,
@@ -723,13 +842,14 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
   db.gradeCourseRules = (db.gradeCourseRules || []).filter(
     (rule) =>
       !(
+        itemBelongsToTerm(rule, term) &&
         rule.stageId === division.stageId &&
         Number(rule.grade) === grade.grade &&
         bySubject.has(rule.subjectId)
       ),
   );
   db.gradeCourseRules.push(...nextRules);
-  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
+  clearScheduleDraftForScope(db, division, grade, term);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -761,9 +881,12 @@ function createSubjectId(db) {
 
 function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAccount = null) {
   const now = new Date().toISOString();
+  const term = options.term || currentTerm(db, options.termId);
   const defaultRule = defaultCourseRule(division, subjectId) || {};
   const next = {
-    id: `CR-${division.stageId}-${grade.grade}-${subjectId}`,
+    id: scopedConfigId("CR", term.id, division.stageId, grade.grade, subjectId),
+    termId: term.id,
+    termName: term.name,
     stageId: division.stageId,
     grade: grade.grade,
     subjectId,
@@ -774,7 +897,13 @@ function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAcc
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
   };
-  const existing = (db.gradeCourseRules || []).find((rule) => rule.id === next.id);
+  const existing = (db.gradeCourseRules || []).find(
+    (rule) =>
+      rule.termId === term.id &&
+      rule.stageId === division.stageId &&
+      Number(rule.grade) === Number(grade.grade) &&
+      rule.subjectId === subjectId,
+  );
   if (existing) {
     Object.assign(existing, next);
   } else {
@@ -788,6 +917,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "新增课程");
   const subjectName = normalizeSubjectName(options.subjectName);
   if (!subjectName) {
@@ -815,7 +945,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
     db.subjects.push(subject);
   }
 
-  const existingRule = schedulingCourseRules(db, division, grade).find((rule) => rule.subjectId === subject.id);
+  const existingRule = schedulingCourseRules(db, division, grade, term).find((rule) => rule.subjectId === subject.id);
   upsertCourseRule(
     db,
     division,
@@ -823,13 +953,14 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
     subject.id,
     {
       enabled: true,
+      term,
       weeklyLessons: options.weeklyLessons ?? existingRule?.weeklyLessons ?? 1,
       durationMinutes: options.durationMinutes ?? existingRule?.durationMinutes ?? DEFAULT_LESSON_DURATION_MINUTES,
       requiredRoomType: options.requiredRoomType ?? existingRule?.requiredRoomType ?? SUBJECT_DEFAULT_ROOM_TYPES[subject.id] ?? "homeroom",
     },
     actorAccount,
   );
-  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
+  clearScheduleDraftForScope(db, division, grade, term);
   db.meta.updatedAt = now;
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -851,6 +982,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "删除课程");
   const subjectId = String(options.subjectId || "").trim();
   const subject = subjectById(db, subjectId);
@@ -859,7 +991,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
     error.statusCode = 404;
     throw error;
   }
-  const currentRule = schedulingCourseRules(db, division, grade).find((rule) => rule.subjectId === subjectId);
+  const currentRule = schedulingCourseRules(db, division, grade, term).find((rule) => rule.subjectId === subjectId);
   upsertCourseRule(
     db,
     division,
@@ -867,6 +999,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
     subjectId,
     {
       enabled: false,
+      term,
       weeklyLessons: currentRule?.weeklyLessons || 1,
       durationMinutes: currentRule?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
       requiredRoomType: currentRule?.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subjectId] || "homeroom",
@@ -876,12 +1009,13 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
   db.scheduleConstraints = (db.scheduleConstraints || []).filter(
     (constraint) =>
       !(
+        itemBelongsToTerm(constraint, term) &&
         constraint.stageId === division.stageId &&
         Number(constraint.grade) === grade.grade &&
         constraint.subjectId === subjectId
       ),
   );
-  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
+  clearScheduleDraftForScope(db, division, grade, term);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -914,6 +1048,7 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "新增硬约束");
   const subjectId = String(options.subjectId || "").trim();
   const subject = subjectById(db, subjectId);
@@ -933,7 +1068,9 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
 
   const now = new Date().toISOString();
   const constraint = {
-    id: `SC-${division.stageId}-${grade.grade}-${subjectId}-${Date.now()}`,
+    id: scopedConfigId("SC", term.id, division.stageId, grade.grade, subjectId, Date.now()),
+    termId: term.id,
+    termName: term.name,
     type: "subject_forbidden_slot",
     stageId: division.stageId,
     grade: grade.grade,
@@ -965,7 +1102,10 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
 export function deleteScheduleConstraint(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const constraintId = String(options.constraintId || "").trim();
-  const existing = db.scheduleConstraints.find((constraint) => constraint.id === constraintId);
+  const term = currentTerm(db, options.termId);
+  const existing = db.scheduleConstraints.find(
+    (constraint) => constraint.id === constraintId && itemMatchesTerm(constraint, term),
+  );
   if (!existing) {
     const error = new Error("未找到该硬约束");
     error.statusCode = 404;
@@ -973,9 +1113,11 @@ export function deleteScheduleConstraint(db, options = {}, actorAccount = null) 
   }
   const division = divisionByStageId(existing.stageId) || DIVISIONS[0];
   const grade = division.grades.find((item) => item.grade === Number(existing.grade)) || division.grades[0];
-  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const scopeConfig = buildSchedulingConfig(db, { termId: term.id, divisionId: division.id, gradeId: grade.id });
   assertEditableScheduleTerm(scopeConfig, "删除硬约束");
-  db.scheduleConstraints = db.scheduleConstraints.filter((constraint) => constraint.id !== constraintId);
+  db.scheduleConstraints = db.scheduleConstraints.filter(
+    (constraint) => !(constraint.id === constraintId && itemMatchesTerm(constraint, term)),
+  );
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -1033,6 +1175,7 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
     divisionId: division.id,
     gradeId: options.gradeId || division.grades.find((item) => Number(item.grade) === Number(options.grade))?.id,
   });
+  const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "修改老师时间规则");
   const teacherId = String(options.teacherId || "").trim();
   const teacher = teacherById(db, teacherId);
@@ -1045,7 +1188,9 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
   const normalized = normalizeTeacherScheduleRuleInput(options);
   const now = new Date().toISOString();
   const nextRule = {
-    id: `TSR-${division.stageId}-${teacherId}`,
+    id: scopedConfigId("TSR", term.id, division.stageId, teacherId),
+    termId: term.id,
+    termName: term.name,
     stageId: division.stageId,
     teacherId,
     teacherName: teacher.name,
@@ -1053,7 +1198,9 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
   };
-  const existing = db.teacherScheduleRules.find((rule) => rule.id === nextRule.id);
+  const existing = db.teacherScheduleRules.find(
+    (rule) => rule.termId === term.id && rule.stageId === division.stageId && rule.teacherId === teacherId,
+  );
   if (existing) {
     Object.assign(existing, nextRule);
   } else {
