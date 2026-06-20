@@ -770,7 +770,9 @@ let schedulingBackendState = {
   loaded: false,
   loading: false,
   error: "",
+  job: null,
 };
+let schedulingJobPollTimer = null;
 let classroomScreenState = {
   rooms: [],
   loading: false,
@@ -2917,7 +2919,7 @@ function applyBackendScheduleResult(result) {
 
 async function loadBackendSchedulingContext(options = backendSchedulingOptions()) {
   if (!backendMode() || currentRole() !== "admin") return;
-  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "", job: null };
 
   try {
     const params = new URLSearchParams(options);
@@ -2927,12 +2929,14 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
       loaded: true,
       loading: false,
       error: "",
+      job: null,
     };
   } catch (error) {
     schedulingBackendState = {
       loaded: true,
       loading: false,
       error: error.message || "后端排课配置加载失败",
+      job: null,
     };
     showToast(schedulingBackendState.error);
   }
@@ -2942,28 +2946,105 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
   }
 }
 
+function clearSchedulingJobPolling() {
+  if (schedulingJobPollTimer) {
+    window.clearTimeout(schedulingJobPollTimer);
+    schedulingJobPollTimer = null;
+  }
+}
+
+function schedulingJobProgressText(job) {
+  if (!job) return "";
+  const progress = Number(job.progress || 0);
+  if (job.status === "queued") return `排队中 · ${progress}%`;
+  if (job.status === "running") return `${job.message || "正在生成排课草稿"} · ${progress}%`;
+  if (job.status === "completed") {
+    const summary = job.summary;
+    return summary
+      ? `已完成 · ${summary.generatedLessonCount}/${summary.requiredLessonCount} 节 · 冲突 ${summary.conflictCount}`
+      : "已完成";
+  }
+  if (job.status === "failed") return job.error?.message || "排课任务失败";
+  return job.message || "";
+}
+
+async function pollBackendScheduleJob(jobId) {
+  if (!jobId) return;
+
+  try {
+    const result = await apiRequest(`/api/scheduling/generate-jobs/${encodeURIComponent(jobId)}`);
+    const job = result.job || null;
+    schedulingBackendState = {
+      ...schedulingBackendState,
+      loading: job ? ["queued", "running"].includes(job.status) : false,
+      error: job?.status === "failed" ? job.error?.message || "后端生成排课失败" : "",
+      job,
+    };
+
+    if (job?.status === "completed") {
+      clearSchedulingJobPolling();
+      if (job.result) applyBackendScheduleResult(job.result);
+      schedulingBackendState = { loaded: true, loading: false, error: "", job };
+      const summary = job.summary || {};
+      showToast(
+        `${summary.solverAlgorithm === "ortools-cp-sat" ? "CP-SAT" : "高级算法"}已生成 ${summary.generatedLessonCount || 0} 节课表`,
+      );
+      render();
+      return;
+    }
+
+    if (job?.status === "failed") {
+      clearSchedulingJobPolling();
+      showToast(schedulingBackendState.error);
+      render();
+      return;
+    }
+
+    if (job) {
+      renderAdminScheduling();
+      schedulingJobPollTimer = window.setTimeout(() => pollBackendScheduleJob(jobId), 1200);
+    }
+  } catch (error) {
+    clearSchedulingJobPolling();
+    schedulingBackendState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "排课任务状态查询失败",
+      job: null,
+    };
+    showToast(schedulingBackendState.error);
+    render();
+  }
+}
+
 async function generateBackendSchedule() {
-  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+  clearSchedulingJobPolling();
+  schedulingBackendState = { ...schedulingBackendState, loading: true, error: "", job: null };
   renderAdminScheduling();
 
   try {
-    const result = await apiRequest("/api/scheduling/generate", {
+    const result = await apiRequest("/api/scheduling/generate-jobs", {
       method: "POST",
       body: backendSchedulingOptions(),
     });
-    applyBackendScheduleResult(result);
-    schedulingBackendState = { loaded: true, loading: false, error: "" };
-    const conflicts = result.draft?.conflicts?.length || 0;
-    showToast(
-      conflicts
-        ? `后端已生成草稿，发现 ${conflicts} 个冲突`
-        : `${result.draft?.solver?.algorithm === "ortools-cp-sat" ? "CP-SAT" : "高级算法"}已生成 ${result.draft?.generatedLessonCount || 0} 节无冲突课表`,
-    );
+    const job = result.job || null;
+    schedulingBackendState = {
+      loaded: true,
+      loading: true,
+      error: "",
+      job,
+    };
+    showToast(job?.message || "排课任务已创建");
+    renderAdminScheduling();
+    if (job?.id) {
+      schedulingJobPollTimer = window.setTimeout(() => pollBackendScheduleJob(job.id), 900);
+    }
   } catch (error) {
     schedulingBackendState = {
       loaded: true,
       loading: false,
       error: error.message || "后端生成排课失败",
+      job: null,
     };
     showToast(schedulingBackendState.error);
   }
@@ -4912,7 +4993,9 @@ function renderAdminScheduling() {
   if (backendMode() && currentRole() === "admin") {
     const status = document.querySelector("#adminScheduleStatus");
     if (schedulingBackendState.loading) {
-      status.textContent = "后端处理中";
+      status.textContent = schedulingBackendState.job
+        ? schedulingJobProgressText(schedulingBackendState.job)
+        : "后端处理中";
       status.className = "status-pill warning";
     } else if (schedulingBackendState.error) {
       status.textContent = "后端异常";
@@ -4988,12 +5071,20 @@ function renderAdminScheduling() {
           <p>当前还有 ${unassignedCount} 节课未排入课表，请调整课程、老师或硬约束后重新生成。</p>
         </article>`
       : "";
+  const schedulingJobHtml =
+    schedulingBackendState.loading && schedulingBackendState.job
+      ? `<div class="check-success schedule-job-progress">
+          <strong>${escapeHtml(schedulingJobProgressText(schedulingBackendState.job))}</strong>
+          <span>任务号 ${escapeHtml(schedulingBackendState.job.id)}，页面会自动刷新排课结果。</span>
+        </div>`
+      : "";
   document.querySelector("#conflictList").innerHTML =
-    assignments.length === 0
+    schedulingJobHtml ||
+    (assignments.length === 0
       ? `<div class="empty-state">点击“一键生成排课”后显示冲突校验结果</div>`
       : conflicts.length
         ? conflicts.map(conflictItem).join("")
-        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${completionWarningHtml}${scheduleQualityHtml(draft)}${scheduleDiagnosticsHtml(draft)}`;
+        : `<div class="check-success"><strong>冲突 0</strong><span>${escapeHtml(scheduleSolverSummaryText(draft))}</span></div>${completionWarningHtml}${scheduleQualityHtml(draft)}${scheduleDiagnosticsHtml(draft)}`);
   document.querySelector("#adminClassSelect").innerHTML = config.classes
     .map(
       (schoolClass) => `
@@ -5007,7 +5098,11 @@ function renderAdminScheduling() {
   renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
-  document.querySelector("#generateSchedule").disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0;
+  const generateButton = document.querySelector("#generateSchedule");
+  generateButton.disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0;
+  generateButton.innerHTML = schedulingBackendState.loading
+    ? `<span aria-hidden="true">…</span>生成中`
+    : `<span aria-hidden="true">✓</span>一键生成排课`;
   document.querySelector("#confirmSchedule").disabled =
     schedulingBackendState.loading ||
     assignments.length === 0 ||

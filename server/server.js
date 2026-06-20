@@ -6,6 +6,11 @@ import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAtte
 import { createToken, verifyPassword } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
+  getScheduleGenerationJob,
+  scheduleGenerationJobResponse,
+  startScheduleGenerationJob,
+} from "./schedulingJobs.js";
+import {
   approveScheduleChangeRequest,
   adjustScheduleAssignment,
   buildSchedulingConfig,
@@ -527,6 +532,33 @@ async function handleApi(req, res, db, url) {
       const result = generateScheduleDraft(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/generate-jobs") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const { job, reused } = startScheduleGenerationJob(db, body, auth.account, {
+        saveDatabase: () => saveDatabase(db),
+      });
+      sendJson(res, reused ? 200 : 202, {
+        job: scheduleGenerationJobResponse(job),
+      });
+      return;
+    }
+
+    if (req.method === "GET" && parts[0] === "api" && parts[1] === "scheduling" && parts[2] === "generate-jobs" && parts[3]) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const job = getScheduleGenerationJob(decodeURIComponent(parts[3]));
+      if (!job) {
+        sendError(res, 404, "排课任务不存在或已过期");
+        return;
+      }
+      sendJson(res, 200, {
+        job: scheduleGenerationJobResponse(job, { includeResult: job.status === "completed" }),
+      });
       return;
     }
 

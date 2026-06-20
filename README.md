@@ -65,7 +65,8 @@ http://127.0.0.1:4173/api/health
 - `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
 - `GET /api/scheduling/config`：行政读取排课学部、年级、班级、科目、老师和当前草稿
 - `POST /api/scheduling/course-rules`：行政保存年级课程、周课时、每节时长和课程级排课限制
-- `POST /api/scheduling/generate`：行政生成无教师/班级/教室时间冲突的排课草稿
+- `POST /api/scheduling/generate`：行政同步生成无教师/班级/教室时间冲突的排课草稿，保留用于兼容和测试
+- `POST /api/scheduling/generate-jobs` / `GET /api/scheduling/generate-jobs/:jobId`：行政异步创建排课任务并轮询进度，正式页面使用该方式生成大规模课表
 - `POST /api/scheduling/adjust`：行政调整草稿中的任课老师、日期、节次或教室，并重新校验冲突
 - `POST /api/scheduling/lock`：行政锁定或解锁草稿中的某节课，重排时保留已锁定课节
 - `POST /api/scheduling/regenerate-unlocked`：行政保留已锁定课节，重新自动排未锁定课程

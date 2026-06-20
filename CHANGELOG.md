@@ -2,6 +2,29 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-20 - 增加排课异步任务与前端进度轮询
+
+- 类型：功能 / 前端 / 后端 / 测试 / 排课
+- 影响范围：行政排课 / 大规模排课 / API / worker / 任务状态 / 文档
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/server.js`
+  - `node --check server/schedulingJobs.js`
+  - `node --check server/schedulingJobWorker.js`
+  - `node --check tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-jobs.test.js`
+- 内容：
+  - 新增排课任务 worker，行政端生成排课时先创建任务，再由后台独立执行 CP-SAT/高级排课求解。
+  - 新增 `POST /api/scheduling/generate-jobs` 和 `GET /api/scheduling/generate-jobs/:jobId`，支持创建任务、查询状态和返回完成结果。
+  - 前端“一键生成排课”改为异步任务模式，显示任务号、阶段、百分比，完成后自动刷新草稿、冲突、评分和诊断面板。
+  - 保留原同步 `/api/scheduling/generate`，避免破坏现有测试和兼容调用。
+  - 新增 `tests/scheduling-jobs.test.js`，验证任务创建、worker 完成、草稿写回数据库和任务结果查询。
+- 注意事项：
+  - 当前任务状态保存在单进程内存中，适合第一阶段单机部署；多服务器部署时应升级为数据库/Redis 任务表。
+  - 取消任务功能尚未开放，已保留在高标准排课 TODO 中。
+
 ## 2026-06-20 - 强化大规模排课容量预检与 benchmark
 
 - 类型：功能 / 测试 / 工程化 / 排课
