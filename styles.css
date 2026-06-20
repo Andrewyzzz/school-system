@@ -1065,6 +1065,68 @@ h2 {
   line-height: 1.45;
 }
 
+.quality-lesson-ref-list {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quality-lesson-ref-list li {
+  color: var(--primary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.quality-tension-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quality-tension-grid section {
+  border: 1px solid rgba(0, 32, 104, 0.1);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 10px;
+}
+
+.quality-tension-grid h4 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.quality-tension-grid ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quality-tension-grid li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.quality-tension-grid li strong,
+.quality-tension-grid li span {
+  overflow-wrap: anywhere;
+}
+
+.quality-tension-grid li strong {
+  font-size: 12px;
+}
+
+.quality-tension-grid li span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .compact-empty {
   padding: 10px;
   min-height: auto;
@@ -3644,6 +3706,10 @@ td {
   }
 
   .quality-deduction-list {
+    grid-template-columns: 1fr;
+  }
+
+  .quality-tension-grid {
     grid-template-columns: 1fr;
   }
 

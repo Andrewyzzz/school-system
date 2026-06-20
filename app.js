@@ -6792,6 +6792,7 @@ function scheduleQualityHtml(draft) {
   if (!quality) return "";
   const scoreClass = quality.score >= 90 ? "completed" : quality.score >= 75 ? "scheduled" : "exception";
   const deductions = (quality.deductions || []).filter((item) => item.impact > 0).slice(0, 6);
+  const tension = quality.resourceTension || {};
   return `
     <article class="quality-report-card">
       <header>
@@ -6810,6 +6811,7 @@ function scheduleQualityHtml(draft) {
                     <div class="quality-deduction-item">
                       <strong>${escapeHtml(item.title)} <span>-${Number(item.impact || 0)}</span></strong>
                       <p>${escapeHtml(item.text || "")}</p>
+                      ${qualityLessonRefsHtml(item.lessons || [])}
                     </div>
                   `,
                 )
@@ -6817,7 +6819,85 @@ function scheduleQualityHtml(draft) {
             : `<div class="quality-deduction-item"><strong>无明显扣分项</strong><p>当前课表满足主要偏好约束。</p></div>`
         }
       </div>
+      ${qualityResourceTensionHtml(tension)}
     </article>
+  `;
+}
+
+function qualityLessonRefsHtml(lessons = []) {
+  const rows = lessons.slice(0, 3);
+  return rows.length
+    ? `<ul class="quality-lesson-ref-list">
+        ${rows
+          .map(
+            (lesson) => `
+              <li>${escapeHtml(lesson.className || "")} · ${escapeHtml(lesson.subjectName || "")} · ${escapeHtml(lesson.teacherName || "")} · ${escapeHtml(lesson.date || "")} 第 ${Number(lesson.period || 0)} 节</li>
+            `,
+          )
+          .join("")}
+      </ul>`
+    : "";
+}
+
+function qualityResourceTensionHtml(tension = {}) {
+  const teachers = tension.teachers || [];
+  const rooms = tension.rooms || [];
+  const candidateTasks = tension.candidateTasks || [];
+  if (!teachers.length && !rooms.length && !candidateTasks.length) return "";
+  const teacherHtml = teachers.length
+    ? teachers
+        .slice(0, 4)
+        .map(
+          (item) => `
+            <li>
+              <strong>${escapeHtml(item.teacherName)}</strong>
+              <span>${Number(item.assignedLessons || 0)}/${Number(item.capacity || 0)} 节 · ${Number(item.utilization || 0)}%</span>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li><span>暂无紧张老师</span></li>`;
+  const roomHtml = rooms.length
+    ? rooms
+        .slice(0, 4)
+        .map(
+          (item) => `
+            <li>
+              <strong>${escapeHtml(item.roomName)}</strong>
+              <span>${escapeHtml(item.roomTypeName || "")} · ${Number(item.assignedLessons || 0)}/${Number(item.capacity || 0)} 节 · ${Number(item.utilization || 0)}%</span>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li><span>暂无紧张教室</span></li>`;
+  const candidateHtml = candidateTasks.length
+    ? candidateTasks
+        .slice(0, 4)
+        .map(
+          (item) => `
+            <li>
+              <strong>${escapeHtml(item.className)} · ${escapeHtml(item.subjectName)}</strong>
+              <span>${Number(item.candidateCount || 0)} 个候选 · ${escapeHtml(item.requiredRoomTypeName || "")} · 老师池 ${Number(item.teacherPoolSize || 0)}</span>
+            </li>
+          `,
+        )
+        .join("")
+    : `<li><span>暂无候选紧张课程</span></li>`;
+  return `
+    <div class="quality-tension-grid" aria-label="排课资源紧张度">
+      <section>
+        <h4>紧张老师</h4>
+        <ul>${teacherHtml}</ul>
+      </section>
+      <section>
+        <h4>紧张教室</h4>
+        <ul>${roomHtml}</ul>
+      </section>
+      <section>
+        <h4>候选最少课程</h4>
+        <ul>${candidateHtml}</ul>
+      </section>
+    </div>
   `;
 }
 

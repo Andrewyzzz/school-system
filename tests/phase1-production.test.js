@@ -302,6 +302,18 @@ assert.ok(schedule.draft.solver.qualityReport, "expected schedule quality report
 assert.equal(schedule.draft.solver.qualityReport.maxScore, 100);
 assert.ok(schedule.draft.solver.qualityReport.score >= 0 && schedule.draft.solver.qualityReport.score <= 100);
 assert.ok(Array.isArray(schedule.draft.solver.qualityReport.deductions));
+assert.ok(Array.isArray(schedule.draft.solver.qualityReport.resourceTension?.teachers));
+assert.ok(Array.isArray(schedule.draft.solver.qualityReport.resourceTension?.rooms));
+assert.ok(Array.isArray(schedule.draft.solver.qualityReport.resourceTension?.candidateTasks));
+assert.ok(
+  schedule.draft.solver.qualityReport.resourceTension.candidateTasks.every((item) => Number.isFinite(Number(item.candidateCount))),
+  "质量诊断应返回候选数量",
+);
+const deductionWithLessons = schedule.draft.solver.qualityReport.deductions.find((item) => Array.isArray(item.lessons) && item.lessons.length);
+if (deductionWithLessons) {
+  assert.ok(deductionWithLessons.lessons[0].className);
+  assert.ok(deductionWithLessons.lessons[0].subjectName);
+}
 assert.ok(
   schedule.draft.assignments.filter((assignment) => assignment.subjectId === "pe").every((assignment) => assignment.roomType === "playground"),
   "体育课应排到操场",

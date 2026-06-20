@@ -2044,12 +2044,27 @@ function buildScheduleQualityReport(config, assignments = [], conflicts = [], me
   const deductions = [];
   const addDeduction = (key, title, impact, text, lessonIds = []) => {
     if (impact <= 0) return;
+    const lessonRefs = lessonIds
+      .slice(0, 8)
+      .map((lessonId) => assignments.find((assignment) => assignment.id === lessonId))
+      .filter(Boolean)
+      .map((assignment) => ({
+        id: assignment.id,
+        className: assignment.className,
+        subjectName: assignment.subjectName,
+        teacherName: assignment.teacherName,
+        room: assignment.room,
+        date: assignment.date,
+        period: assignment.period,
+        time: assignment.time,
+      }));
     deductions.push({
       key,
       title,
       impact: Math.round(impact * 10) / 10,
       text,
       lessonIds: lessonIds.slice(0, 12),
+      lessons: lessonRefs,
     });
   };
 
@@ -2230,7 +2245,101 @@ function buildScheduleQualityReport(config, assignments = [], conflicts = [], me
     hardConflictCount,
     unmetPreferenceCount: deductions.filter((item) => item.key !== "hard_conflicts").length,
     totalDeduction: Math.round(totalDeduction * 10) / 10,
+    resourceTension: buildScheduleResourceTension(config, assignments, meta),
     deductions: deductions.sort((a, b) => b.impact - a.impact),
+  };
+}
+
+function buildScheduleResourceTension(config, assignments = [], meta = {}) {
+  const slots = schedulingSlots(config);
+  const externalAssignments = meta.externalAssignments || [];
+  const teacherRows = (config.teachers || [])
+    .map((teacher) => {
+      const assignedLessons = assignments.filter((assignment) => assignment.teacherId === teacher.id).length;
+      const capacity = Math.max(1, teacherWeeklyCapacity(config, teacher.id));
+      return {
+        teacherId: teacher.id,
+        teacherName: teacher.name,
+        subject: teacher.subject || teacher.primarySubjectName || "",
+        assignedLessons,
+        capacity,
+        utilization: Math.round((assignedLessons / capacity) * 100),
+      };
+    })
+    .filter((item) => item.assignedLessons > 0)
+    .sort((a, b) => b.utilization - a.utilization || b.assignedLessons - a.assignedLessons)
+    .slice(0, 6);
+
+  const allRoomRows = (config.rooms || []).map((room) => {
+    const assignedLessons = assignments.filter((assignment) => assignment.roomId === room.id).length;
+    const capacity = Math.max(1, slots.length * Number(room.capacity || 1));
+    return {
+      roomId: room.id,
+      roomName: room.name,
+      roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+      roomTypeName: room.roomTypeName || roomTypeName(room.roomType || room.type),
+      assignedLessons,
+      capacity,
+      utilization: Math.round((assignedLessons / capacity) * 100),
+    };
+  });
+  const roomRows = allRoomRows
+    .filter((item) => item.assignedLessons > 0 || item.roomType !== "homeroom")
+    .sort((a, b) => b.utilization - a.utilization || b.assignedLessons - a.assignedLessons)
+    .slice(0, 6);
+
+  const roomTypeRows = Array.from(
+    allRoomRows.reduce((map, room) => {
+      const existing = map.get(room.roomType) || {
+        roomType: room.roomType,
+        roomTypeName: room.roomTypeName,
+        assignedLessons: 0,
+        capacity: 0,
+        roomCount: 0,
+      };
+      existing.assignedLessons += room.assignedLessons;
+      existing.capacity += room.capacity;
+      existing.roomCount += 1;
+      map.set(room.roomType, existing);
+      return map;
+    }, new Map()).values(),
+  )
+    .map((row) => ({
+      ...row,
+      utilization: Math.round((row.assignedLessons / Math.max(1, row.capacity)) * 100),
+    }))
+    .sort((a, b) => b.utilization - a.utilization)
+    .slice(0, 6);
+
+  const candidateState = createSolverState(config, [], externalAssignments);
+  const candidateTasks = buildScheduleTasks(config, [])
+    .map((task) => {
+      const candidates = buildCandidateList(
+        config,
+        candidateState,
+        task,
+        slots,
+        seededRandom(hashString(`${config.termId}:${config.divisionId}:${config.gradeId}:${task.id}:diagnostic`)),
+      );
+      return {
+        taskId: task.id,
+        className: task.className,
+        subjectName: task.subjectName,
+        teacherPoolSize: task.teacherIds.length,
+        requiredRoomType: task.requiredRoomType,
+        requiredRoomTypeName: roomTypeName(task.requiredRoomType),
+        candidateCount: candidates.length,
+        risk: candidates.length === 0 ? "blocked" : candidates.length <= 3 ? "tight" : candidates.length <= 8 ? "watch" : "ok",
+      };
+    })
+    .sort((a, b) => a.candidateCount - b.candidateCount || a.className.localeCompare(b.className, "zh-CN"))
+    .slice(0, 8);
+
+  return {
+    teachers: teacherRows,
+    rooms: roomRows,
+    roomTypes: roomTypeRows,
+    candidateTasks,
   };
 }
 
@@ -2789,7 +2898,7 @@ function generateHeuristicScheduleSolution(config, options = {}) {
   );
   const conflicts = best?.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
   const unassignedCount = Math.max(requiredCount - assignments.length, 0);
-  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount });
+  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount, externalAssignments });
 
   return {
     assignments,
@@ -2892,7 +3001,7 @@ function solveScheduleWithOrTools(config, options = {}) {
   );
   const conflicts = validateScheduleConflicts(assignments, { externalAssignments, config });
   const unassignedCount = Math.max(requiredCount - assignments.length, 0);
-  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount });
+  const qualityReport = buildScheduleQualityReport(config, assignments, conflicts, { unassignedCount, externalAssignments });
 
   return {
     ok: true,

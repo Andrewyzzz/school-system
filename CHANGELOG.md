@@ -2,6 +2,28 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 增强排课质量诊断报告
+
+- 类型：功能 / 前端 / 后端 / 测试 / 文档 / 排课
+- 影响范围：行政排课 / 质量评分 / 诊断报告 / 资源紧张度 / benchmark
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check server/scheduling.js`
+  - `node --check app.js`
+  - `node --check tests/phase1-production.test.js`
+  - `node --check tests/scheduling-jobs.test.js`
+  - `node --check tests/scheduling-solver-benchmark.test.js`
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`（3 个规模均为 OR-Tools CP-SAT，fallback 0，冲突 0，未排 0，平均耗时 14.1 秒，平均评分 68）
+- 内容：
+  - 排课质量报告的扣分项新增代表课节明细，行政能看到低分项具体影响了哪些班级、课程、老师和节次。
+  - 新增资源紧张度诊断：最紧张老师、最紧张教室、候选最少课程，帮助管理员判断是老师池、教室资源还是规则过窄导致排课质量下降。
+  - 行政端质量评分卡增加诊断摘要区，排课后不再只显示技术分数，而是直接展示可操作的调整方向。
+  - 生产回归测试新增质量诊断字段断言，确保候选数量和代表课节持续返回。
+
 ## 2026-06-21 - 学期配置独立化
 
 - 类型：功能 / 后端 / 前端 / 测试 / 文档
