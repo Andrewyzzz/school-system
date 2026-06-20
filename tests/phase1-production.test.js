@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import {
   approveMonthlyWorkload,
+  archiveAcademicTerm,
   confirmMonthlyWorkload,
+  createAcademicTerm,
   createInitialData,
   createNotification,
   createSession,
@@ -15,6 +17,7 @@ import {
   queryNotifications,
   reviewTeacherPayrollDetail,
   revokeSession,
+  setCurrentAcademicTerm,
   teacherLessonsForWeek,
   teacherScheduleWeeks,
   unlockTeacherPayrollDetail,
@@ -125,6 +128,40 @@ const finance = actor(db, "finance");
 const termContext = queryTerms(db);
 assert.equal(termContext.currentTerm.id, "TERM-2026-PHASE1");
 assert.equal(termContext.currentTerm.current, true);
+
+const termDb = createInitialData({ teacherCount: 1000 });
+const termAdmin = actor(termDb, "admin");
+const createdTermResult = createAcademicTerm(
+  termDb,
+  {
+    name: "2026-2027 学年上学期",
+    schoolYear: "2026-2027",
+    semester: "上学期",
+    startDate: "2026-09-01",
+    endDate: "2027-01-20",
+    copyConfig: true,
+  },
+  termAdmin,
+);
+assert.equal(createdTermResult.term.status, "planned");
+assert.ok(createdTermResult.term.copiedConfigSummary, "新学期应记录复制配置摘要");
+const switchedTermResult = setCurrentAcademicTerm(termDb, createdTermResult.term.id, termAdmin);
+assert.equal(switchedTermResult.currentTerm.id, createdTermResult.term.id);
+const archivedTermResult = archiveAcademicTerm(termDb, "TERM-2026-PHASE1", termAdmin);
+assert.equal(archivedTermResult.terms.find((term) => term.id === "TERM-2026-PHASE1")?.status, "archived");
+assert.throws(
+  () =>
+    generateScheduleDraft(
+      termDb,
+      {
+        termId: "TERM-2026-PHASE1",
+        divisionId: "elementary",
+        gradeId: "elementary-g1",
+      },
+      termAdmin,
+    ),
+  /已归档/,
+);
 
 assert.equal(db.accounts.filter((account) => account.role === "teacher").length >= 1000, true);
 const teacherPublicAccount = publicAccount(teacherAccount, db);

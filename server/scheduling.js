@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { currentTerm, weekStartForDivision } from "./terms.js";
+import { currentTerm, ensureEditableTerm, weekStartForDivision } from "./terms.js";
 
 const ORTOOLS_SOLVER_PATH = fileURLToPath(new URL("./solver/ortools_scheduler.py", import.meta.url));
 
@@ -504,6 +504,7 @@ export function buildSchedulingConfig(db, options = {}) {
     termName: term.name,
     termStartDate: term.startDate,
     termEndDate: term.endDate,
+    termStatus: term.status,
     stageId: division.stageId,
     gradeId: grade.id,
     gradeName: grade.name,
@@ -628,6 +629,8 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "修改班级结构");
   const previousClasses = schedulingClasses(db, division, grade);
   const previousStructure = gradeClassStructure(previousClasses);
   const { classRows, roomRows, regularCount, experimentalCount } = buildClassAndRoomRows(division, grade, {
@@ -654,9 +657,9 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
 
   const validClassIds = new Set(classRows.map((schoolClass) => schoolClass.id));
   pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds);
-  clearScheduleDraftForScope(db, division, grade);
+  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
   db.scheduleChangeRequests = (db.scheduleChangeRequests || []).filter(
-    (request) => !(request.divisionId === division.id && request.gradeId === grade.id),
+    (request) => !(request.termId === scopeConfig.termId && request.divisionId === division.id && request.gradeId === grade.id),
   );
 
   const now = new Date().toISOString();
@@ -672,8 +675,8 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   db.meta.updatedAt = now;
 
   return {
-    config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }),
-    draft: findScheduleDraft(db, { divisionId: division.id, gradeId: grade.id }),
+    config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+    draft: findScheduleDraft(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
   };
 }
 
@@ -681,6 +684,8 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "修改课程规则");
   const rules = Array.isArray(options.rules) ? options.rules : [];
   if (!rules.length) {
     const error = new Error("请至少提交 1 条课程规则");
@@ -724,7 +729,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
       ),
   );
   db.gradeCourseRules.push(...nextRules);
-  clearScheduleDraftForScope(db, division, grade);
+  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -737,7 +742,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
     createdAt: db.meta.updatedAt,
   });
 
-  return { config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }) };
+  return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }) };
 }
 
 function normalizeSubjectName(value) {
@@ -782,6 +787,8 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "新增课程");
   const subjectName = normalizeSubjectName(options.subjectName);
   if (!subjectName) {
     const error = new Error("课程名称不能为空");
@@ -822,7 +829,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
     },
     actorAccount,
   );
-  clearScheduleDraftForScope(db, division, grade);
+  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
   db.meta.updatedAt = now;
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -836,13 +843,15 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
     createdAt: now,
   });
 
-  return { config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }), subject };
+  return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }), subject };
 }
 
 export function deleteGradeCourse(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "删除课程");
   const subjectId = String(options.subjectId || "").trim();
   const subject = subjectById(db, subjectId);
   if (!subject) {
@@ -872,7 +881,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
         constraint.subjectId === subjectId
       ),
   );
-  clearScheduleDraftForScope(db, division, grade);
+  clearScheduleDraftForScope(db, division, grade, currentTerm(db, scopeConfig.termId));
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -886,7 +895,7 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
     createdAt: db.meta.updatedAt,
   });
 
-  return { config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }), deletedSubjectId: subjectId };
+  return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }), deletedSubjectId: subjectId };
 }
 
 function normalizedConstraintNumbers(values, min, max) {
@@ -904,6 +913,8 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "新增硬约束");
   const subjectId = String(options.subjectId || "").trim();
   const subject = subjectById(db, subjectId);
   if (!subject) {
@@ -948,7 +959,7 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
     createdAt: now,
   });
 
-  return { config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }), constraint };
+  return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }), constraint };
 }
 
 export function deleteScheduleConstraint(db, options = {}, actorAccount = null) {
@@ -960,6 +971,10 @@ export function deleteScheduleConstraint(db, options = {}, actorAccount = null) 
     error.statusCode = 404;
     throw error;
   }
+  const division = divisionByStageId(existing.stageId) || DIVISIONS[0];
+  const grade = division.grades.find((item) => item.grade === Number(existing.grade)) || division.grades[0];
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  assertEditableScheduleTerm(scopeConfig, "删除硬约束");
   db.scheduleConstraints = db.scheduleConstraints.filter((constraint) => constraint.id !== constraintId);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
@@ -973,9 +988,7 @@ export function deleteScheduleConstraint(db, options = {}, actorAccount = null) 
     subjectId: existing.subjectId,
     createdAt: db.meta.updatedAt,
   });
-  const division = divisionByStageId(existing.stageId) || DIVISIONS[0];
-  const grade = division.grades.find((item) => item.grade === Number(existing.grade)) || division.grades[0];
-  return { config: buildSchedulingConfig(db, { divisionId: division.id, gradeId: grade.id }), deletedId: constraintId };
+  return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }), deletedId: constraintId };
 }
 
 function normalizeUnavailableSlots(slots = []) {
@@ -1015,6 +1028,12 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
     error.statusCode = 400;
     throw error;
   }
+  const scopeConfig = buildSchedulingConfig(db, {
+    termId: options.termId,
+    divisionId: division.id,
+    gradeId: options.gradeId || division.grades.find((item) => Number(item.grade) === Number(options.grade))?.id,
+  });
+  assertEditableScheduleTerm(scopeConfig, "修改老师时间规则");
   const teacherId = String(options.teacherId || "").trim();
   const teacher = teacherById(db, teacherId);
   if (!teacher || teacher.status !== "active" || teacher.stageId !== division.stageId) {
@@ -1054,8 +1073,9 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
 
   return {
     config: buildSchedulingConfig(db, {
+      termId: scopeConfig.termId,
       divisionId: division.id,
-      gradeId: options.gradeId || division.grades.find((item) => Number(item.grade) === Number(options.grade))?.id,
+      gradeId: scopeConfig.gradeId,
     }),
     rule: nextRule,
   };
@@ -1408,6 +1428,17 @@ function termScopeMatches(config, item) {
 
 function currentScope(config, item) {
   return termScopeMatches(config, item) && item.divisionId === config.divisionId && item.gradeId === config.gradeId;
+}
+
+function assertEditableScheduleTerm(config, actionName = "修改排课") {
+  ensureEditableTerm(
+    {
+      id: config.termId,
+      name: config.termName,
+      status: config.termStatus,
+    },
+    actionName,
+  );
 }
 
 function teacherById(db, teacherId) {
@@ -3075,6 +3106,7 @@ export function findScheduleDraft(db, options = {}) {
 export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "生成排课");
   assertTeacherAssignmentsComplete(config);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   const precheck = buildSchedulePrecheck(config, { externalAssignments });
@@ -3298,6 +3330,7 @@ function createPublishedScheduleVersion(db, config, draft, lessons, actorAccount
 export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "发布课表");
   const draft = findScheduleDraft(db, options);
 
   if (!draft) {
@@ -3399,6 +3432,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
 export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "回滚课表");
   const versionId = String(options.versionId || "").trim();
   const targetVersion = (db.scheduleVersions || []).find(
     (version) => scheduleVersionScopeMatches(version, config) && version.id === versionId,
@@ -3668,6 +3702,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
 export function createScheduleChangeRequest(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "发起调课");
   const draft = findScheduleDraft(db, options);
   if (!draft || draft.status !== "published") {
     const error = new Error("请先发布课表，再发起调课/代课申请");
@@ -3764,6 +3799,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
     throw error;
   }
   const config = buildSchedulingConfig(db, { termId: request.termId, divisionId: request.divisionId, gradeId: request.gradeId });
+  assertEditableScheduleTerm(config, "审批调课");
   const lesson = (db.lessonInstances || []).find((item) => item.id === request.lessonId);
   const validated = validatePublishedLessonChange(db, config, lesson, {
     teacherId: request.to.teacherId,
@@ -3838,6 +3874,7 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
 export function adjustScheduleAssignment(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "调整课表");
   const draft = findScheduleDraft(db, options);
 
   if (!draft) {
@@ -4000,6 +4037,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
 export function setScheduleAssignmentLock(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "修改课节锁定状态");
   const draft = findScheduleDraft(db, options);
 
   if (!draft) {
@@ -4105,6 +4143,7 @@ function restoreTemporaryReplanLocks(assignments = [], originalAssignments = [])
 export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "重排课程");
   assertTeacherAssignmentsComplete(config);
   const draft = findScheduleDraft(db, options);
 

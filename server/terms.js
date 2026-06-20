@@ -135,6 +135,10 @@ export function publicTerm(term) {
     endDate: term.endDate,
     status: term.status,
     current: Boolean(term.current),
+    copiedFromTermId: term.copiedFromTermId || "",
+    copiedConfigSummary: term.copiedConfigSummary || null,
+    createdAt: term.createdAt || "",
+    archivedAt: term.archivedAt || "",
     divisionWeekStarts: { ...(term.divisionWeekStarts || {}) },
   };
 }
@@ -142,4 +146,26 @@ export function publicTerm(term) {
 export function listTerms(db) {
   ensureTerms(db);
   return db.terms.map(publicTerm);
+}
+
+export function ensureEditableTerm(term, actionName = "修改") {
+  if (term?.status === "archived") {
+    const error = new Error(`该学期已归档，不能${actionName}`);
+    error.statusCode = 409;
+    error.details = { termId: term.id, termName: term.name, status: term.status };
+    throw error;
+  }
+}
+
+export function naturalWeekStart(dateKey = DEFAULT_TERMS[0].startDate) {
+  return startOfNaturalWeek(dateKey);
+}
+
+export function nextDivisionWeekStarts(startDate = DEFAULT_TERMS[0].startDate) {
+  const elementary = startOfNaturalWeek(startDate);
+  return {
+    elementary,
+    middle: addDays(elementary, 7),
+    high: addDays(elementary, 14),
+  };
 }

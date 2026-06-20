@@ -718,6 +718,103 @@ h2 {
   color: var(--action-dark);
 }
 
+.term-management-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.term-current-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 14px;
+}
+
+.term-current-card span,
+.term-current-card small,
+.term-current-meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.term-current-card strong {
+  display: block;
+  margin: 4px 0;
+  font-size: 18px;
+}
+
+.term-current-meta {
+  max-width: 360px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.term-create-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(130px, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.term-create-grid .field-label {
+  margin-bottom: 0;
+}
+
+.term-create-grid .field-label span {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.term-copy-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.term-list {
+  display: grid;
+  gap: 8px;
+}
+
+.term-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, auto) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.term-row-main {
+  display: grid;
+  gap: 4px;
+}
+
+.term-row-main strong {
+  font-size: 15px;
+}
+
+.term-row-main span,
+.term-row-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.term-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .schedule-adjust-panel,
 .schedule-change-panel {
   margin-bottom: 16px;
@@ -3765,6 +3862,28 @@ td {
   .schedule-stat span,
   .schedule-stat small {
     font-size: 12px;
+  }
+
+  .term-current-card,
+  .term-row {
+    grid-template-columns: 1fr;
+  }
+
+  .term-current-card {
+    display: grid;
+  }
+
+  .term-current-meta {
+    max-width: none;
+    text-align: left;
+  }
+
+  .term-create-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .term-row-actions {
+    justify-content: flex-start;
   }
 
   body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .panel {

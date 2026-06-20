@@ -777,6 +777,13 @@ let schedulingBackendState = {
   job: null,
   precheck: null,
 };
+let termManagementState = {
+  terms: [],
+  currentTerm: null,
+  loaded: false,
+  loading: false,
+  error: "",
+};
 let schedulingJobPollTimer = null;
 let classroomScreenState = {
   rooms: [],
@@ -2891,10 +2898,143 @@ function ensureFinanceTeacherDetail(teacherId, { generatePayroll = false } = {})
 
 function backendSchedulingOptions() {
   return {
-    termId: state.schedulingConfig.termId || "",
+    termId: termManagementState.currentTerm?.id || state.schedulingConfig.termId || "",
     divisionId: state.selectedSchedulingDivisionId,
     gradeId: state.selectedSchedulingGradeId,
   };
+}
+
+function applyTermContext(result = {}) {
+  termManagementState = {
+    ...termManagementState,
+    terms: Array.isArray(result.terms) ? result.terms : termManagementState.terms,
+    currentTerm: result.currentTerm || termManagementState.currentTerm,
+    loaded: true,
+    loading: false,
+    error: "",
+  };
+  if (termManagementState.currentTerm) {
+    state.schedulingConfig = {
+      ...state.schedulingConfig,
+      termId: termManagementState.currentTerm.id,
+      termName: termManagementState.currentTerm.name,
+      termStartDate: termManagementState.currentTerm.startDate,
+      termEndDate: termManagementState.currentTerm.endDate,
+      termStatus: termManagementState.currentTerm.status,
+    };
+  }
+}
+
+async function loadTermContext() {
+  if (!backendMode()) return null;
+  termManagementState = { ...termManagementState, loading: true, error: "" };
+  try {
+    const result = await apiRequest("/api/terms");
+    applyTermContext(result);
+    return result;
+  } catch (error) {
+    termManagementState = {
+      ...termManagementState,
+      loaded: true,
+      loading: false,
+      error: error.message || "学期信息加载失败",
+    };
+    showToast(termManagementState.error);
+    return null;
+  }
+}
+
+async function createBackendTerm() {
+  if (!backendMode() || currentRole() !== "admin") return;
+  const name = document.querySelector("#newTermName")?.value.trim();
+  const schoolYear = document.querySelector("#newTermSchoolYear")?.value.trim();
+  const semester = document.querySelector("#newTermSemester")?.value.trim();
+  const startDate = document.querySelector("#newTermStartDate")?.value;
+  const endDate = document.querySelector("#newTermEndDate")?.value;
+  const copyConfig = Boolean(document.querySelector("#copyTermConfig")?.checked);
+  termManagementState = { ...termManagementState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest("/api/terms", {
+      method: "POST",
+      body: {
+        name,
+        schoolYear,
+        semester,
+        startDate,
+        endDate,
+        copyConfig,
+        copyFromTermId: termManagementState.currentTerm?.id || "",
+      },
+    });
+    applyTermContext(result);
+    ["#newTermName", "#newTermSchoolYear", "#newTermSemester", "#newTermStartDate", "#newTermEndDate"].forEach(
+      (selector) => {
+        const input = document.querySelector(selector);
+        if (input) input.value = "";
+      },
+    );
+    showToast("新学期已创建");
+  } catch (error) {
+    termManagementState = {
+      ...termManagementState,
+      loaded: true,
+      loading: false,
+      error: error.message || "新建学期失败",
+    };
+    showToast(termManagementState.error);
+  }
+  render();
+}
+
+async function setBackendCurrentTerm(termId) {
+  if (!backendMode() || currentRole() !== "admin") return;
+  termManagementState = { ...termManagementState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest(`/api/terms/${encodeURIComponent(termId)}/current`, { method: "POST" });
+    applyTermContext(result);
+    state.schedulingDraft = {
+      ...clone(initialState.schedulingDraft),
+      divisionId: state.schedulingConfig.divisionId,
+      gradeId: state.schedulingConfig.gradeId,
+    };
+    schedulingBackendState = { ...schedulingBackendState, loaded: false, loading: false, error: "", job: null, precheck: null };
+    await loadBackendSchedulingContext();
+    showToast("当前学期已切换");
+  } catch (error) {
+    termManagementState = {
+      ...termManagementState,
+      loaded: true,
+      loading: false,
+      error: error.message || "切换当前学期失败",
+    };
+    showToast(termManagementState.error);
+  }
+  render();
+}
+
+async function archiveBackendTerm(termId) {
+  if (!backendMode() || currentRole() !== "admin") return;
+  const term = termManagementState.terms.find((item) => item.id === termId);
+  if (!term) return;
+  if (!window.confirm(`确认归档“${term.name}”？归档后该学期课表、调课和工资操作将只读。`)) return;
+  termManagementState = { ...termManagementState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest(`/api/terms/${encodeURIComponent(termId)}/archive`, { method: "POST" });
+    applyTermContext(result);
+    showToast("学期已归档");
+  } catch (error) {
+    termManagementState = {
+      ...termManagementState,
+      loaded: true,
+      loading: false,
+      error: error.message || "归档学期失败",
+    };
+    showToast(termManagementState.error);
+  }
+  render();
 }
 
 function applyBackendScheduleResult(result) {
@@ -5046,6 +5186,81 @@ function renderSchedule() {
   focusWeeklyCalendarDate(grid, selectedIndex);
 }
 
+function termStatusText(status = "planned") {
+  if (status === "active") return "进行中";
+  if (status === "archived") return "已归档";
+  return "计划中";
+}
+
+function termStatusClass(status = "planned") {
+  if (status === "active") return "status-pill done";
+  if (status === "archived") return "status-pill locked";
+  return "status-pill warning";
+}
+
+function renderTermManagement() {
+  const status = document.querySelector("#termManagementStatus");
+  if (!status) return;
+  const currentTerm = termManagementState.currentTerm || {
+    id: state.schedulingConfig.termId,
+    name: state.schedulingConfig.termName || "当前学期",
+    startDate: state.schedulingConfig.termStartDate || "",
+    endDate: state.schedulingConfig.termEndDate || "",
+    status: state.schedulingConfig.termStatus || "active",
+    current: true,
+  };
+  status.textContent = termManagementState.loading ? "处理中" : termStatusText(currentTerm.status);
+  status.className = termStatusClass(currentTerm.status);
+  document.querySelector("#currentTermName").textContent = currentTerm.name || "当前学期";
+  document.querySelector("#currentTermRange").textContent =
+    currentTerm.startDate && currentTerm.endDate ? `${currentTerm.startDate} 至 ${currentTerm.endDate}` : "未设置日期";
+  document.querySelector("#currentTermMeta").textContent =
+    currentTerm.status === "archived"
+      ? "该学期已归档，排课、调课、工作量和工资写操作均只读。"
+      : "排课、签到、工作量和工资均归属当前学期。";
+
+  const terms = termManagementState.terms.length ? termManagementState.terms : [currentTerm];
+  document.querySelector("#termList").innerHTML = terms
+    .map((term) => {
+      const copiedSummary = term.copiedConfigSummary
+        ? `复制配置：课程 ${term.copiedConfigSummary.courseRuleCount || 0}，任课 ${term.copiedConfigSummary.teacherAssignmentCount || 0}，约束 ${term.copiedConfigSummary.constraintCount || 0}`
+        : "未记录复制配置";
+      const isCurrent = Boolean(term.current);
+      const archived = term.status === "archived";
+      return `
+        <div class="term-row">
+          <div class="term-row-main">
+            <strong>${escapeHtml(term.name || term.id)}</strong>
+            <span>${escapeHtml(term.startDate || "")} 至 ${escapeHtml(term.endDate || "")}</span>
+          </div>
+          <div class="term-row-meta">
+            <span class="${termStatusClass(term.status)}">${termStatusText(term.status)}</span>
+            <span>${escapeHtml(copiedSummary)}</span>
+          </div>
+          <div class="term-row-actions">
+            ${
+              !isCurrent && !archived
+                ? `<button class="mini-button primary" data-set-current-term="${escapeHtml(term.id)}" type="button">设为当前</button>`
+                : ""
+            }
+            ${
+              !isCurrent && !archived
+                ? `<button class="mini-button danger" data-archive-term="${escapeHtml(term.id)}" type="button">归档</button>`
+                : ""
+            }
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  const createButton = document.querySelector("#createTermButton");
+  if (createButton) {
+    createButton.disabled = termManagementState.loading || !backendMode() || currentRole() !== "admin";
+    createButton.textContent = termManagementState.loading ? "处理中" : "新建学期";
+  }
+}
+
 function renderAdminScheduling() {
   const container = document.querySelector("#adminSchedulingView");
   if (!container) return;
@@ -5133,6 +5348,7 @@ function renderAdminScheduling() {
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
     `当前为${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
+  renderTermManagement();
   document.querySelector("#adminScopeText").textContent =
     `${config.divisionName}${config.gradeName} ${config.classCount} 个班，${config.subjects
       .map((subject) => subject.name)
@@ -5168,6 +5384,7 @@ function renderAdminScheduling() {
   const missingTeacherAssignments = missingClassSubjectTeacherAssignments(config);
   const precheck = schedulingBackendState.precheck || draft.precheck || null;
   const precheckBlocked = Number(precheck?.blockingCount || 0) > 0;
+  const termReadOnly = config.termStatus === "archived";
   const unassignedCount = Math.max(
     Number(draft.unassignedCount || 0),
     Number(draft.requiredLessonCount || requiredScheduleLessonCount()) - Number(assignments.length || 0),
@@ -5224,26 +5441,27 @@ function renderAdminScheduling() {
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
   const generateButton = document.querySelector("#generateSchedule");
-  generateButton.disabled = schedulingBackendState.loading || missingTeacherAssignments.length > 0 || precheckBlocked;
+  generateButton.disabled = termReadOnly || schedulingBackendState.loading || missingTeacherAssignments.length > 0 || precheckBlocked;
   generateButton.innerHTML = schedulingBackendState.loading
     ? `<span aria-hidden="true">…</span>生成中`
     : `<span aria-hidden="true">✓</span>一键生成排课`;
   document.querySelector("#confirmSchedule").disabled =
+    termReadOnly ||
     schedulingBackendState.loading ||
     assignments.length === 0 ||
     conflicts.length > 0 ||
     unassignedCount > 0 ||
     draft.status === "published";
-  document.querySelector("#saveCourseRules").disabled = schedulingBackendState.loading;
-  document.querySelector("#saveClassStructure").disabled = schedulingBackendState.loading;
-  document.querySelector("#addGradeCourse").disabled = schedulingBackendState.loading;
-  document.querySelector("#toggleCourseEditMode").disabled = schedulingBackendState.loading;
+  document.querySelector("#saveCourseRules").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#saveClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#addGradeCourse").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#toggleCourseEditMode").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addScheduleConstraint").disabled =
-    schedulingBackendState.loading || !(config.courseRules || []).some((rule) => rule.enabled);
-  document.querySelector("#saveTeacherRule").disabled = schedulingBackendState.loading || !(config.teachers || []).length;
+    termReadOnly || schedulingBackendState.loading || !(config.courseRules || []).some((rule) => rule.enabled);
+  document.querySelector("#saveTeacherRule").disabled = termReadOnly || schedulingBackendState.loading || !(config.teachers || []).length;
   document.querySelector("#refreshSchedulePrecheck").disabled = schedulingBackendState.loading;
   document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
-    button.disabled = schedulingBackendState.loading;
+    button.disabled = termReadOnly || schedulingBackendState.loading;
   });
 }
 
@@ -5285,7 +5503,8 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
 
   const hasDraft = assignments.length > 0;
   const isPublished = draft.status === "published";
-  const canAdjust = hasDraft && !isPublished && !schedulingBackendState.loading;
+  const termReadOnly = state.schedulingConfig.termStatus === "archived";
+  const canAdjust = hasDraft && !isPublished && !termReadOnly && !schedulingBackendState.loading;
   const lockedCount = (draft.assignments || []).filter((assignment) => assignment.locked).length;
 
   status.textContent = !hasDraft
@@ -5410,7 +5629,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
     ? "默认重排全部未锁定课程"
     : `仅重排：${scopeText}`;
 
-  assignmentSelect.disabled = !hasDraft || schedulingBackendState.loading;
+  assignmentSelect.disabled = !hasDraft || termReadOnly || schedulingBackendState.loading;
   teacherSelect.disabled = !canAdjust;
   dateSelect.disabled = !canAdjust;
   periodSelect.disabled = !canAdjust;
@@ -5473,6 +5692,7 @@ function renderScheduleChangePanel(assignments, selectedAssignment, draft) {
   }
 
   const isPublished = draft.status === "published";
+  const termReadOnly = state.schedulingConfig.termStatus === "archived";
   const hasAssignments = assignments.length > 0;
   const selected = isPublished ? selectedAssignment : null;
   assignmentSelect.innerHTML = isPublished && hasAssignments
@@ -5532,14 +5752,18 @@ function renderScheduleChangePanel(assignments, selectedAssignment, draft) {
         .join("")
     : `<option value="">暂无教室</option>`;
 
-  assignmentSelect.disabled = !isPublished || schedulingBackendState.loading;
-  teacherSelect.disabled = !isPublished || schedulingBackendState.loading;
-  dateSelect.disabled = !isPublished || schedulingBackendState.loading;
-  periodSelect.disabled = !isPublished || schedulingBackendState.loading;
-  roomSelect.disabled = !isPublished || schedulingBackendState.loading;
-  submitButton.disabled = !isPublished || !selected || schedulingBackendState.loading;
-  status.textContent = !isPublished ? "等待发布" : `${(state.schedulingConfig.changeRequests || []).filter((item) => item.status === "pending").length} 个待审批`;
-  status.className = !isPublished ? "status-pill" : "status-pill warning";
+  assignmentSelect.disabled = !isPublished || termReadOnly || schedulingBackendState.loading;
+  teacherSelect.disabled = !isPublished || termReadOnly || schedulingBackendState.loading;
+  dateSelect.disabled = !isPublished || termReadOnly || schedulingBackendState.loading;
+  periodSelect.disabled = !isPublished || termReadOnly || schedulingBackendState.loading;
+  roomSelect.disabled = !isPublished || termReadOnly || schedulingBackendState.loading;
+  submitButton.disabled = !isPublished || termReadOnly || !selected || schedulingBackendState.loading;
+  status.textContent = termReadOnly
+    ? "已归档只读"
+    : !isPublished
+      ? "等待发布"
+      : `${(state.schedulingConfig.changeRequests || []).filter((item) => item.status === "pending").length} 个待审批`;
+  status.className = termReadOnly ? "status-pill locked" : !isPublished ? "status-pill" : "status-pill warning";
   list.innerHTML = adminChangeRequestList(state.schedulingConfig);
 }
 
@@ -8476,8 +8700,10 @@ async function authenticate(username, password) {
         await loadPayrollRules();
       }
       if (payload.account.role === "admin") {
-        schedulingBackendState = { loaded: false, loading: false, error: "" };
+        schedulingBackendState = { loaded: false, loading: false, error: "", job: null, precheck: null };
+        termManagementState = { terms: [], currentTerm: null, loaded: false, loading: false, error: "" };
         resetPersonnelPage();
+        await loadTermContext();
         await loadBackendSchedulingContext();
         await loadFinanceTeacherPage({ page: 1 });
         await loadPayrollRules();
@@ -8593,6 +8819,18 @@ document.addEventListener("click", async (event) => {
   const cancelScheduleJobButton = event.target.closest("[data-cancel-schedule-job]");
   if (cancelScheduleJobButton) {
     await cancelBackendScheduleJob();
+    return;
+  }
+
+  const setCurrentTermButton = event.target.closest("[data-set-current-term]");
+  if (setCurrentTermButton) {
+    await setBackendCurrentTerm(setCurrentTermButton.dataset.setCurrentTerm);
+    return;
+  }
+
+  const archiveTermButton = event.target.closest("[data-archive-term]");
+  if (archiveTermButton) {
+    await archiveBackendTerm(archiveTermButton.dataset.archiveTerm);
     return;
   }
 
@@ -8952,6 +9190,8 @@ document.querySelector("#adminGradeSelect").addEventListener("change", async (ev
   }
 });
 
+document.querySelector("#createTermButton").addEventListener("click", createBackendTerm);
+
 document.querySelector("#regularClassCountInput").addEventListener("input", updateClassStructurePreview);
 document.querySelector("#experimentalClassCountInput").addEventListener("input", updateClassStructurePreview);
 
@@ -9128,7 +9368,7 @@ if (backendMode()) {
     loadPayrollRules();
   }
   if (currentRole() === "admin") {
-    loadBackendSchedulingContext();
+    loadTermContext().then(() => loadBackendSchedulingContext());
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
     loadPayrollRules();
   }

@@ -2,6 +2,32 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 完成学期管理闭环
+
+- 类型：功能 / 前端 / 后端 / 测试 / 文档
+- 影响范围：学期管理 / 排课作用域 / 历史归档 / 工作量确认 / 薪资锁定
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/server.js`
+  - `node --check server/storage.js`
+  - `node --check server/scheduling.js`
+  - `node --check server/terms.js`
+  - `node --check tests/phase1-production.test.js`
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`（3 个规模均为 OR-Tools CP-SAT，fallback 0，冲突 0，未排 0，平均耗时 13.6 秒，平均评分 68）
+- 内容：
+  - 行政排课页新增“学期管理”面板，支持查看当前学期、新建学期、设为当前学期和归档历史学期。
+  - 新增 `POST /api/terms`、`POST /api/terms/:termId/current`、`POST /api/terms/:termId/archive`。
+  - 新建学期可记录复制当前课程规则、班级结构、任课配置、老师规则和硬约束的摘要，作为新学期初始化依据。
+  - 归档学期进入只读状态，后端阻止排课生成、发布、回滚、调课、课表调整、工作量确认和工资生成/复核/锁定/解锁。
+  - 第一阶段生产测试新增学期创建、当前学期切换、历史学期归档和归档后禁止排课断言。
+- 注意事项：
+  - 当前配置表仍采用“当前配置继续沿用到新学期”的方式；如果后续要保留每学期独立课程配置快照，可以在第三阶段升级为配置版本表。
+
 ## 2026-06-20 - 增加第一阶段学期上下文
 
 - 类型：功能 / 后端 / 前端 / 测试 / 文档

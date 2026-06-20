@@ -34,7 +34,9 @@ import {
 import {
   confirmMonthlyWorkload,
   approveMonthlyWorkload,
+  archiveAcademicTerm,
   changeOwnPassword,
+  createAcademicTerm,
   createNotification,
   createSession,
   ensureDatabase,
@@ -58,6 +60,7 @@ import {
   revokeSession,
   reviewTeacherPayrollDetail,
   saveDatabase,
+  setCurrentAcademicTerm,
   setAccountStatus,
   teacherLessonsForWeek,
   teacherScheduleWeeks,
@@ -355,6 +358,46 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db);
       if (!auth) return;
       sendJson(res, 200, queryTerms(db));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/terms") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = createAcademicTerm(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      parts[0] === "api" &&
+      parts[1] === "terms" &&
+      parts[2] &&
+      parts[3] === "current"
+    ) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = setCurrentAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "POST" &&
+      parts[0] === "api" &&
+      parts[1] === "terms" &&
+      parts[2] &&
+      parts[3] === "archive"
+    ) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = archiveAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
       return;
     }
 

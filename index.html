@@ -400,6 +400,52 @@
             </div>
           </section>
 
+          <section class="panel term-management-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>学期管理</h2>
+                <p>每个学期独立发布课表，历史学期归档后只读，避免新旧课表、签到和工资数据混用。</p>
+              </div>
+              <span class="status-pill" id="termManagementStatus">当前学期</span>
+            </div>
+            <div class="term-current-card">
+              <div>
+                <span>当前学期</span>
+                <strong id="currentTermName">2026年第一阶段试运行学期</strong>
+                <small id="currentTermRange">2026-06-15 至 2026-07-31</small>
+              </div>
+              <div class="term-current-meta" id="currentTermMeta">排课、签到、工作量和工资均归属当前学期。</div>
+            </div>
+            <div class="term-create-grid" aria-label="新建学期">
+              <label class="field-label" for="newTermName">
+                <span>学期名称</span>
+                <input id="newTermName" type="text" placeholder="例如 2026-2027 学年上学期" />
+              </label>
+              <label class="field-label" for="newTermSchoolYear">
+                <span>学年</span>
+                <input id="newTermSchoolYear" type="text" placeholder="例如 2026-2027" />
+              </label>
+              <label class="field-label" for="newTermSemester">
+                <span>学期</span>
+                <input id="newTermSemester" type="text" placeholder="例如 上学期" />
+              </label>
+              <label class="field-label" for="newTermStartDate">
+                <span>开始日期</span>
+                <input id="newTermStartDate" type="date" />
+              </label>
+              <label class="field-label" for="newTermEndDate">
+                <span>结束日期</span>
+                <input id="newTermEndDate" type="date" />
+              </label>
+              <label class="term-copy-toggle">
+                <input id="copyTermConfig" type="checkbox" checked />
+                复制当前课程规则、班级结构和任课配置
+              </label>
+              <button class="primary-button compact-button" id="createTermButton" type="button">新建学期</button>
+            </div>
+            <div class="term-list" id="termList"></div>
+          </section>
+
           <section class="panel course-rules-panel">
             <div class="panel-heading">
               <div>

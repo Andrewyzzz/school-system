@@ -10,7 +10,16 @@ import {
   ensureTeacherSalaryProfile,
   normalizePayrollRules,
 } from "./payroll.js";
-import { currentTerm, defaultTerms, ensureTerms, listTerms, termForMonth } from "./terms.js";
+import {
+  currentTerm,
+  defaultTerms,
+  ensureEditableTerm,
+  ensureTerms,
+  listTerms,
+  nextDivisionWeekStarts,
+  publicTerm,
+  termForMonth,
+} from "./terms.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
@@ -584,7 +593,7 @@ function normalizeDatabase(db) {
   }
 
   const activeTerm = currentTerm(db);
-  ["scheduleDrafts", "scheduleVersions", "lessonInstances", "workloadConfirmations", "payrollDetails"].forEach((key) => {
+  ["scheduleDrafts", "scheduleVersions", "scheduleChangeRequests", "lessonInstances", "workloadConfirmations", "payrollDetails"].forEach((key) => {
     (db[key] || []).forEach((item) => {
       if (!item.termId) {
         const term = item.month ? termForMonth(db, item.month) : activeTerm;
@@ -857,6 +866,163 @@ export function queryTerms(db) {
     currentTerm: currentTerm(db),
     terms: listTerms(db),
   };
+}
+
+function normalizeTermDate(value, fallback = "") {
+  const text = String(value || fallback || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return fallback;
+  return text;
+}
+
+function normalizeTermText(value, fallback = "") {
+  return String(value || fallback || "").trim();
+}
+
+function createTermId(schoolYear, semester) {
+  const suffix = `${schoolYear || "term"}-${semester || "semester"}-${Date.now()}`
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toUpperCase();
+  return `TERM-${suffix || Date.now()}`;
+}
+
+function copiedConfigSummary(db) {
+  return {
+    courseRuleCount: (db.gradeCourseRules || []).length,
+    teacherAssignmentCount: (db.teacherAssignments || []).filter(
+      (assignment) => Object.values(assignment.classTeacherIds || {}).flat().length > 0,
+    ).length,
+    teacherRuleCount: (db.teacherScheduleRules || []).length,
+    constraintCount: (db.scheduleConstraints || []).filter((constraint) => constraint.active !== false).length,
+    classCount: (db.classes || []).filter((schoolClass) => schoolClass.active !== false).length,
+  };
+}
+
+export function createAcademicTerm(db, options = {}, actorAccount = null) {
+  ensureTerms(db);
+  const startDate = normalizeTermDate(options.startDate, "");
+  const endDate = normalizeTermDate(options.endDate, "");
+  if (!startDate || !endDate || endDate < startDate) {
+    const error = new Error("请填写有效的学期开始和结束日期");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const schoolYear = normalizeTermText(options.schoolYear, startDate.slice(0, 4));
+  const semester = normalizeTermText(options.semester, "上学期");
+  const name = normalizeTermText(options.name, `${schoolYear}${semester}`);
+  const id = normalizeTermText(options.id, createTermId(schoolYear, semester));
+  if ((db.terms || []).some((term) => term.id === id)) {
+    const error = new Error("学期编号已存在");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const copyFromTermId = normalizeTermText(options.copyFromTermId, currentTerm(db).id);
+  const makeCurrent = Boolean(options.current);
+  const now = new Date().toISOString();
+  const term = {
+    id,
+    name,
+    schoolYear,
+    semester,
+    startDate,
+    endDate,
+    status: makeCurrent ? "active" : "planned",
+    current: makeCurrent,
+    copiedFromTermId: options.copyConfig === false ? "" : copyFromTermId,
+    copiedConfigSummary: options.copyConfig === false ? null : copiedConfigSummary(db),
+    divisionWeekStarts:
+      options.divisionWeekStarts && typeof options.divisionWeekStarts === "object" && !Array.isArray(options.divisionWeekStarts)
+        ? { ...options.divisionWeekStarts }
+        : nextDivisionWeekStarts(startDate),
+    createdAt: now,
+    createdByAccountId: actorAccount?.id || "",
+    createdByName: actorAccount?.name || "",
+  };
+
+  if (makeCurrent) {
+    db.terms = db.terms.map((item) => ({
+      ...item,
+      current: false,
+      status: item.status === "active" ? "planned" : item.status,
+    }));
+  }
+  db.terms.push(term);
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "term_create",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    termId: term.id,
+    termName: term.name,
+    copiedFromTermId: term.copiedFromTermId,
+  });
+  return {
+    term: publicTerm(term),
+    ...queryTerms(db),
+  };
+}
+
+export function setCurrentAcademicTerm(db, termId = "", actorAccount = null) {
+  ensureTerms(db);
+  const target = db.terms.find((term) => term.id === termId);
+  if (!target) {
+    const error = new Error("学期不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (target.status === "archived") {
+    const error = new Error("已归档学期不能设为当前学期");
+    error.statusCode = 409;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  db.terms = db.terms.map((term) => ({
+    ...term,
+    current: term.id === target.id,
+    status: term.id === target.id ? "active" : term.status === "active" ? "planned" : term.status,
+    activatedAt: term.id === target.id ? now : term.activatedAt || "",
+  }));
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "term_set_current",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    termId: target.id,
+    termName: target.name,
+  });
+  return queryTerms(db);
+}
+
+export function archiveAcademicTerm(db, termId = "", actorAccount = null) {
+  ensureTerms(db);
+  const target = db.terms.find((term) => term.id === termId);
+  if (!target) {
+    const error = new Error("学期不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (target.current) {
+    const error = new Error("当前学期不能归档，请先切换到新学期");
+    error.statusCode = 409;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  target.status = "archived";
+  target.current = false;
+  target.archivedAt = now;
+  target.archivedByAccountId = actorAccount?.id || "";
+  target.archivedByName = actorAccount?.name || "";
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "term_archive",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    termId: target.id,
+    termName: target.name,
+  });
+  return queryTerms(db);
 }
 
 export function findActiveSession(db, token = "") {
@@ -1787,6 +1953,10 @@ function assertWorkloadSchoolApproved(db, teacherId, month = "2026-06") {
   return confirmation;
 }
 
+function assertMonthTermEditable(db, month = "2026-06", actionName = "修改月度数据") {
+  ensureEditableTerm(termForMonth(db, month), actionName);
+}
+
 function buildPayrollRows(db, payroll, workload) {
   if (!payroll || !workload) return [];
   return [
@@ -1839,6 +2009,7 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
 }
 
 export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "生成薪资");
   const detail = teacherPayrollDetail(db, teacherId, month);
   if (!detail) {
     const error = new Error("教师不存在");
@@ -1912,6 +2083,7 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
 }
 
 export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "复核薪资");
   assertWorkloadSchoolApproved(db, teacherId, month);
   const existing = findTeacherPayrollDetail(db, teacherId, month);
   const detail = existing || generateTeacherPayrollDetail(db, teacherId, month, actorAccount).generated;
@@ -1936,6 +2108,7 @@ export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", act
 }
 
 export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "锁定薪资");
   assertWorkloadSchoolApproved(db, teacherId, month);
   let target = findTeacherPayrollDetail(db, teacherId, month);
   if (!target) {
@@ -1986,6 +2159,7 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
 }
 
 export function unlockTeacherPayrollDetail(db, teacherId, month = "2026-06", reason = "", actorAccount = null) {
+  assertMonthTermEditable(db, month, "解锁薪资");
   const target = findTeacherPayrollDetail(db, teacherId, month);
   if (!target) {
     const error = new Error("本月薪资明细不存在，无法解锁");
@@ -2045,6 +2219,7 @@ export function unlockTeacherPayrollDetail(db, teacherId, month = "2026-06", rea
 
 export function generatePayrollBatch(db, options = {}, actorAccount = null) {
   const month = String(options.month || "2026-06");
+  assertMonthTermEditable(db, month, "批量生成薪资");
   const teacherIds = Array.isArray(options.teacherIds)
     ? options.teacherIds
     : db.teachers.filter((teacher) => teacher.status === "active").map((teacher) => teacher.id);
@@ -2353,6 +2528,7 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
 }
 
 export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "确认工作量");
   const workload = teacherMonthlyWorkload(db, teacherId, month);
   if (!workload) {
     const error = new Error("教师不存在");
@@ -2415,6 +2591,7 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
 }
 
 export function approveMonthlyWorkload(db, teacherId, month = "2026-06", step = "academic", actorAccount = null) {
+  assertMonthTermEditable(db, month, "审批工作量");
   const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
   if (!confirmation) {
     const error = new Error("老师尚未确认本月工作量");

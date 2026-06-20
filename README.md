@@ -55,6 +55,9 @@ http://127.0.0.1:4173/api/health
 - `POST /api/auth/login`：登录，返回 Token
 - `GET /api/me`：查看当前账号
 - `GET /api/terms`：读取当前学期和学期列表，排课、老师课表、月度工作量和薪资结算共用同一学期上下文
+- `POST /api/terms`：行政新建学期，可记录复制当前课程规则、班级结构和任课配置摘要
+- `POST /api/terms/:termId/current`：行政将计划中学期设为当前学期
+- `POST /api/terms/:termId/archive`：行政归档历史学期，归档后排课、调课、工作量和工资写操作只读
 - `POST /api/auth/change-password`：当前账号修改密码
 - `GET /api/reference` / `GET /api/reference/:kind`：读取学部、年级、班级、科目、教室、薪资规则和任课关系等基础配置
 - `GET /api/payroll-rules` / `PATCH /api/payroll-rules`：读取和更新任课老师薪资规则
