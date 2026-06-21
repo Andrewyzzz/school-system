@@ -626,18 +626,62 @@ function normalizeRoomResourceCounts(roomCounts = {}, fallback = {}) {
   );
 }
 
-function buildSpecialRoomRows(division, term, roomCounts) {
+function normalizeRoomName(value = "") {
+  return String(value || "").trim().replace(/\s+/g, " ");
+}
+
+function defaultSpecialRoomName(division, resource, index, count) {
+  return `${division.name}${resource.name}${count > 1 ? String(index).padStart(2, "0") : ""}`;
+}
+
+function roomCatalogFromRows(rooms = []) {
+  const types = specialRoomTypeSet();
+  return rooms
+    .filter((room) => room.active !== false && types.has(normalizeRoomType(room.roomType || room.type, "homeroom")))
+    .sort((a, b) => {
+      const typeOrder =
+        SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(a.roomType || a.type, "homeroom")) -
+        SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(b.roomType || b.type, "homeroom"));
+      if (typeOrder) return typeOrder;
+      return String(a.id || a.name || "").localeCompare(String(b.id || b.name || ""));
+    })
+    .map((room) => ({
+      id: room.id,
+      name: normalizeRoomName(room.name),
+      roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+    }));
+}
+
+function normalizeRoomResourceCatalog(roomCatalog = []) {
+  if (!Array.isArray(roomCatalog)) return [];
+  const types = specialRoomTypeSet();
+  return roomCatalog
+    .map((room) => ({
+      id: String(room.id || "").trim(),
+      name: normalizeRoomName(room.name),
+      roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+    }))
+    .filter((room) => types.has(room.roomType));
+}
+
+function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = []) {
   const rows = [];
+  const catalogByType = new Map();
+  normalizeRoomResourceCatalog(roomCatalog).forEach((room) => {
+    if (!catalogByType.has(room.roomType)) catalogByType.set(room.roomType, []);
+    catalogByType.get(room.roomType).push(room);
+  });
   SPECIAL_ROOM_RESOURCE_TYPES.forEach((resource) => {
     const count = normalizeClassCount(roomCounts[resource.type], resource.defaultCount, { min: 0, max: resource.max });
     for (let index = 1; index <= count; index += 1) {
       const roomId = `ROOM-${division.stageId}-${resource.code}-${String(index).padStart(2, "0")}`;
+      const catalogRoom = (catalogByType.get(resource.type) || [])[index - 1] || null;
       rows.push({
         id: roomId,
         termId: term.id,
         termName: term.name,
         stageId: division.stageId,
-        name: `${division.name}${resource.name}${count > 1 ? String(index).padStart(2, "0") : ""}`,
+        name: catalogRoom?.name || defaultSpecialRoomName(division, resource, index, count),
         roomType: resource.type,
         capacity: 1,
         qrCode: `ROOM:${roomId}`,
@@ -718,10 +762,46 @@ function classTypeLabel(classType) {
   return classType === "experimental" ? "实验班" : "普通班";
 }
 
+function normalizeClassRoomCatalog(classRoomCatalog = []) {
+  if (!Array.isArray(classRoomCatalog)) return [];
+  return classRoomCatalog
+    .map((room) => ({
+      classType: room.classType === "experimental" ? "experimental" : "regular",
+      index: normalizeClassCount(room.index, 0, { min: 1, max: 40 }),
+      roomName: normalizeRoomName(room.roomName || room.name),
+    }))
+    .filter((room) => room.index >= 1);
+}
+
+function classRoomCatalogFromClasses(classes = []) {
+  const counters = { regular: 0, experimental: 0 };
+  return classes
+    .slice()
+    .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
+    .map((schoolClass) => {
+      const classType = schoolClass.classType === "experimental" ? "experimental" : "regular";
+      counters[classType] += 1;
+      return {
+        classType,
+        index: counters[classType],
+        roomName: normalizeRoomName(schoolClass.room),
+      };
+    });
+}
+
+function classRoomNameFromCatalog(classRoomCatalog, classType, index, fallback) {
+  return (
+    normalizeClassRoomCatalog(classRoomCatalog).find(
+      (room) => room.classType === classType && Number(room.index) === Number(index),
+    )?.roomName || fallback
+  );
+}
+
 function buildClassAndRoomRows(division, grade, options = {}) {
   const term = options.term || null;
   const regularCount = normalizeClassCount(options.regularCount, 1, { min: 0, max: 30 });
   const experimentalCount = normalizeClassCount(options.experimentalCount, 0, { min: 0, max: 10 });
+  const classRoomCatalog = normalizeClassRoomCatalog(options.classRoomCatalog || []);
   if (regularCount + experimentalCount < 1) {
     const error = new Error("当前年级至少保留 1 个班");
     error.statusCode = 400;
@@ -742,6 +822,7 @@ function buildClassAndRoomRows(division, grade, options = {}) {
       classType === "experimental"
         ? `${division.shortName || division.name}${grade.name}实验${index}班`
         : `${division.shortName || division.name}${grade.name}-${pad(index)}`;
+    const catalogRoomName = classRoomNameFromCatalog(classRoomCatalog, classType, index, roomName);
     classRows.push({
       id: classId,
       termId: term?.id || "",
@@ -761,7 +842,7 @@ function buildClassAndRoomRows(division, grade, options = {}) {
       termId: term?.id || "",
       termName: term?.name || "",
       stageId: division.stageId,
-      name: roomName,
+      name: catalogRoomName,
       roomType: "homeroom",
       capacity: 1,
       qrCode: `ROOM:${roomId}`,
@@ -790,6 +871,8 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
   const classes = schedulingClasses(db, division, grade, term);
   const previousRooms = schedulingRooms(db, division, classes, term);
   const roomCounts = normalizeRoomResourceCounts(options.roomCounts || {}, specialRoomCounts(previousRooms));
+  const submittedCatalog = normalizeRoomResourceCatalog(options.roomCatalog);
+  const roomCatalog = submittedCatalog.length ? submittedCatalog : roomCatalogFromRows(previousRooms);
   const specialTypes = specialRoomTypeSet();
 
   db.rooms = (db.rooms || []).filter(
@@ -800,7 +883,8 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
         specialTypes.has(normalizeRoomType(room.roomType || room.type, "homeroom"))
       ),
   );
-  db.rooms.push(...buildSpecialRoomRows(division, term, roomCounts));
+  const roomRows = buildSpecialRoomRows(division, term, roomCounts, roomCatalog);
+  db.rooms.push(...roomRows);
 
   db.roomResourceOverrides = (db.roomResourceOverrides || []).filter(
     (override) => !(override.termId === term.id && override.stageId === division.stageId),
@@ -813,6 +897,7 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
     stageId: division.stageId,
     stageName: division.name,
     roomCounts,
+    roomCatalog: roomCatalogFromRows(roomRows),
     active: true,
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
@@ -831,6 +916,7 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
     termId: term.id,
     stageId: division.stageId,
     roomCounts,
+    roomCatalog: roomCatalogFromRows(roomRows),
     actorAccountId: actorAccount?.id || "",
     actorName: actorAccount?.name || "",
     createdAt: now,
@@ -871,10 +957,13 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   assertEditableScheduleTerm(scopeConfig, "修改班级结构");
   const previousClasses = schedulingClasses(db, division, grade, term);
   const previousStructure = gradeClassStructure(previousClasses);
+  const submittedClassRoomCatalog = normalizeClassRoomCatalog(options.classRoomCatalog);
+  const classRoomCatalog = submittedClassRoomCatalog.length ? submittedClassRoomCatalog : classRoomCatalogFromClasses(previousClasses);
   const { classRows, roomRows, regularCount, experimentalCount } = buildClassAndRoomRows(division, grade, {
     term,
     regularCount: options.regularCount ?? previousStructure.regularCount,
     experimentalCount: options.experimentalCount ?? previousStructure.experimentalCount,
+    classRoomCatalog,
   });
   const scopeClassIds = new Set(
     (db.classes || [])

@@ -348,7 +348,7 @@
             <div class="class-structure-card" aria-label="年级班级结构">
               <div class="class-structure-copy">
                 <strong>班级结构</strong>
-                <span id="classStructureHelp">设置当前年级普通班和实验班数量，保存后用于老师配置和排课。</span>
+                <span id="classStructureHelp">设置当前年级普通班、实验班数量，并维护每个班对应的普通教室名称。</span>
               </div>
               <div class="class-structure-controls">
                 <label class="field-label compact-field" for="regularClassCountInput">
@@ -370,6 +370,7 @@
                 </button>
               </div>
               <div class="class-structure-preview" id="classStructurePreview"></div>
+              <div class="room-catalog-list class-room-catalog-list" id="classRoomCatalog"></div>
             </div>
             <div class="class-structure-card room-resource-card" aria-label="教室资源配置">
               <div class="class-structure-copy">
@@ -417,6 +418,7 @@
                 </button>
               </div>
               <div class="class-structure-preview room-resource-preview" id="roomResourcePreview"></div>
+              <div class="room-catalog-list" id="roomResourceCatalog"></div>
             </div>
             <div class="summary-grid admin-scope-summary">
               <article class="metric">

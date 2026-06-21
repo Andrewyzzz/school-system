@@ -250,6 +250,11 @@ const classStructureResult = updateGradeClassStructure(
     grade: 1,
     regularCount: 8,
     experimentalCount: 2,
+    classRoomCatalog: [
+      { classType: "regular", index: 1, roomName: "小学一楼A101" },
+      { classType: "regular", index: 2, roomName: "小学一楼A102" },
+      { classType: "experimental", index: 1, roomName: "小学实验班教室E01" },
+    ],
   },
   admin,
 );
@@ -259,6 +264,11 @@ assert.equal(classStructureResult.config.classes.length, 10);
 assert.equal(
   classStructureResult.config.classes.filter((schoolClass) => schoolClass.classType === "experimental").length,
   2,
+);
+assert.equal(classStructureResult.config.classes.find((schoolClass) => schoolClass.name === "一年级 1 班")?.room, "小学一楼A101");
+assert.equal(
+  classStructureResult.config.classes.find((schoolClass) => schoolClass.name === "一年级实验1班")?.room,
+  "小学实验班教室E01",
 );
 const roomResourceResult = updateRoomResources(
   db,
@@ -272,6 +282,15 @@ const roomResourceResult = updateRoomResources(
       art: 0,
       music: 1,
     },
+    roomCatalog: [
+      { roomType: "lab", name: "物理实验室A" },
+      { roomType: "lab", name: "化学实验室B" },
+      { roomType: "lab", name: "综合实验室C" },
+      { roomType: "computer", name: "信息机房1" },
+      { roomType: "computer", name: "信息机房2" },
+      { roomType: "playground", name: "东操场" },
+      { roomType: "music", name: "音乐教室" },
+    ],
   },
   admin,
 );
@@ -280,6 +299,9 @@ assert.equal(roomResourceResult.config.roomResourceCounts.computer, 2);
 assert.equal(roomResourceResult.config.roomResourceCounts.art, 0);
 assert.equal(roomResourceResult.config.rooms.filter((room) => room.roomType === "lab").length, 3);
 assert.equal(roomResourceResult.config.rooms.filter((room) => room.roomType === "homeroom").length, 10);
+assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "lab" && room.name === "物理实验室A"));
+assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "computer" && room.name === "信息机房2"));
+assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "playground" && room.name === "东操场"));
 
 assert.throws(
   () =>

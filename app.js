@@ -3454,6 +3454,85 @@ function classStructurePreviewHtml(config, regularCount, experimentalCount) {
   return tags.length ? tags.join("") : `<span>至少保留 1 个普通班或实验班</span>`;
 }
 
+function classRoomCatalogFromConfig(config = state.schedulingConfig) {
+  const counters = { regular: 0, experimental: 0 };
+  return (config.classes || [])
+    .slice()
+    .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
+    .map((schoolClass) => {
+      const classType = schoolClass.classType === "experimental" ? "experimental" : "regular";
+      counters[classType] += 1;
+      return {
+        classType,
+        index: counters[classType],
+        className: schoolClass.name || "",
+        roomName: schoolClass.room || "",
+      };
+    });
+}
+
+function defaultClassRoomName(config, classType, index) {
+  return classType === "experimental"
+    ? `${config.divisionName}${config.gradeName}实验${index}班教室`
+    : `${config.divisionName}${config.gradeName}-${String(index).padStart(2, "0")}`;
+}
+
+function classRoomCatalogRows(
+  config = state.schedulingConfig,
+  regularCount = classStructureFromConfig(config).regularCount,
+  experimentalCount = classStructureFromConfig(config).experimentalCount,
+  sourceCatalog = classRoomCatalogFromConfig(config),
+) {
+  const byKey = new Map(sourceCatalog.map((room) => [`${room.classType}:${room.index}`, room]));
+  const rows = [];
+  for (let index = 1; index <= regularCount; index += 1) {
+    const existing = byKey.get(`regular:${index}`) || {};
+    rows.push({
+      classType: "regular",
+      index,
+      className: `${config.gradeName} ${index} 班`,
+      roomName: existing.roomName || defaultClassRoomName(config, "regular", index),
+    });
+  }
+  for (let index = 1; index <= experimentalCount; index += 1) {
+    const existing = byKey.get(`experimental:${index}`) || {};
+    rows.push({
+      classType: "experimental",
+      index,
+      className: `${config.gradeName}实验${index}班`,
+      roomName: existing.roomName || defaultClassRoomName(config, "experimental", index),
+    });
+  }
+  return rows;
+}
+
+function classRoomCatalogHtml(
+  config = state.schedulingConfig,
+  regularCount = classStructureFromConfig(config).regularCount,
+  experimentalCount = classStructureFromConfig(config).experimentalCount,
+  sourceCatalog = classRoomCatalogFromConfig(config),
+) {
+  const rows = classRoomCatalogRows(config, regularCount, experimentalCount, sourceCatalog);
+  if (!rows.length) return `<div class="empty-state">当前年级至少需要 1 个班级教室。</div>`;
+  return rows
+    .map(
+      (room) => `
+        <label class="room-catalog-row">
+          <span>${escapeHtml(room.className)}</span>
+          <input
+            data-class-room-name
+            data-class-type="${escapeHtml(room.classType)}"
+            data-class-index="${room.index}"
+            type="text"
+            value="${escapeHtml(room.roomName)}"
+            placeholder="例如 A301"
+          />
+        </label>
+      `,
+    )
+    .join("");
+}
+
 function roomResourceSummary(config = state.schedulingConfig) {
   const rooms = config.rooms || [];
   const counts = Object.fromEntries(SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource) => [resource.type, 0]));
@@ -3487,6 +3566,81 @@ function roomResourcePreviewHtml(config = state.schedulingConfig, counts = roomR
   return tags.join("");
 }
 
+function defaultRoomCatalogName(config, resource, index, count) {
+  return `${config.divisionName}${resource.label}${count > 1 ? String(index).padStart(2, "0") : ""}`;
+}
+
+function roomResourceCatalogFromConfig(config = state.schedulingConfig) {
+  const order = new Map(SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource, index) => [resource.type, index]));
+  return (config.rooms || [])
+    .filter((room) => normalizeScheduleRoomType(room.roomType || room.type) !== "homeroom")
+    .sort((a, b) => {
+      const typeOrder =
+        (order.get(normalizeScheduleRoomType(a.roomType || a.type)) ?? 99) -
+        (order.get(normalizeScheduleRoomType(b.roomType || b.type)) ?? 99);
+      if (typeOrder) return typeOrder;
+      return String(a.id || a.name || "").localeCompare(String(b.id || b.name || ""));
+    })
+    .map((room) => ({
+      id: room.id || "",
+      name: room.name || "",
+      roomType: normalizeScheduleRoomType(room.roomType || room.type),
+    }));
+}
+
+function roomResourceCatalogRows(
+  config = state.schedulingConfig,
+  counts = roomResourceSummary(config).counts,
+  sourceCatalog = roomResourceCatalogFromConfig(config),
+) {
+  const existingByType = new Map();
+  sourceCatalog.forEach((room) => {
+    if (!existingByType.has(room.roomType)) existingByType.set(room.roomType, []);
+    existingByType.get(room.roomType).push(room);
+  });
+  return SCHEDULE_SPECIAL_ROOM_RESOURCES.flatMap((resource) => {
+    const count = Math.max(Number(counts[resource.type] || 0), 0);
+    return Array.from({ length: count }, (_, index) => {
+      const existing = (existingByType.get(resource.type) || [])[index] || {};
+      return {
+        id: existing.id || "",
+        name: existing.name || defaultRoomCatalogName(config, resource, index + 1, count),
+        roomType: resource.type,
+        roomTypeName: resource.label,
+        index: index + 1,
+      };
+    });
+  });
+}
+
+function roomResourceCatalogHtml(
+  config = state.schedulingConfig,
+  counts = roomResourceSummary(config).counts,
+  sourceCatalog = roomResourceCatalogFromConfig(config),
+) {
+  const rows = roomResourceCatalogRows(config, counts, sourceCatalog);
+  if (!rows.length) {
+    return `<div class="empty-state">当前没有专用教室。需要实验室、机房、操场等资源时，先在上方填写数量。</div>`;
+  }
+  return rows
+    .map(
+      (room) => `
+        <label class="room-catalog-row">
+          <span>${escapeHtml(room.roomTypeName)} ${room.index}</span>
+          <input
+            data-room-catalog-name
+            data-room-id="${escapeHtml(room.id)}"
+            data-room-type="${escapeHtml(room.roomType)}"
+            type="text"
+            value="${escapeHtml(room.name)}"
+            placeholder="例如 物理实验室A"
+          />
+        </label>
+      `,
+    )
+    .join("");
+}
+
 function roomResourceInputId(roomType) {
   return `#roomCount${roomType.slice(0, 1).toUpperCase()}${roomType.slice(1)}Input`;
 }
@@ -3501,8 +3655,11 @@ function setRoomResourceInputs(config = state.schedulingConfig) {
 
 function updateRoomResourcePreview() {
   const counts = collectRoomResourceCountsFromForm({ validate: false });
+  const currentCatalog = collectRoomCatalogFromForm();
   const preview = document.querySelector("#roomResourcePreview");
   if (preview) preview.innerHTML = roomResourcePreviewHtml(state.schedulingConfig, counts);
+  const catalog = document.querySelector("#roomResourceCatalog");
+  if (catalog) catalog.innerHTML = roomResourceCatalogHtml(state.schedulingConfig, counts, currentCatalog);
 }
 
 function updateClassStructurePreview() {
@@ -3515,16 +3672,28 @@ function updateClassStructurePreview() {
   if (preview) {
     preview.innerHTML = classStructurePreviewHtml(config, safeRegularCount, safeExperimentalCount);
   }
+  const catalog = document.querySelector("#classRoomCatalog");
+  if (catalog) {
+    catalog.innerHTML = classRoomCatalogHtml(config, safeRegularCount, safeExperimentalCount, collectClassRoomCatalogFromForm());
+  }
 }
 
-function buildLocalSpecialRooms(config, roomCounts) {
+function buildLocalSpecialRooms(config, roomCounts, roomCatalog = roomResourceCatalogFromConfig(config)) {
+  const catalogByType = new Map();
+  roomCatalog.forEach((room) => {
+    const roomType = normalizeScheduleRoomType(room.roomType || room.type);
+    if (roomType === "homeroom") return;
+    if (!catalogByType.has(roomType)) catalogByType.set(roomType, []);
+    catalogByType.get(roomType).push(room);
+  });
   return SCHEDULE_SPECIAL_ROOM_RESOURCES.flatMap((resource) => {
     const count = Math.max(Number(roomCounts[resource.type] || 0), 0);
     return Array.from({ length: count }, (_, index) => {
+      const catalogRoom = (catalogByType.get(resource.type) || [])[index] || {};
       const roomId = `${config.gradeId}-${resource.type}-${String(index + 1).padStart(2, "0")}`;
       return {
         id: roomId,
-        name: `${config.divisionName}${config.gradeName}${resource.label}${count > 1 ? String(index + 1).padStart(2, "0") : ""}`,
+        name: String(catalogRoom.name || "").trim() || defaultRoomCatalogName(config, resource, index + 1, count),
         roomType: resource.type,
         roomTypeName: SCHEDULE_ROOM_TYPES[resource.type],
         sourceClassId: "",
@@ -3533,17 +3702,20 @@ function buildLocalSpecialRooms(config, roomCounts) {
   });
 }
 
-function applyLocalClassStructure(regularCount, experimentalCount) {
+function applyLocalClassStructure(regularCount, experimentalCount, classRoomCatalog = collectClassRoomCatalogFromForm()) {
   const config = state.schedulingConfig;
   const currentRoomCounts = roomResourceSummary(config).counts;
   const classes = [];
   const rooms = [];
+  const roomCatalogByKey = new Map(classRoomCatalog.map((room) => [`${room.classType}:${room.index}`, room]));
   const pushClass = (classType, index, displayOrder) => {
     const suffix = classType === "experimental" ? `E${String(index).padStart(2, "0")}` : String(index).padStart(2, "0");
     const classId = `${config.gradeId}-${suffix}`;
     const roomId = `${config.gradeId}-room-${suffix}`;
     const name = classType === "experimental" ? `${config.gradeName}实验${index}班` : `${config.gradeName} ${index} 班`;
-    const room = classType === "experimental" ? `${config.gradeName}实验${index}班教室` : `${config.gradeName}-${suffix}`;
+    const room =
+      roomCatalogByKey.get(`${classType}:${index}`)?.roomName ||
+      (classType === "experimental" ? `${config.gradeName}实验${index}班教室` : `${config.gradeName}-${suffix}`);
     classes.push({
       id: classId,
       name,
@@ -3610,6 +3782,7 @@ async function saveAdminClassStructure() {
           grade: state.schedulingConfig.grade,
           regularCount,
           experimentalCount,
+          classRoomCatalog: collectClassRoomCatalogFromForm(),
         },
       });
       applyBackendScheduleResult(result);
@@ -3632,6 +3805,14 @@ async function saveAdminClassStructure() {
   render();
 }
 
+function collectClassRoomCatalogFromForm() {
+  return Array.from(document.querySelectorAll("[data-class-room-name]")).map((input) => ({
+    classType: input.dataset.classType === "experimental" ? "experimental" : "regular",
+    index: Number.parseInt(input.dataset.classIndex || "0", 10),
+    roomName: input.value.trim(),
+  }));
+}
+
 function collectRoomResourceCountsFromForm(options = {}) {
   const validate = options.validate !== false;
   const counts = {};
@@ -3646,10 +3827,20 @@ function collectRoomResourceCountsFromForm(options = {}) {
   return counts;
 }
 
-function applyLocalRoomResources(roomCounts) {
+function collectRoomCatalogFromForm() {
+  return Array.from(document.querySelectorAll("[data-room-catalog-name]"))
+    .map((input) => ({
+      id: input.dataset.roomId || "",
+      roomType: normalizeScheduleRoomType(input.dataset.roomType || ""),
+      name: input.value.trim(),
+    }))
+    .filter((room) => room.roomType !== "homeroom");
+}
+
+function applyLocalRoomResources(roomCounts, roomCatalog = collectRoomCatalogFromForm()) {
   const config = state.schedulingConfig;
   const homeroomRooms = (config.rooms || []).filter((room) => normalizeScheduleRoomType(room.roomType || room.type) === "homeroom");
-  config.rooms = [...homeroomRooms, ...buildLocalSpecialRooms(config, roomCounts)];
+  config.rooms = [...homeroomRooms, ...buildLocalSpecialRooms(config, roomCounts, roomCatalog)];
   resetCourseDraftAfterConfigChange();
 }
 
@@ -3666,6 +3857,7 @@ async function saveAdminRoomResources() {
     schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
     renderAdminScheduling();
     try {
+      const roomCatalog = collectRoomCatalogFromForm();
       const result = await apiRequest("/api/scheduling/rooms", {
         method: "POST",
         body: {
@@ -3673,6 +3865,7 @@ async function saveAdminRoomResources() {
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           roomCounts,
+          roomCatalog,
         },
       });
       applyBackendScheduleResult(result);
@@ -5483,16 +5676,22 @@ function renderAdminScheduling() {
   document.querySelector("#regularClassCountInput").value = classStructure.regularCount;
   document.querySelector("#experimentalClassCountInput").value = classStructure.experimentalCount;
   document.querySelector("#classStructureHelp").textContent =
-    `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；实验班会作为独立班级参与老师配置和排课。`;
+    `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；下方普通教室目录会用于班级课表、签到教室和换教室。`;
   document.querySelector("#classStructurePreview").innerHTML = classStructurePreviewHtml(
+    config,
+    classStructure.regularCount,
+    classStructure.experimentalCount,
+  );
+  document.querySelector("#classRoomCatalog").innerHTML = classRoomCatalogHtml(
     config,
     classStructure.regularCount,
     classStructure.experimentalCount,
   );
   setRoomResourceInputs(config);
   document.querySelector("#roomResourceHelp").textContent =
-    `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室参与实验课、体育课等资源冲突校验。`;
+    `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室；下方目录名称会用于排课、换教室和教室二维码。`;
   document.querySelector("#roomResourcePreview").innerHTML = roomResourcePreviewHtml(config, roomSummary.counts);
+  document.querySelector("#roomResourceCatalog").innerHTML = roomResourceCatalogHtml(config, roomSummary.counts);
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
     `当前为${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;

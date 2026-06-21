@@ -827,6 +827,30 @@ h2 {
   background: #f9fbff;
 }
 
+.room-catalog-list {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.room-catalog-row {
+  display: grid;
+  gap: 6px;
+}
+
+.room-catalog-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.room-catalog-row input {
+  min-height: 40px;
+  font-size: 14px;
+}
+
 .term-management-panel {
   display: grid;
   gap: 14px;
@@ -4247,6 +4271,10 @@ td {
 
   .class-structure-controls .compact-field {
     max-width: none;
+  }
+
+  .room-catalog-list {
+    grid-template-columns: 1fr;
   }
 
   .compact-button {
