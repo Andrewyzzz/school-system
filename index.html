@@ -78,6 +78,10 @@
             <span aria-hidden="true">▦</span>
             行政排课
           </button>
+          <button class="nav-item" data-view="adminScheduleOverview" data-role="admin" type="button">
+            <span aria-hidden="true">▤</span>
+            课表总览
+          </button>
           <button class="nav-item" data-view="personnel" data-role="admin" type="button">
             <span aria-hidden="true">☷</span>
             人员列表
@@ -846,6 +850,34 @@
               </label>
             </div>
             <div class="schedule-week-grid" id="adminScheduleGrid"></div>
+          </section>
+        </section>
+
+        <section class="view" id="adminScheduleOverviewView" aria-labelledby="adminScheduleOverviewTitle">
+          <section class="panel schedule-overview-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="adminScheduleOverviewTitle">课表总览</h2>
+                <p id="adminScheduleOverviewIntro">按学部、年级和班级查看已生成或已发布课表，不在这里编辑排课规则。</p>
+              </div>
+              <span class="status-pill" id="adminScheduleOverviewStatus">读取中</span>
+            </div>
+            <div class="admin-schedule-overview-toolbar">
+              <label class="field-label" for="overviewDivisionSelect">
+                <span>选择学部</span>
+                <select class="lesson-select" id="overviewDivisionSelect"></select>
+              </label>
+              <label class="field-label" for="overviewGradeSelect">
+                <span>选择年级</span>
+                <select class="lesson-select" id="overviewGradeSelect"></select>
+              </label>
+              <label class="field-label" for="overviewClassSelect">
+                <span>选择班级</span>
+                <select class="lesson-select" id="overviewClassSelect"></select>
+              </label>
+            </div>
+            <div class="summary-grid admin-scope-summary schedule-overview-summary" id="adminScheduleOverviewSummary"></div>
+            <div class="schedule-week-grid admin-overview-grid" id="adminScheduleOverviewGrid"></div>
           </section>
         </section>
 

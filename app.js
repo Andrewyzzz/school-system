@@ -275,6 +275,7 @@ const initialState = {
   selectedSchedulingDivisionId: "elementary",
   selectedSchedulingGradeId: "elementary-g1",
   selectedSchedulingClassId: "P1C01",
+  selectedScheduleOverviewClassId: "",
   selectedScheduleAssignmentId: "",
   scheduleReplanScope: {
     classId: "",
@@ -835,6 +836,11 @@ const views = {
     title: "行政排课",
     el: document.querySelector("#adminSchedulingView"),
   },
+  adminScheduleOverview: {
+    role: "admin",
+    title: "课表总览",
+    el: document.querySelector("#adminScheduleOverviewView"),
+  },
   personnel: {
     role: "admin",
     title: "人员列表",
@@ -983,6 +989,9 @@ function loadSavedState() {
     };
     if (!schedulingConfig.classes.some((schoolClass) => schoolClass.id === nextState.selectedSchedulingClassId)) {
       nextState.selectedSchedulingClassId = schedulingConfig.classes[0]?.id || "";
+    }
+    if (!schedulingConfig.classes.some((schoolClass) => schoolClass.id === nextState.selectedScheduleOverviewClassId)) {
+      nextState.selectedScheduleOverviewClassId = nextState.selectedSchedulingClassId;
     }
     return sanitizeProductionState(nextState);
   } catch (error) {
@@ -1498,6 +1507,7 @@ function applySchedulingSelection(divisionId, gradeId = "") {
   state.selectedSchedulingDivisionId = nextConfig.divisionId;
   state.selectedSchedulingGradeId = nextConfig.gradeId;
   state.selectedSchedulingClassId = nextConfig.classes[0]?.id || "";
+  state.selectedScheduleOverviewClassId = nextConfig.classes[0]?.id || "";
   state.schedulingConfig = nextConfig;
   state.scheduleReplanScope = emptyScheduleReplanScope();
   resetSchedulingDraftForSelection();
@@ -3262,7 +3272,7 @@ async function loadBackendSchedulingContext(options = backendSchedulingOptions()
     showToast(schedulingBackendState.error);
   }
 
-  if (state.activeView === "adminScheduling") {
+  if (state.activeView === "adminScheduling" || state.activeView === "adminScheduleOverview") {
     render();
   }
 }
@@ -5340,6 +5350,7 @@ function render() {
   renderStep("课时任务", renderTasks);
   renderStep("我的课表", renderSchedule);
   renderStep("行政排课", renderAdminScheduling);
+  renderStep("课表总览", renderAdminScheduleOverview);
   renderStep("人员列表", renderPersonnelList);
   renderStep("教师导入", renderTeacherImport);
   renderStep("签入签出", renderScanner);
@@ -6095,7 +6106,7 @@ function renderAdminScheduling() {
     .join("");
   renderScheduleAdjustmentPanel(selectedClassAssignments, selectedAssignment, draft);
   renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
-  document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
+  document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments, { readonly: false });
 
   const generateButton = document.querySelector("#generateSchedule");
   generateButton.disabled = schedulingBackendState.loading || !readiness.canGenerate;
@@ -6118,6 +6129,110 @@ function renderAdminScheduling() {
   document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
     button.disabled = termReadOnly || schedulingBackendState.loading;
   });
+}
+
+function renderAdminScheduleOverview() {
+  const container = document.querySelector("#adminScheduleOverviewView");
+  if (!container) return;
+
+  const config = state.schedulingConfig;
+  const draft = schedulingDraftMatchesCurrent()
+    ? state.schedulingDraft
+    : {
+        ...clone(initialState.schedulingDraft),
+        divisionId: config.divisionId,
+        gradeId: config.gradeId,
+      };
+  const assignments = draft.assignments || [];
+  const selectedClassId =
+    config.classes.some((schoolClass) => schoolClass.id === state.selectedScheduleOverviewClassId)
+      ? state.selectedScheduleOverviewClassId
+      : config.classes.some((schoolClass) => schoolClass.id === state.selectedSchedulingClassId)
+        ? state.selectedSchedulingClassId
+        : config.classes[0]?.id || "";
+  state.selectedScheduleOverviewClassId = selectedClassId;
+  const selectedClass = config.classes.find((schoolClass) => schoolClass.id === selectedClassId) || config.classes[0] || null;
+  const selectedClassAssignments = assignments
+    .filter((assignment) => assignment.classId === selectedClassId)
+    .sort((a, b) => `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`));
+  const conflicts = validateScheduleConflicts(assignments);
+  const selectedClassConflicts = conflicts.filter((conflict) => {
+    const text = `${conflict.title || ""} ${conflict.text || ""}`;
+    return selectedClass ? text.includes(selectedClass.name) : false;
+  });
+  const status = document.querySelector("#adminScheduleOverviewStatus");
+  const summary = document.querySelector("#adminScheduleOverviewSummary");
+  const grid = document.querySelector("#adminScheduleOverviewGrid");
+  const divisionSelect = document.querySelector("#overviewDivisionSelect");
+  const gradeSelect = document.querySelector("#overviewGradeSelect");
+  const classSelect = document.querySelector("#overviewClassSelect");
+
+  document.querySelector("#adminScheduleOverviewTitle").textContent = `${config.divisionName}${config.gradeName}课表总览`;
+  document.querySelector("#adminScheduleOverviewIntro").textContent =
+    `查看${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName} ${formatWeekRange(config.weekStart)} 的班级课表。`;
+  divisionSelect.innerHTML = schedulingDivisionOptions(config.divisionId);
+  gradeSelect.innerHTML = schedulingGradeOptions(config.divisionId, config.gradeId);
+  classSelect.innerHTML = config.classes
+    .map(
+      (schoolClass) => `
+        <option value="${schoolClass.id}" ${schoolClass.id === selectedClassId ? "selected" : ""}>
+          ${schoolClass.name} · ${schoolClass.room}
+        </option>
+      `,
+    )
+    .join("");
+
+  if (schedulingBackendState.loading) {
+    status.textContent = schedulingBackendState.job
+      ? schedulingJobProgressText(schedulingBackendState.job)
+      : "后端读取中";
+    status.className = "status-pill warning";
+  } else if (schedulingBackendState.error) {
+    status.textContent = "后端异常";
+    status.className = "status-pill warning";
+  } else if (assignments.length === 0) {
+    status.textContent = "未生成";
+    status.className = "status-pill";
+  } else {
+    status.textContent = scheduleStatusText(draft.status);
+    status.className = draft.status === "published" ? "status-pill done" : "status-pill warning";
+  }
+
+  summary.innerHTML = `
+    <article class="metric">
+      <span>学部年级</span>
+      <strong>${escapeHtml(config.divisionName)}${escapeHtml(config.gradeName)}</strong>
+      <small>${config.classCount} 个班</small>
+    </article>
+    <article class="metric">
+      <span>当前班级</span>
+      <strong>${escapeHtml(selectedClass?.name || "未选择")}</strong>
+      <small>${escapeHtml(selectedClass?.room || "暂无教室")}</small>
+    </article>
+    <article class="metric">
+      <span>课表状态</span>
+      <strong>${escapeHtml(scheduleStatusText(draft.status))}</strong>
+      <small>${draft.publishedAt || draft.generatedAt || "等待生成"}</small>
+    </article>
+    <article class="metric">
+      <span>自然周</span>
+      <strong>${escapeHtml(formatWeekRange(config.weekStart))}</strong>
+      <small>${config.periods.length} 个节次</small>
+    </article>
+    <article class="metric">
+      <span>本班课时</span>
+      <strong>${selectedClassAssignments.length}</strong>
+      <small>全级 ${assignments.length} 节</small>
+    </article>
+    <article class="metric">
+      <span>冲突</span>
+      <strong>${selectedClassConflicts.length}</strong>
+      <small>全级 ${conflicts.length} 个</small>
+    </article>
+  `;
+  grid.innerHTML = selectedClassAssignments.length
+    ? adminScheduleGrid(selectedClassAssignments, { readonly: true })
+    : `<div class="empty-state schedule-overview-empty">当前学部年级还没有课表，请先到“行政排课”生成草稿或发布正式课表。</div>`;
 }
 
 function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
@@ -7866,7 +7981,7 @@ function conflictItem(conflict) {
   `;
 }
 
-function adminScheduleGrid(assignments) {
+function adminScheduleGrid(assignments, options = {}) {
   const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
   const grouped = weekDates.reduce((map, date) => {
     map.set(date, new Map());
@@ -7910,7 +8025,7 @@ function adminScheduleGrid(assignments) {
                     <div class="schedule-slot-content">
                       ${
                         periodAssignments.length
-                          ? periodAssignments.map(adminScheduleItem).join("")
+                          ? periodAssignments.map((assignment) => adminScheduleItem(assignment, options)).join("")
                           : `<span class="schedule-empty compact">空节</span>`
                       }
                     </div>
@@ -7925,8 +8040,9 @@ function adminScheduleGrid(assignments) {
     .join("");
 }
 
-function adminScheduleItem(assignment) {
+function adminScheduleItem(assignment, options = {}) {
   const canDrag =
+    !options.readonly &&
     backendMode() &&
     currentRole() === "admin" &&
     state.schedulingDraft.status !== "published" &&
@@ -10240,6 +10356,24 @@ document.querySelector("#adminGradeSelect").addEventListener("change", async (ev
   }
 });
 
+document.querySelector("#overviewDivisionSelect").addEventListener("change", async (event) => {
+  applySchedulingSelection(event.target.value);
+  if (backendMode() && currentRole() === "admin") {
+    await loadBackendSchedulingContext();
+  } else {
+    render();
+  }
+});
+
+document.querySelector("#overviewGradeSelect").addEventListener("change", async (event) => {
+  applySchedulingSelection(state.selectedSchedulingDivisionId, event.target.value);
+  if (backendMode() && currentRole() === "admin") {
+    await loadBackendSchedulingContext();
+  } else {
+    render();
+  }
+});
+
 document.querySelector("#createTermButton").addEventListener("click", createBackendTerm);
 
 document.querySelector("#regularClassCountInput").addEventListener("input", updateClassStructurePreview);
@@ -10249,6 +10383,12 @@ document.querySelector("#adminClassSelect").addEventListener("change", (event) =
   state.selectedSchedulingClassId = event.target.value;
   state.selectedScheduleAssignmentId = "";
   renderAdminScheduling();
+});
+
+document.querySelector("#overviewClassSelect").addEventListener("change", (event) => {
+  state.selectedScheduleOverviewClassId = event.target.value;
+  state.selectedSchedulingClassId = event.target.value;
+  renderAdminScheduleOverview();
 });
 
 document.querySelector("#adminAssignmentSelect").addEventListener("change", (event) => {

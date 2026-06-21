@@ -735,6 +735,36 @@ h2 {
   margin-bottom: 0;
 }
 
+.schedule-overview-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.admin-schedule-overview-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.admin-schedule-overview-toolbar .field-label,
+.admin-schedule-overview-toolbar .lesson-select {
+  margin-bottom: 0;
+}
+
+.schedule-overview-summary {
+  margin-bottom: 0;
+}
+
+.admin-overview-grid .schedule-item {
+  cursor: default;
+}
+
+.schedule-overview-empty {
+  grid-column: 1 / -1;
+  min-height: 120px;
+}
+
 .class-structure-card {
   display: grid;
   grid-template-columns: minmax(220px, 0.9fr) minmax(360px, 1.1fr);
@@ -4383,6 +4413,10 @@ td {
   }
 
   .admin-schedule-selectors {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-schedule-overview-toolbar {
     grid-template-columns: 1fr;
   }
 
