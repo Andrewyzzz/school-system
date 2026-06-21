@@ -147,6 +147,61 @@ button:focus-visible {
   margin-top: 14px;
 }
 
+.scheduled-login-panel {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.scheduled-login-panel > div:first-child {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 10px;
+}
+
+.scheduled-login-panel strong {
+  color: var(--ink);
+}
+
+.scheduled-login-panel span,
+.scheduled-login-panel small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scheduled-login-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 248px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.scheduled-login-button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scheduled-login-button:hover {
+  border-color: rgba(0, 32, 104, 0.28);
+  background: var(--surface-soft);
+}
+
+.scheduled-login-button strong,
+.scheduled-login-button span,
+.scheduled-login-button small {
+  overflow-wrap: anywhere;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 264px minmax(0, 1fr);
@@ -4406,6 +4461,10 @@ td {
 
   .notice-item {
     align-items: flex-start;
+  }
+
+  .scheduled-login-list {
+    grid-template-columns: 1fr;
   }
 
   .admin-schedule-actions {

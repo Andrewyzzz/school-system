@@ -688,6 +688,18 @@ const SECURITY_SECRET = "school-demo-signing-key";
 const TERM_START_WEEK = "2026-06-15";
 const TERM_WEEK_COUNT = 20;
 const PUBLISHED_LESSON_SOURCES = new Set(["admin-scheduling", "backend-scheduling"]);
+const ELEMENTARY_SCHEDULED_TEACHER_LOGIN_FALLBACK = [
+  { teacherId: "T0871", teacherName: "郝云昕", subjectName: "语文", username: "teacher0871" },
+  { teacherId: "T0892", teacherName: "孙清涵", subjectName: "数学", username: "teacher0892" },
+  { teacherId: "T0793", teacherName: "白梓岚", subjectName: "英语", username: "teacher0793" },
+  { teacherId: "T0754", teacherName: "邓启晟", subjectName: "物理", username: "teacher0754" },
+  { teacherId: "T0874", teacherName: "崔彦岚", subjectName: "物理", username: "teacher0874" },
+  { teacherId: "T0844", teacherName: "蔡彦澄", subjectName: "物理", username: "teacher0844" },
+  { teacherId: "T0865", teacherName: "谭云辰", subjectName: "化学", username: "teacher0865" },
+  { teacherId: "T0826", teacherName: "唐彦然", subjectName: "体育", username: "teacher0826" },
+  { teacherId: "T0856", teacherName: "钟彦宇", subjectName: "体育", username: "teacher0856" },
+  { teacherId: "T0733", teacherName: "胡梓珂", subjectName: "英语", username: "teacher0733" },
+];
 const loginUsers = [
   { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
@@ -1278,6 +1290,84 @@ function teacherLessons(teacherId) {
 
 function teacherName(teacherId) {
   return teacherById(teacherId)?.name || "未知老师";
+}
+
+function teacherLoginUsername(teacherId = "") {
+  const numericId = String(teacherId).replace(/^T/i, "");
+  return numericId ? `teacher${numericId.padStart(4, "0")}` : "";
+}
+
+function elementaryScheduledTeacherLoginOptions() {
+  const draft = state.schedulingDraft || {};
+  const assignments =
+    draft.divisionId === "elementary" && Array.isArray(draft.assignments) ? draft.assignments : [];
+  const byTeacher = new Map();
+
+  assignments.forEach((assignment) => {
+    if (!assignment.teacherId) return;
+    if (!byTeacher.has(assignment.teacherId)) {
+      byTeacher.set(assignment.teacherId, {
+        teacherId: assignment.teacherId,
+        teacherName: assignment.teacherName || teacherName(assignment.teacherId),
+        subjectName: assignment.subjectName || teacherById(assignment.teacherId)?.subject || "任课",
+        username: teacherLoginUsername(assignment.teacherId),
+        lessonCount: 0,
+      });
+    }
+    const row = byTeacher.get(assignment.teacherId);
+    row.lessonCount += 1;
+  });
+
+  const rows = Array.from(byTeacher.values()).filter((row) => row.username);
+  if (!rows.length) {
+    return ELEMENTARY_SCHEDULED_TEACHER_LOGIN_FALLBACK.map((row) => ({
+      ...row,
+      lessonCount: 0,
+    }));
+  }
+
+  return rows.sort((a, b) => {
+    const subjectCompare = String(a.subjectName).localeCompare(String(b.subjectName), "zh-CN");
+    if (subjectCompare) return subjectCompare;
+    return String(a.teacherName).localeCompare(String(b.teacherName), "zh-CN");
+  });
+}
+
+function ensureLocalScheduledTeacherAccount(option) {
+  const teacherId = option.teacherId;
+  if (!teacherById(teacherId)) {
+    state.teachers.push({
+      id: teacherId,
+      name: option.teacherName,
+      department: "小学部",
+      subject: option.subjectName || "任课",
+      grade: "小学部已排课",
+      position: "小学部任课教师",
+      boundDeviceId: "scheduled-login",
+      salaryProfile: {
+        baseSalary: 6500,
+        positionSalary: 1500,
+        homeroomAllowance: 0,
+        famousTeacherReward: 0,
+        approvedOvertimeHours: 0,
+      },
+    });
+  }
+
+  const accountId = `scheduled-${teacherId}`;
+  if (!state.accounts.some((account) => account.id === accountId)) {
+    state.accounts.push({
+      id: accountId,
+      role: "teacher",
+      name: option.teacherName,
+      title: "小学部排课老师",
+      teacherId,
+      department: "小学部",
+      deviceId: "scheduled-login",
+      source: "scheduled-login",
+    });
+  }
+  return accountId;
 }
 
 function roleMatches(allowedRole, role) {
@@ -5369,6 +5459,24 @@ function renderAuth() {
   const loggedIn = Boolean(sessionAccountId);
   document.querySelector("#loginScreen").classList.toggle("is-hidden", loggedIn);
   document.querySelector("#appShell").classList.toggle("is-hidden", !loggedIn);
+  renderScheduledTeacherLoginShortcuts();
+}
+
+function renderScheduledTeacherLoginShortcuts() {
+  const container = document.querySelector("#scheduledTeacherLoginList");
+  if (!container) return;
+  const rows = elementaryScheduledTeacherLoginOptions();
+  container.innerHTML = rows
+    .map(
+      (row) => `
+        <button class="scheduled-login-button" data-demo-login="${escapeHtml(row.username)}" type="button">
+          <strong>${escapeHtml(row.teacherName)}</strong>
+          <span>${escapeHtml(row.subjectName)} · ${escapeHtml(row.username)}</span>
+          <small>${row.lessonCount ? `${row.lessonCount} 节课` : "小学部排课老师"}</small>
+        </button>
+      `,
+    )
+    .join("");
 }
 
 function renderShell() {
@@ -9778,12 +9886,25 @@ function loginAccount(accountId) {
 }
 
 function authenticateDemo(username, password, fallbackMessage = "用户名或密码不正确") {
+  const trimmedUsername = username.trim();
   const matched = loginUsers.find(
-    (user) => user.username === username.trim() && user.password === password,
+    (user) => user.username === trimmedUsername && user.password === password,
   );
+  const scheduledTeacher = !matched
+    ? elementaryScheduledTeacherLoginOptions().find(
+        (option) => option.username === trimmedUsername && password === "123456",
+      )
+    : null;
   if (!matched) {
-    document.querySelector("#loginError").textContent = fallbackMessage;
-    return false;
+    if (!scheduledTeacher) {
+      document.querySelector("#loginError").textContent = fallbackMessage;
+      return false;
+    }
+    document.querySelector("#loginError").textContent = "";
+    clearBackendSession();
+    resetPersonnelPage();
+    loginAccount(ensureLocalScheduledTeacherAccount(scheduledTeacher));
+    return true;
   }
   document.querySelector("#loginError").textContent = "";
   clearBackendSession();
