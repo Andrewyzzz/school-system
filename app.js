@@ -3565,9 +3565,10 @@ function syncCourseRuleCoverageInput(subjectId) {
   const label = coverageInput.closest(".field-label");
   if (label) label.classList.toggle("disabled-field", autoCovered);
   if (hint) {
+    hint.classList.toggle("active", autoCovered);
     hint.textContent = autoCovered
       ? "已由每天至少规则自动覆盖 5 个教学日"
-      : "不填则不限制分布天数";
+      : "覆盖天数用于避免课程集中在少数几天；不填则不限。";
   }
 }
 
@@ -7068,103 +7069,122 @@ function adminCourseRuleItem(rule) {
             : ""
         }
       </div>
-      <p class="course-rule-summary">${escapeHtml(courseRuleConstraintSummary(rule))}</p>
+      ${courseRulesEditMode ? "" : `<p class="course-rule-summary">${escapeHtml(courseRuleConstraintSummary(rule))}</p>`}
       ${
         courseRulesEditMode
           ? `
-            <div class="course-rule-constraint-grid" aria-label="${escapeHtml(rule.subjectName)}课程限制">
-              <label class="field-label compact-field" for="courseMinDay-${subjectId}">
-                <span>每天至少</span>
-                <div class="input-with-unit">
-                  <input
-                    id="courseMinDay-${subjectId}"
-                    data-course-rule-min-day="${subjectId}"
-                    type="number"
-                    min="0"
-                    max="${state.schedulingConfig.periods?.length || 6}"
-                    value="${Number(rule.minPerClassPerDay || 0)}"
-                  />
-                  <em>节</em>
+            <div class="course-rule-editor" aria-label="${escapeHtml(rule.subjectName)}课程限制">
+              <section class="course-rule-section">
+                <div class="course-rule-section-title">
+                  <strong>分布规则</strong>
+                  <span>填 0 表示不限制</span>
                 </div>
-              </label>
-              <label class="field-label compact-field" for="courseMaxDay-${subjectId}">
-                <span>每天最多</span>
-                <div class="input-with-unit">
-                  <input
-                    id="courseMaxDay-${subjectId}"
-                    data-course-rule-max-day="${subjectId}"
-                    type="number"
-                    min="0"
-                    max="${state.schedulingConfig.periods?.length || 6}"
-                    value="${Number(rule.maxPerClassPerDay || 0)}"
-                  />
-                  <em>节</em>
+                <div class="course-rule-constraint-grid">
+                  <label class="field-label compact-field" for="courseMinDay-${subjectId}">
+                    <span>每天至少</span>
+                    <div class="input-with-unit">
+                      <input
+                        id="courseMinDay-${subjectId}"
+                        data-course-rule-min-day="${subjectId}"
+                        type="number"
+                        min="0"
+                        max="${state.schedulingConfig.periods?.length || 6}"
+                        value="${Number(rule.minPerClassPerDay || 0)}"
+                      />
+                      <em>节</em>
+                    </div>
+                  </label>
+                  <label class="field-label compact-field" for="courseMaxDay-${subjectId}">
+                    <span>每天最多</span>
+                    <div class="input-with-unit">
+                      <input
+                        id="courseMaxDay-${subjectId}"
+                        data-course-rule-max-day="${subjectId}"
+                        type="number"
+                        min="0"
+                        max="${state.schedulingConfig.periods?.length || 6}"
+                        value="${Number(rule.maxPerClassPerDay || 0)}"
+                      />
+                      <em>节</em>
+                    </div>
+                  </label>
+                  <label class="field-label compact-field ${minPerClassPerDay > 0 ? "disabled-field" : ""}" for="courseMinWeeklyDays-${subjectId}">
+                    <span>覆盖天数</span>
+                    <div class="input-with-unit">
+                      <input
+                        id="courseMinWeeklyDays-${subjectId}"
+                        data-course-rule-min-weekly-days="${subjectId}"
+                        type="number"
+                        min="0"
+                        max="5"
+                        value="${minWeeklyDays}"
+                        ${minPerClassPerDay > 0 ? "disabled" : ""}
+                      />
+                      <em>天</em>
+                    </div>
+                  </label>
+                  <label class="field-label compact-field" for="courseMaxConsecutive-${subjectId}">
+                    <span>最多连续</span>
+                    <div class="input-with-unit">
+                      <input
+                        id="courseMaxConsecutive-${subjectId}"
+                        data-course-rule-max-consecutive="${subjectId}"
+                        type="number"
+                        min="0"
+                        max="${state.schedulingConfig.periods?.length || 6}"
+                        value="${maxConsecutive}"
+                      />
+                      <em>节</em>
+                    </div>
+                  </label>
                 </div>
-              </label>
-              <label class="field-label compact-field ${minPerClassPerDay > 0 ? "disabled-field" : ""}" for="courseMinWeeklyDays-${subjectId}">
-                <span>覆盖天数</span>
-                <div class="input-with-unit">
-                  <input
-                    id="courseMinWeeklyDays-${subjectId}"
-                    data-course-rule-min-weekly-days="${subjectId}"
-                    type="number"
-                    min="0"
-                    max="5"
-                    value="${minWeeklyDays}"
-                    ${minPerClassPerDay > 0 ? "disabled" : ""}
-                  />
-                  <em>天</em>
-                </div>
-                <small class="field-hint" data-course-rule-coverage-hint="${subjectId}">
-                  ${minPerClassPerDay > 0 ? "已由每天至少规则自动覆盖 5 个教学日" : "不填则不限制分布天数"}
-                </small>
-              </label>
-              <label class="field-label compact-field" for="courseMaxConsecutive-${subjectId}">
-                <span>最多连续</span>
-                <div class="input-with-unit">
-                  <input
-                    id="courseMaxConsecutive-${subjectId}"
-                    data-course-rule-max-consecutive="${subjectId}"
-                    type="number"
-                    min="0"
-                    max="${state.schedulingConfig.periods?.length || 6}"
-                    value="${maxConsecutive}"
-                  />
-                  <em>节</em>
-                </div>
-              </label>
-              <label class="field-label compact-field" for="courseForbidden-${subjectId}">
-                <span>禁排节次</span>
-                <input
-                  id="courseForbidden-${subjectId}"
-                  data-course-rule-forbidden-periods="${subjectId}"
-                  type="text"
-                  placeholder="例如 1,6"
-                  value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}"
-                />
-              </label>
-              <label class="field-label compact-field" for="coursePreferred-${subjectId}">
-                <span>偏好时段</span>
-                <select
-                  class="lesson-select"
-                  id="coursePreferred-${subjectId}"
-                  data-course-rule-preferred-day-part="${subjectId}"
+                <div
+                  class="course-rule-auto-note ${minPerClassPerDay > 0 ? "active" : ""}"
+                  data-course-rule-coverage-hint="${subjectId}"
                 >
-                  <option value="any" ${preferredDayPart === "any" ? "selected" : ""}>不限</option>
-                  <option value="morning" ${preferredDayPart === "morning" ? "selected" : ""}>上午</option>
-                  <option value="afternoon" ${preferredDayPart === "afternoon" ? "selected" : ""}>下午</option>
-                </select>
-              </label>
-              <label class="field-label compact-field" for="courseRoomType-${subjectId}">
-                <span>教室要求</span>
-                <select
-                  class="lesson-select"
-                  id="courseRoomType-${subjectId}"
-                  data-course-rule-room-type="${subjectId}"
-                >
-                  ${scheduleRoomTypeOptions(requiredRoomType)}
-                </select>
-              </label>
+                  ${minPerClassPerDay > 0 ? "已由每天至少规则自动覆盖 5 个教学日" : "覆盖天数用于避免课程集中在少数几天；不填则不限。"}
+                </div>
+              </section>
+              <section class="course-rule-section">
+                <div class="course-rule-section-title">
+                  <strong>排课偏好</strong>
+                  <span>禁排会作为硬约束执行</span>
+                </div>
+                <div class="course-rule-preference-grid">
+                  <label class="field-label compact-field" for="courseForbidden-${subjectId}">
+                    <span>禁排节次</span>
+                    <input
+                      id="courseForbidden-${subjectId}"
+                      data-course-rule-forbidden-periods="${subjectId}"
+                      type="text"
+                      placeholder="例如 1,6"
+                      value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}"
+                    />
+                  </label>
+                  <label class="field-label compact-field" for="coursePreferred-${subjectId}">
+                    <span>偏好时段</span>
+                    <select
+                      class="lesson-select"
+                      id="coursePreferred-${subjectId}"
+                      data-course-rule-preferred-day-part="${subjectId}"
+                    >
+                      <option value="any" ${preferredDayPart === "any" ? "selected" : ""}>不限</option>
+                      <option value="morning" ${preferredDayPart === "morning" ? "selected" : ""}>上午</option>
+                      <option value="afternoon" ${preferredDayPart === "afternoon" ? "selected" : ""}>下午</option>
+                    </select>
+                  </label>
+                  <label class="field-label compact-field" for="courseRoomType-${subjectId}">
+                    <span>教室要求</span>
+                    <select
+                      class="lesson-select"
+                      id="courseRoomType-${subjectId}"
+                      data-course-rule-room-type="${subjectId}"
+                    >
+                      ${scheduleRoomTypeOptions(requiredRoomType)}
+                    </select>
+                  </label>
+                </div>
+              </section>
               <input type="hidden" data-course-rule-consecutive="${subjectId}" value="${maxConsecutive === 1 ? "false" : "true"}" />
             </div>
           `

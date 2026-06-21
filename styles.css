@@ -1422,20 +1422,21 @@ h2 {
 }
 
 .course-rule-list {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
   margin-bottom: 12px;
 }
 
 .course-rule-item {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   align-items: stretch;
+  background: #fff;
 }
 
 .course-rule-top {
   display: grid;
-  grid-template-columns: minmax(112px, 1fr) minmax(84px, 96px) minmax(132px, 150px) auto;
-  gap: 10px;
+  grid-template-columns: minmax(120px, 1fr) 96px 150px auto;
+  gap: 12px;
   align-items: end;
 }
 
@@ -1450,13 +1451,85 @@ h2 {
   line-height: 1.45;
 }
 
+.course-rule-editor {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.course-rule-section {
+  display: grid;
+  gap: 10px;
+}
+
+.course-rule-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.course-rule-section-title strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.course-rule-section-title span {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .course-rule-constraint-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
   align-items: end;
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
+}
+
+.course-rule-preference-grid {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) minmax(150px, 1.1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.course-rule-item .compact-field {
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.course-rule-item .lesson-select {
+  margin-bottom: 0;
+  border-radius: 6px;
+}
+
+.course-rule-item input,
+.course-rule-item .input-with-unit,
+.course-rule-item .lesson-select {
+  min-height: 40px;
+}
+
+.course-rule-item .input-with-unit input {
+  min-height: 38px;
+}
+
+.course-rule-auto-note {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 7px 10px;
+}
+
+.course-rule-auto-note.active {
+  border-color: rgba(0, 32, 104, 0.2);
+  background: rgba(0, 32, 104, 0.06);
+  color: var(--brand);
 }
 
 .panel-heading-actions {
