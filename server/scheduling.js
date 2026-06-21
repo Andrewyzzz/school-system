@@ -30,6 +30,14 @@ const ROOM_TYPES = {
   music: "音乐室",
 };
 
+const SPECIAL_ROOM_RESOURCE_TYPES = [
+  { type: "lab", code: "LAB", name: "实验室", defaultCount: 2, max: 20 },
+  { type: "computer", code: "COMPUTER", name: "机房", defaultCount: 1, max: 20 },
+  { type: "playground", code: "PLAYGROUND", name: "操场", defaultCount: 1, max: 10 },
+  { type: "art", code: "ART", name: "美术室", defaultCount: 1, max: 20 },
+  { type: "music", code: "MUSIC", name: "音乐室", defaultCount: 1, max: 20 },
+];
+
 const SUBJECT_DEFAULT_ROOM_TYPES = {
   pe: "playground",
   physics: "lab",
@@ -144,6 +152,7 @@ function ensureSchedulingStore(db) {
   if (!Array.isArray(db.scheduleConstraints)) db.scheduleConstraints = [];
   if (!Array.isArray(db.teacherScheduleRules)) db.teacherScheduleRules = [];
   if (!Array.isArray(db.scheduleChangeRequests)) db.scheduleChangeRequests = [];
+  if (!Array.isArray(db.roomResourceOverrides)) db.roomResourceOverrides = [];
 }
 
 function pushScheduleNotification(db, options = {}, actorAccount = null) {
@@ -247,17 +256,26 @@ function findScopedRoom(db, roomId, term) {
   );
 }
 
+function activeRoomResourceOverride(db, term, division) {
+  return (
+    (db.roomResourceOverrides || []).find(
+      (override) => override.termId === term.id && override.stageId === division.stageId && override.active !== false,
+    ) || null
+  );
+}
+
 function schedulingRooms(db, division, classes, term) {
   const roomBelongsToDivision = (room) => room.active !== false && room.stageId === division.stageId;
+  const override = activeRoomResourceOverride(db, term, division);
   const termRows = (db.rooms || []).filter((room) => room.termId === term.id && roomBelongsToDivision(room));
   const fallbackRows = (db.rooms || []).filter((room) => !room.termId && roomBelongsToDivision(room));
-  const baseRows = termRows.length ? termRows : fallbackRows;
-  const rowsById = new Map(baseRows.map((room) => [room.id, room]));
-  fallbackRows
-    .filter((room) => normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom")
-    .forEach((room) => {
-      if (!rowsById.has(room.id)) rowsById.set(room.id, room);
-    });
+  const rowsById = new Map();
+  fallbackRows.forEach((room) => {
+    const roomType = normalizeRoomType(room.roomType || room.type, "homeroom");
+    if (override && roomType !== "homeroom") return;
+    rowsById.set(room.id, room);
+  });
+  termRows.forEach((room) => rowsById.set(room.id, room));
   return Array.from(rowsById.values()).filter(
     (room) =>
       normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom" ||
@@ -580,6 +598,57 @@ function gradeClassStructure(classes = []) {
   };
 }
 
+function specialRoomTypeSet() {
+  return new Set(SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => resource.type));
+}
+
+function specialRoomCounts(rooms = []) {
+  const counts = Object.fromEntries(SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => [resource.type, 0]));
+  const types = specialRoomTypeSet();
+  rooms.forEach((room) => {
+    if (room.active === false) return;
+    const roomType = normalizeRoomType(room.roomType || room.type, "homeroom");
+    if (!types.has(roomType)) return;
+    counts[roomType] = (counts[roomType] || 0) + 1;
+  });
+  return counts;
+}
+
+function normalizeRoomResourceCounts(roomCounts = {}, fallback = {}) {
+  return Object.fromEntries(
+    SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => [
+      resource.type,
+      normalizeClassCount(roomCounts[resource.type], Number(fallback[resource.type] ?? resource.defaultCount), {
+        min: 0,
+        max: resource.max,
+      }),
+    ]),
+  );
+}
+
+function buildSpecialRoomRows(division, term, roomCounts) {
+  const rows = [];
+  SPECIAL_ROOM_RESOURCE_TYPES.forEach((resource) => {
+    const count = normalizeClassCount(roomCounts[resource.type], resource.defaultCount, { min: 0, max: resource.max });
+    for (let index = 1; index <= count; index += 1) {
+      const roomId = `ROOM-${division.stageId}-${resource.code}-${String(index).padStart(2, "0")}`;
+      rows.push({
+        id: roomId,
+        termId: term.id,
+        termName: term.name,
+        stageId: division.stageId,
+        name: `${division.name}${resource.name}${count > 1 ? String(index).padStart(2, "0") : ""}`,
+        roomType: resource.type,
+        capacity: 1,
+        qrCode: `ROOM:${roomId}`,
+        displayKey: `screen-${roomId.toLowerCase()}`,
+        active: true,
+      });
+    }
+  });
+  return rows;
+}
+
 export function buildSchedulingConfig(db, options = {}) {
   ensureSchedulingStore(db);
   const term = currentTerm(db, options.termId);
@@ -608,6 +677,7 @@ export function buildSchedulingConfig(db, options = {}) {
     weekStart: String(options.weekStart || "").trim() || weekStartForDivision(term, division) || division.weekStart || "2026-06-15",
     classCount: classes.length,
     classStructure,
+    roomResourceCounts: specialRoomCounts(scopedRooms),
     classes,
     rooms: scopedRooms
       .map((room) => ({
@@ -708,6 +778,69 @@ function buildClassAndRoomRows(division, grade, options = {}) {
   }
 
   return { classRows, roomRows, regularCount, experimentalCount };
+}
+
+export function updateRoomResources(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const stageId = String(options.stageId || "").trim();
+  const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
+  assertEditableScheduleTerm(scopeConfig, "修改教室资源");
+  const classes = schedulingClasses(db, division, grade, term);
+  const previousRooms = schedulingRooms(db, division, classes, term);
+  const roomCounts = normalizeRoomResourceCounts(options.roomCounts || {}, specialRoomCounts(previousRooms));
+  const specialTypes = specialRoomTypeSet();
+
+  db.rooms = (db.rooms || []).filter(
+    (room) =>
+      !(
+        itemBelongsToTerm(room, term) &&
+        room.stageId === division.stageId &&
+        specialTypes.has(normalizeRoomType(room.roomType || room.type, "homeroom"))
+      ),
+  );
+  db.rooms.push(...buildSpecialRoomRows(division, term, roomCounts));
+
+  db.roomResourceOverrides = (db.roomResourceOverrides || []).filter(
+    (override) => !(override.termId === term.id && override.stageId === division.stageId),
+  );
+  const now = new Date().toISOString();
+  db.roomResourceOverrides.push({
+    id: scopedConfigId("RRC", term.id, division.stageId),
+    termId: term.id,
+    termName: term.name,
+    stageId: division.stageId,
+    stageName: division.name,
+    roomCounts,
+    active: true,
+    updatedAt: now,
+    updatedByAccountId: actorAccount?.id || "",
+    updatedByName: actorAccount?.name || "",
+  });
+
+  db.scheduleDrafts = (db.scheduleDrafts || []).filter(
+    (draft) => !(draft.termId === scopeConfig.termId && draft.divisionId === division.id),
+  );
+  db.scheduleChangeRequests = (db.scheduleChangeRequests || []).filter(
+    (request) => !(request.termId === scopeConfig.termId && request.divisionId === division.id),
+  );
+
+  db.auditLogs.push({
+    action: "room_resource_update",
+    termId: term.id,
+    stageId: division.stageId,
+    roomCounts,
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    createdAt: now,
+  });
+  db.meta.updatedAt = now;
+
+  return {
+    config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+    draft: findScheduleDraft(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+  };
 }
 
 function pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds, term = currentTerm(db)) {

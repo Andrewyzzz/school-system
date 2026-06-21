@@ -2,6 +2,29 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 行政排课新增教室资源配置
+
+- 类型：功能 / 前端 / 后端 / 排课
+- 影响范围：行政排课 / 教室资源 / 学期配置 / 预检
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/scheduling.js`
+  - `node --check server/storage.js`
+  - `node --check server/server.js`
+  - `node --check tests/phase1-production.test.js`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`
+  - `git diff --check`
+  - 浏览器验证：`http://127.0.0.1:4184/?v=room-resource-config` 行政排课页显示“教室资源”面板，顶部指标显示“6 门”“200 名”，保存教室资源 toast 返回成功，预检状态为“预检通过”。
+- 内容：
+  - 新增行政端“教室资源”面板，普通教室跟随班级结构自动生成，实验室、机房、操场、美术室、音乐室可按数量维护。
+  - 新增后端 `/api/scheduling/rooms` 接口，教室资源按学期、学部保存，并在保存后清理受影响排课草稿。
+  - 学期复制配置时同步复制教室资源配置。
+  - 顶部排课概览移除 `课程/规则`、`老师/教室` 的斜杠数字展示，改为“X 门课程”“Y 名老师”等可读指标。
+
 ## 2026-06-21 - 修复保存班级老师服务端错误
 
 - 类型：修复 / 前端 / 后端 / 排课

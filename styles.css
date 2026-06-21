@@ -747,6 +747,10 @@ h2 {
   margin-bottom: 16px;
 }
 
+.room-resource-card {
+  grid-template-columns: minmax(220px, 0.7fr) minmax(420px, 1.3fr);
+}
+
 .class-structure-copy {
   display: grid;
   gap: 4px;
@@ -768,6 +772,10 @@ h2 {
   grid-template-columns: repeat(2, minmax(120px, 150px)) auto;
   gap: 10px;
   align-items: end;
+}
+
+.room-resource-controls {
+  grid-template-columns: repeat(5, minmax(92px, 1fr)) auto;
 }
 
 .class-structure-controls .field-label {
@@ -809,6 +817,14 @@ h2 {
   border-color: rgba(188, 0, 12, 0.24);
   background: var(--action-soft);
   color: var(--action-dark);
+}
+
+.room-resource-preview {
+  align-items: center;
+}
+
+.room-resource-preview .class-structure-tag {
+  background: #f9fbff;
 }
 
 .term-management-panel {
@@ -4223,7 +4239,9 @@ td {
   }
 
   .class-structure-card,
-  .class-structure-controls {
+  .class-structure-controls,
+  .room-resource-card,
+  .room-resource-controls {
     grid-template-columns: 1fr;
   }
 

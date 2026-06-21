@@ -29,6 +29,7 @@ import {
   setScheduleAssignmentLock,
   updateGradeClassStructure,
   updateGradeCourseRules,
+  updateRoomResources,
   updateTeacherScheduleRule,
 } from "./scheduling.js";
 import {
@@ -612,6 +613,16 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = updateGradeClassStructure(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/rooms") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = updateRoomResources(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;

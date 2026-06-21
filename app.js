@@ -144,6 +144,14 @@ const SCHEDULE_ROOM_TYPES = {
   music: "音乐室",
 };
 
+const SCHEDULE_SPECIAL_ROOM_RESOURCES = [
+  { type: "lab", label: "实验室", unit: "间", max: 20 },
+  { type: "computer", label: "机房", unit: "间", max: 20 },
+  { type: "playground", label: "操场", unit: "个", max: 10 },
+  { type: "art", label: "美术室", unit: "间", max: 20 },
+  { type: "music", label: "音乐室", unit: "间", max: 20 },
+];
+
 const SUBJECT_DEFAULT_ROOM_TYPES = {
   pe: "playground",
   physics: "lab",
@@ -3446,6 +3454,57 @@ function classStructurePreviewHtml(config, regularCount, experimentalCount) {
   return tags.length ? tags.join("") : `<span>至少保留 1 个普通班或实验班</span>`;
 }
 
+function roomResourceSummary(config = state.schedulingConfig) {
+  const rooms = config.rooms || [];
+  const counts = Object.fromEntries(SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource) => [resource.type, 0]));
+  let homeroomCount = 0;
+  rooms.forEach((room) => {
+    const roomType = normalizeScheduleRoomType(room.roomType || room.type);
+    if (roomType === "homeroom") {
+      homeroomCount += 1;
+      return;
+    }
+    if (Object.hasOwn(counts, roomType)) counts[roomType] += 1;
+  });
+  const specialCount = Object.values(counts).reduce((sum, count) => sum + Number(count || 0), 0);
+  return {
+    counts,
+    homeroomCount,
+    specialCount,
+    totalCount: homeroomCount + specialCount,
+  };
+}
+
+function roomResourcePreviewHtml(config = state.schedulingConfig, counts = roomResourceSummary(config).counts) {
+  const summary = roomResourceSummary(config);
+  const tags = [
+    `<span class="class-structure-tag">普通教室 ${summary.homeroomCount} 间</span>`,
+    ...SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource) => {
+      const count = Number(counts[resource.type] || 0);
+      return `<span class="class-structure-tag">${escapeHtml(resource.label)} ${count} ${escapeHtml(resource.unit)}</span>`;
+    }),
+  ];
+  return tags.join("");
+}
+
+function roomResourceInputId(roomType) {
+  return `#roomCount${roomType.slice(0, 1).toUpperCase()}${roomType.slice(1)}Input`;
+}
+
+function setRoomResourceInputs(config = state.schedulingConfig) {
+  const summary = roomResourceSummary(config);
+  SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
+    const input = document.querySelector(roomResourceInputId(resource.type));
+    if (input) input.value = summary.counts[resource.type] || 0;
+  });
+}
+
+function updateRoomResourcePreview() {
+  const counts = collectRoomResourceCountsFromForm({ validate: false });
+  const preview = document.querySelector("#roomResourcePreview");
+  if (preview) preview.innerHTML = roomResourcePreviewHtml(state.schedulingConfig, counts);
+}
+
 function updateClassStructurePreview() {
   const config = state.schedulingConfig;
   const regularCount = Number.parseInt(document.querySelector("#regularClassCountInput")?.value || "0", 10);
@@ -3458,8 +3517,25 @@ function updateClassStructurePreview() {
   }
 }
 
+function buildLocalSpecialRooms(config, roomCounts) {
+  return SCHEDULE_SPECIAL_ROOM_RESOURCES.flatMap((resource) => {
+    const count = Math.max(Number(roomCounts[resource.type] || 0), 0);
+    return Array.from({ length: count }, (_, index) => {
+      const roomId = `${config.gradeId}-${resource.type}-${String(index + 1).padStart(2, "0")}`;
+      return {
+        id: roomId,
+        name: `${config.divisionName}${config.gradeName}${resource.label}${count > 1 ? String(index + 1).padStart(2, "0") : ""}`,
+        roomType: resource.type,
+        roomTypeName: SCHEDULE_ROOM_TYPES[resource.type],
+        sourceClassId: "",
+      };
+    });
+  });
+}
+
 function applyLocalClassStructure(regularCount, experimentalCount) {
   const config = state.schedulingConfig;
+  const currentRoomCounts = roomResourceSummary(config).counts;
   const classes = [];
   const rooms = [];
   const pushClass = (classType, index, displayOrder) => {
@@ -3488,22 +3564,7 @@ function applyLocalClassStructure(regularCount, experimentalCount) {
   for (let index = 1; index <= experimentalCount; index += 1) {
     pushClass("experimental", index, regularCount + index);
   }
-  [
-    ["LAB", "实验室01", "lab"],
-    ["LAB2", "实验室02", "lab"],
-    ["COMPUTER", "机房", "computer"],
-    ["PLAYGROUND", "操场", "playground"],
-    ["ART", "美术室", "art"],
-    ["MUSIC", "音乐室", "music"],
-  ].forEach(([suffix, name, roomType]) => {
-    rooms.push({
-      id: `${config.gradeId}-${suffix}`,
-      name: `${config.divisionName}${config.gradeName}${name}`,
-      roomType,
-      roomTypeName: SCHEDULE_ROOM_TYPES[roomType],
-      sourceClassId: "",
-    });
-  });
+  rooms.push(...buildLocalSpecialRooms(config, currentRoomCounts));
   config.classes = classes;
   config.rooms = rooms;
   config.classCount = classes.length;
@@ -3568,6 +3629,69 @@ async function saveAdminClassStructure() {
 
   applyLocalClassStructure(regularCount, experimentalCount);
   showToast("班级结构已保存到试运行数据");
+  render();
+}
+
+function collectRoomResourceCountsFromForm(options = {}) {
+  const validate = options.validate !== false;
+  const counts = {};
+  SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
+    const input = document.querySelector(roomResourceInputId(resource.type));
+    const value = Number.parseInt(input?.value || "0", 10);
+    if (validate && (!Number.isFinite(value) || value < 0 || value > resource.max)) {
+      throw new Error(`${resource.label}数量需在 0-${resource.max} 之间`);
+    }
+    counts[resource.type] = Number.isFinite(value) ? Math.min(Math.max(value, 0), resource.max) : 0;
+  });
+  return counts;
+}
+
+function applyLocalRoomResources(roomCounts) {
+  const config = state.schedulingConfig;
+  const homeroomRooms = (config.rooms || []).filter((room) => normalizeScheduleRoomType(room.roomType || room.type) === "homeroom");
+  config.rooms = [...homeroomRooms, ...buildLocalSpecialRooms(config, roomCounts)];
+  resetCourseDraftAfterConfigChange();
+}
+
+async function saveAdminRoomResources() {
+  let roomCounts;
+  try {
+    roomCounts = collectRoomResourceCountsFromForm();
+  } catch (error) {
+    showToast(error.message || "教室资源数量无效");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/rooms", {
+        method: "POST",
+        body: {
+          termId: currentSchedulingTermId(),
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          roomCounts,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
+      showToast("教室资源已保存，请重新生成受影响年级的课表");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "教室资源保存失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  applyLocalRoomResources(roomCounts);
+  showToast("教室资源已保存到试运行数据");
   render();
 }
 
@@ -5305,16 +5429,17 @@ function renderAdminScheduling() {
   const enabledCourseRules = (config.courseRules || []).filter((rule) => rule.enabled);
   const hardConstraintCount = (config.constraints || []).length;
   const teacherCount = (config.teachers || []).length;
-  const roomCount = (config.rooms || []).length;
+  const roomSummary = roomResourceSummary(config);
 
   document.querySelector("#adminDivisionName").textContent = config.divisionName;
   document.querySelector("#adminGradeName").textContent = config.gradeName;
   document.querySelector("#adminClassCount").textContent = `${config.classCount} 个班`;
   document.querySelector("#adminRequiredLessons").textContent = requiredScheduleLessonCount();
-  document.querySelector("#adminRuleCount").textContent = `${enabledCourseRules.length}/${hardConstraintCount}`;
-  document.querySelector("#adminRuleHelp").textContent = `${enabledCourseRules.length} 门课程 · ${hardConstraintCount} 条硬约束`;
-  document.querySelector("#adminResourceCount").textContent = `${teacherCount}/${roomCount}`;
-  document.querySelector("#adminResourceHelp").textContent = `${teacherCount} 名可选老师 · ${roomCount} 间教室`;
+  document.querySelector("#adminRuleCount").textContent = `${enabledCourseRules.length} 门`;
+  document.querySelector("#adminRuleHelp").textContent = `课程 · ${hardConstraintCount} 条硬约束`;
+  document.querySelector("#adminResourceCount").textContent = `${teacherCount} 名`;
+  document.querySelector("#adminResourceHelp").textContent =
+    `老师池 · ${roomSummary.totalCount} 间教室（${roomSummary.homeroomCount} 间普通 + ${roomSummary.specialCount} 间专用）`;
   document.querySelector("#adminConflictCount").textContent = conflicts.length;
   document.querySelector("#adminPublishStatus").textContent = scheduleStatusText(draft.status);
   document.querySelector("#adminPublishTime").textContent =
@@ -5364,6 +5489,10 @@ function renderAdminScheduling() {
     classStructure.regularCount,
     classStructure.experimentalCount,
   );
+  setRoomResourceInputs(config);
+  document.querySelector("#roomResourceHelp").textContent =
+    `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室参与实验课、体育课等资源冲突校验。`;
+  document.querySelector("#roomResourcePreview").innerHTML = roomResourcePreviewHtml(config, roomSummary.counts);
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
     `当前为${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
@@ -5480,6 +5609,7 @@ function renderAdminScheduling() {
   confirmButton.title = readiness.publishReason || "";
   document.querySelector("#saveCourseRules").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#saveRoomResources").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addGradeCourse").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#toggleCourseEditMode").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addScheduleConstraint").disabled =
@@ -9266,6 +9396,10 @@ document.querySelector("#generateSchedule").addEventListener("click", generateAd
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
 document.querySelector("#refreshSchedulePrecheck").addEventListener("click", refreshBackendSchedulePrecheck);
 document.querySelector("#saveClassStructure").addEventListener("click", saveAdminClassStructure);
+document.querySelector("#saveRoomResources").addEventListener("click", saveAdminRoomResources);
+SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
+  document.querySelector(roomResourceInputId(resource.type))?.addEventListener("input", updateRoomResourcePreview);
+});
 document.querySelector("#saveCourseRules").addEventListener("click", saveAdminCourseRules);
 document.querySelector("#addGradeCourse").addEventListener("click", addAdminGradeCourse);
 document.querySelector("#addScheduleConstraint").addEventListener("click", addAdminScheduleConstraint);

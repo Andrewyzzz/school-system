@@ -371,6 +371,53 @@
               </div>
               <div class="class-structure-preview" id="classStructurePreview"></div>
             </div>
+            <div class="class-structure-card room-resource-card" aria-label="教室资源配置">
+              <div class="class-structure-copy">
+                <strong>教室资源</strong>
+                <span id="roomResourceHelp">普通教室跟随班级结构自动生成；这里维护实验室、机房、操场等会参与排课冲突校验的专用教室。</span>
+              </div>
+              <div class="class-structure-controls room-resource-controls">
+                <label class="field-label compact-field" for="roomCountLabInput">
+                  <span>实验室</span>
+                  <div class="input-with-unit">
+                    <input id="roomCountLabInput" type="number" min="0" max="20" step="1" />
+                    <em>间</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="roomCountComputerInput">
+                  <span>机房</span>
+                  <div class="input-with-unit">
+                    <input id="roomCountComputerInput" type="number" min="0" max="20" step="1" />
+                    <em>间</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="roomCountPlaygroundInput">
+                  <span>操场</span>
+                  <div class="input-with-unit">
+                    <input id="roomCountPlaygroundInput" type="number" min="0" max="10" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="roomCountArtInput">
+                  <span>美术室</span>
+                  <div class="input-with-unit">
+                    <input id="roomCountArtInput" type="number" min="0" max="20" step="1" />
+                    <em>间</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="roomCountMusicInput">
+                  <span>音乐室</span>
+                  <div class="input-with-unit">
+                    <input id="roomCountMusicInput" type="number" min="0" max="20" step="1" />
+                    <em>间</em>
+                  </div>
+                </label>
+                <button class="primary-button compact-button" id="saveRoomResources" type="button">
+                  保存教室资源
+                </button>
+              </div>
+              <div class="class-structure-preview room-resource-preview" id="roomResourcePreview"></div>
+            </div>
             <div class="summary-grid admin-scope-summary">
               <article class="metric">
                 <span>排课学部</span>
@@ -388,13 +435,13 @@
                 <small>按科目课时规则</small>
               </article>
               <article class="metric">
-                <span>课程/规则</span>
-                <strong id="adminRuleCount">0/0</strong>
+                <span>课程配置</span>
+                <strong id="adminRuleCount">0 门</strong>
                 <small id="adminRuleHelp">课程与硬约束</small>
               </article>
               <article class="metric">
-                <span>老师/教室</span>
-                <strong id="adminResourceCount">0/0</strong>
+                <span>老师资源</span>
+                <strong id="adminResourceCount">0 名</strong>
                 <small id="adminResourceHelp">可用资源池</small>
               </article>
               <article class="metric">

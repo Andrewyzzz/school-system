@@ -38,6 +38,7 @@ import {
   rollbackScheduleVersion,
   updateGradeClassStructure,
   updateGradeCourseRules,
+  updateRoomResources,
 } from "../server/scheduling.js";
 
 function actor(db, username) {
@@ -259,6 +260,26 @@ assert.equal(
   classStructureResult.config.classes.filter((schoolClass) => schoolClass.classType === "experimental").length,
   2,
 );
+const roomResourceResult = updateRoomResources(
+  db,
+  {
+    stageId: "primary",
+    grade: 1,
+    roomCounts: {
+      lab: 3,
+      computer: 2,
+      playground: 1,
+      art: 0,
+      music: 1,
+    },
+  },
+  admin,
+);
+assert.equal(roomResourceResult.config.roomResourceCounts.lab, 3);
+assert.equal(roomResourceResult.config.roomResourceCounts.computer, 2);
+assert.equal(roomResourceResult.config.roomResourceCounts.art, 0);
+assert.equal(roomResourceResult.config.rooms.filter((room) => room.roomType === "lab").length, 3);
+assert.equal(roomResourceResult.config.rooms.filter((room) => room.roomType === "homeroom").length, 10);
 
 assert.throws(
   () =>

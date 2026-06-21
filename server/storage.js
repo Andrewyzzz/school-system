@@ -533,6 +533,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     scheduleConstraints: [],
     teacherScheduleRules: [],
     scheduleChangeRequests: [],
+    roomResourceOverrides: [],
     terms: defaultTerms(),
     lessonInstances,
     attendanceRecords: [],
@@ -562,6 +563,7 @@ function normalizeDatabase(db) {
     "scheduleConstraints",
     "teacherScheduleRules",
     "scheduleChangeRequests",
+    "roomResourceOverrides",
     "terms",
     "lessonInstances",
     "attendanceRecords",
@@ -594,7 +596,15 @@ function normalizeDatabase(db) {
   }
 
   const activeTerm = currentTerm(db);
-  ["scheduleDrafts", "scheduleVersions", "scheduleChangeRequests", "lessonInstances", "workloadConfirmations", "payrollDetails"].forEach((key) => {
+  [
+    "roomResourceOverrides",
+    "scheduleDrafts",
+    "scheduleVersions",
+    "scheduleChangeRequests",
+    "lessonInstances",
+    "workloadConfirmations",
+    "payrollDetails",
+  ].forEach((key) => {
     (db[key] || []).forEach((item) => {
       if (!item.termId) {
         const term = item.month ? termForMonth(db, item.month) : activeTerm;
@@ -930,6 +940,7 @@ function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
   const sourceAssignments = sourceTermRows(db.teacherAssignments || [], sourceTermId);
   const sourceTeacherRules = sourceTermRows(db.teacherScheduleRules || [], sourceTermId);
   const sourceConstraints = sourceTermRows(db.scheduleConstraints || [], sourceTermId);
+  const sourceRoomResourceOverrides = sourceTermRows(db.roomResourceOverrides || [], sourceTermId);
   return {
     courseRuleCount: sourceCourseRules.length,
     teacherAssignmentCount: sourceAssignments.filter(
@@ -937,6 +948,7 @@ function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
     ).length,
     teacherRuleCount: sourceTeacherRules.length,
     constraintCount: sourceConstraints.filter((constraint) => constraint.active !== false).length,
+    roomResourceConfigCount: sourceRoomResourceOverrides.length,
     classCount: sourceClasses.length,
   };
 }
@@ -983,6 +995,13 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
     sourceTermRows(db.teacherScheduleRules || [], sourceTermId).map((row) => ({
       ...withScope(row),
       id: scopedStorageConfigId("TSR", targetTerm.id, row.stageId, row.teacherId),
+    })),
+  );
+  replaceTargetRows(
+    "roomResourceOverrides",
+    sourceTermRows(db.roomResourceOverrides || [], sourceTermId).map((row) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("RRC", targetTerm.id, row.stageId),
     })),
   );
 
