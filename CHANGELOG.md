@@ -2,6 +2,26 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 部署生产站点 fuyuanschool.xyz
+
+- 类型：部署 / 文档 / 服务器
+- 影响范围：生产站点 / HTTPS / Nginx / 更新流程文档
+- 提交：本次提交
+- 部署：已部署到 `https://fuyuanschool.xyz`
+- 验证：
+  - GitHub 最新代码已在服务器 `/opt/school-system` 拉取到 `c061165`
+  - `node --check app.js`
+  - `node --check server/server.js`
+  - `systemctl is-active school-system`
+  - `nginx -t`
+  - `curl -fsSL https://fuyuanschool.xyz/api/health`
+  - 浏览器验证：`https://fuyuanschool.xyz/?v=production-deploy` 可打开登录页，并显示 10 个小学部排课老师账号。
+- 内容：
+  - DNS 已确认 `fuyuanschool.xyz` 和 `www.fuyuanschool.xyz` 指向 `47.76.189.5`。
+  - 服务器新增 `school-system-xyz` Nginx 站点配置，反向代理到本机 `127.0.0.1:4173`。
+  - 使用 Certbot 签发并部署 `fuyuanschool.xyz` / `www.fuyuanschool.xyz` HTTPS 证书，证书到期日为 `2026-09-19`，自动续期任务已启用。
+  - 更新系统更新流程文档，将生产站点和健康检查地址切换为 `fuyuanschool.xyz`。
+
 ## 2026-06-21 - 登录页新增小学部排课老师账号入口
 
 - 类型：功能 / 前端 / 账号体验

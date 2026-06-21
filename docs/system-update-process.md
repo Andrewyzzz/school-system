@@ -9,10 +9,10 @@
 | GitHub 仓库 | `Andrewyzzz/school-system` |
 | 默认分支 | `main` |
 | 本地开发端口 | `4173` |
-| 生产站点 | `https://fuyuanschool.org` |
+| 生产站点 | `https://fuyuanschool.xyz` |
 | 生产代码目录 | `/opt/school-system` |
 | 生产服务名 | `school-system` |
-| 健康检查 | `https://fuyuanschool.org/api/health` |
+| 健康检查 | `https://fuyuanschool.xyz/api/health` |
 
 注意：
 
@@ -258,7 +258,7 @@ active
 ### 7.4 健康检查
 
 ```bash
-curl -sS https://fuyuanschool.org/api/health
+curl -sS https://fuyuanschool.xyz/api/health
 ```
 
 正常返回应类似：
@@ -274,7 +274,7 @@ curl -sS https://fuyuanschool.org/api/health
 
 至少检查：
 
-- 打开 `https://fuyuanschool.org`。
+- 打开 `https://fuyuanschool.xyz`。
 - 老师账号登录后首页、课表、扫码入口、考勤记录、月度确认、总薪资可用。
 - 财务账号登录后老师记录、薪资结算可用。
 - 行政账号登录后排课页和人员列表可用。
@@ -373,4 +373,3 @@ git push origin main
 - 恢复时间：
 - 后续预防：
 ```
-
