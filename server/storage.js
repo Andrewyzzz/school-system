@@ -29,6 +29,7 @@ const BACKUP_DIR = path.join(DATA_DIR, "backups");
 const MAX_BACKUP_FILES = 50;
 const SESSION_TTL_HOURS = 12;
 const NOTIFICATION_AUDIENCES = new Set(["all", "teacher", "finance", "admin", "system_admin"]);
+let databaseSaveQueue = Promise.resolve();
 
 const STAGES = [
   { id: "primary", name: "小学部", grades: [1, 2, 3, 4, 5, 6], classesPerGrade: 10 },
@@ -770,12 +771,18 @@ export async function ensureDatabase() {
   }
 }
 
-export async function saveDatabase(db) {
+async function writeDatabaseFile(db) {
   await fs.mkdir(DATA_DIR, { recursive: true });
   await backupDatabaseFile();
-  const tmpFile = `${DATA_FILE}.tmp`;
+  const tmpFile = `${DATA_FILE}.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmpFile, JSON.stringify(db, null, 2));
   await fs.rename(tmpFile, DATA_FILE);
+}
+
+export async function saveDatabase(db) {
+  const writeTask = databaseSaveQueue.then(() => writeDatabaseFile(db));
+  databaseSaveQueue = writeTask.catch(() => {});
+  return writeTask;
 }
 
 async function backupDatabaseFile() {

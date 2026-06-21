@@ -6321,20 +6321,18 @@ async function saveClassSubjectTeacherAssignments() {
       showToast("当前没有可保存的任课配置");
       return;
     }
-    await Promise.all(
-      payloads.map((payload) =>
-        apiRequest("/api/scheduling/teacher-assignments", {
-          method: "POST",
-          body: {
-            termId: currentSchedulingTermId(),
-            stageId: state.schedulingConfig.stageId,
-            grade: state.schedulingConfig.grade,
-            subjectId: payload.subjectId,
-            classTeacherIds: payload.classTeacherIds,
-          },
-        }),
-      ),
-    );
+    for (const payload of payloads) {
+      await apiRequest("/api/scheduling/teacher-assignments", {
+        method: "POST",
+        body: {
+          termId: currentSchedulingTermId(),
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          subjectId: payload.subjectId,
+          classTeacherIds: payload.classTeacherIds,
+        },
+      });
+    }
     showToast("任课配置已保存，重新生成排课时生效");
     await loadBackendSchedulingContext();
   } catch (error) {
