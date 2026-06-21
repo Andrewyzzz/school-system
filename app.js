@@ -189,7 +189,7 @@ function buildSchedulingConfig(divisionId = "elementary", gradeId = "elementary-
     durationMinutes: subject.durationMinutes || 40,
     minPerClassPerDay: subject.minPerClassPerDay || 0,
     maxPerClassPerDay: subject.maxPerClassPerDay || 0,
-    minWeeklyDays: subject.minWeeklyDays || 0,
+    minWeeklyDays: Number(subject.minPerClassPerDay || 0) > 0 ? 0 : subject.minWeeklyDays || 0,
     maxConsecutivePerClass: subject.maxConsecutivePerClass || (subject.allowConsecutive === false ? 1 : 0),
     allowConsecutive: subject.allowConsecutive !== false,
     forbiddenPeriods: Array.isArray(subject.forbiddenPeriods) ? subject.forbiddenPeriods : [],
@@ -2010,7 +2010,7 @@ function validateScheduleConflicts(assignments) {
     (state.schedulingConfig.subjects || []).forEach((subject) => {
       const minPerClassPerDay = Number(subject.minPerClassPerDay || 0);
       const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
-      const minWeeklyDays = Number(subject.minWeeklyDays || 0);
+      const minWeeklyDays = minPerClassPerDay > 0 ? 0 : Number(subject.minWeeklyDays || 0);
       const maxConsecutive =
         Number(subject.maxConsecutivePerClass || 0) || (subject.allowConsecutive === false ? 1 : 0);
       let coveredDays = 0;
@@ -3516,6 +3516,9 @@ async function rollbackBackendScheduleVersion(versionId) {
 function collectCourseRulesFromForm() {
   return Array.from(document.querySelectorAll("[data-course-rule-id]")).map((row) => {
     const subjectId = row.dataset.courseRuleId;
+    const minPerClassPerDay = normalizeCourseRuleMinPerDay(
+      document.querySelector(`[data-course-rule-min-day="${subjectId}"]`)?.value || "0",
+    );
     const maxConsecutivePerClass = normalizeCourseRuleMaxConsecutive(
       document.querySelector(`[data-course-rule-max-consecutive="${subjectId}"]`)?.value || "0",
     );
@@ -3524,15 +3527,16 @@ function collectCourseRulesFromForm() {
       enabled: true,
       weeklyLessons: Number.parseInt(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0", 10),
       durationMinutes: Number.parseInt(document.querySelector(`[data-course-rule-duration="${subjectId}"]`)?.value || "40", 10),
-      minPerClassPerDay: normalizeCourseRuleMinPerDay(
-        document.querySelector(`[data-course-rule-min-day="${subjectId}"]`)?.value || "0",
-      ),
+      minPerClassPerDay,
       maxPerClassPerDay: normalizeCourseRuleMaxPerDay(
         document.querySelector(`[data-course-rule-max-day="${subjectId}"]`)?.value || "0",
       ),
-      minWeeklyDays: normalizeCourseRuleMinWeeklyDays(
-        document.querySelector(`[data-course-rule-min-weekly-days="${subjectId}"]`)?.value || "0",
-      ),
+      minWeeklyDays:
+        minPerClassPerDay > 0
+          ? 0
+          : normalizeCourseRuleMinWeeklyDays(
+              document.querySelector(`[data-course-rule-min-weekly-days="${subjectId}"]`)?.value || "0",
+            ),
       maxConsecutivePerClass,
       allowConsecutive: maxConsecutivePerClass === 1 ? false : true,
       forbiddenPeriods: normalizeCourseRulePeriods(
@@ -3548,6 +3552,25 @@ function collectCourseRulesFromForm() {
   });
 }
 
+function syncCourseRuleCoverageInput(subjectId) {
+  if (!subjectId) return;
+  const minDayInput = document.querySelector(`[data-course-rule-min-day="${subjectId}"]`);
+  const coverageInput = document.querySelector(`[data-course-rule-min-weekly-days="${subjectId}"]`);
+  const hint = document.querySelector(`[data-course-rule-coverage-hint="${subjectId}"]`);
+  if (!minDayInput || !coverageInput) return;
+  const minPerClassPerDay = normalizeCourseRuleMinPerDay(minDayInput.value || "0");
+  const autoCovered = minPerClassPerDay > 0;
+  coverageInput.disabled = autoCovered;
+  if (autoCovered) coverageInput.value = "0";
+  const label = coverageInput.closest(".field-label");
+  if (label) label.classList.toggle("disabled-field", autoCovered);
+  if (hint) {
+    hint.textContent = autoCovered
+      ? "已由每天至少规则自动覆盖 5 个教学日"
+      : "不填则不限制分布天数";
+  }
+}
+
 function localSubjectFromCourseRule(rule) {
   const subject = schedulingCatalog.subjects[rule.subjectId];
   if (!subject || !rule.enabled || rule.weeklyLessons <= 0) return null;
@@ -3560,7 +3583,10 @@ function localSubjectFromCourseRule(rule) {
     durationMinutes: rule.durationMinutes,
     minPerClassPerDay: normalizeCourseRuleMinPerDay(rule.minPerClassPerDay || 0),
     maxPerClassPerDay: normalizeCourseRuleMaxPerDay(rule.maxPerClassPerDay || 0),
-    minWeeklyDays: normalizeCourseRuleMinWeeklyDays(rule.minWeeklyDays || 0),
+    minWeeklyDays:
+      normalizeCourseRuleMinPerDay(rule.minPerClassPerDay || 0) > 0
+        ? 0
+        : normalizeCourseRuleMinWeeklyDays(rule.minWeeklyDays || 0),
     maxConsecutivePerClass: normalizeCourseRuleMaxConsecutive(rule.maxConsecutivePerClass || 0),
     allowConsecutive: rule.allowConsecutive !== false,
     forbiddenPeriods: normalizeCourseRulePeriods(rule.forbiddenPeriods || []),
@@ -4229,7 +4255,10 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requ
     durationMinutes,
     minPerClassPerDay: existingRule?.minPerClassPerDay || subject.minPerClassPerDay || 0,
     maxPerClassPerDay: existingRule?.maxPerClassPerDay || subject.maxPerClassPerDay || 0,
-    minWeeklyDays: existingRule?.minWeeklyDays || subject.minWeeklyDays || 0,
+    minWeeklyDays:
+      Number(existingRule?.minPerClassPerDay || subject.minPerClassPerDay || 0) > 0
+        ? 0
+        : existingRule?.minWeeklyDays || subject.minWeeklyDays || 0,
     maxConsecutivePerClass: existingRule?.maxConsecutivePerClass || subject.maxConsecutivePerClass || 0,
     allowConsecutive: existingRule?.allowConsecutive ?? subject.allowConsecutive ?? true,
     forbiddenPeriods: existingRule?.forbiddenPeriods || subject.forbiddenPeriods || [],
@@ -6952,7 +6981,7 @@ function courseRuleConstraintSummary(rule) {
   const parts = [];
   const minPerClassPerDay = Number(rule.minPerClassPerDay || 0);
   if (minPerClassPerDay > 0) {
-    parts.push(`每天至少 ${minPerClassPerDay} 节`);
+    parts.push(`每天至少 ${minPerClassPerDay} 节（自动覆盖 5 天）`);
   }
   const maxPerClassPerDay = Number(rule.maxPerClassPerDay || 0);
   if (maxPerClassPerDay > 0) {
@@ -6960,7 +6989,7 @@ function courseRuleConstraintSummary(rule) {
   } else {
     parts.push("每日上限不限");
   }
-  const minWeeklyDays = Number(rule.minWeeklyDays || 0);
+  const minWeeklyDays = minPerClassPerDay > 0 ? 0 : Number(rule.minWeeklyDays || 0);
   if (minWeeklyDays > 0) {
     parts.push(`至少覆盖 ${minWeeklyDays} 天`);
   }
@@ -6995,6 +7024,8 @@ function scheduleRoomTypeOptions(selected = "homeroom") {
 function adminCourseRuleItem(rule) {
   const subjectId = escapeHtml(rule.subjectId);
   const allowConsecutive = rule.allowConsecutive !== false;
+  const minPerClassPerDay = Number(rule.minPerClassPerDay || 0);
+  const minWeeklyDays = minPerClassPerDay > 0 ? 0 : Number(rule.minWeeklyDays || 0);
   const maxConsecutive = Number(rule.maxConsecutivePerClass || 0) || (allowConsecutive ? 0 : 1);
   const preferredDayPart = normalizePreferredDayPart(rule.preferredDayPart || "any");
   const requiredRoomType = normalizeScheduleRoomType(rule.requiredRoomType || "homeroom");
@@ -7070,7 +7101,7 @@ function adminCourseRuleItem(rule) {
                   <em>节</em>
                 </div>
               </label>
-              <label class="field-label compact-field" for="courseMinWeeklyDays-${subjectId}">
+              <label class="field-label compact-field ${minPerClassPerDay > 0 ? "disabled-field" : ""}" for="courseMinWeeklyDays-${subjectId}">
                 <span>覆盖天数</span>
                 <div class="input-with-unit">
                   <input
@@ -7079,10 +7110,14 @@ function adminCourseRuleItem(rule) {
                     type="number"
                     min="0"
                     max="5"
-                    value="${Number(rule.minWeeklyDays || 0)}"
+                    value="${minWeeklyDays}"
+                    ${minPerClassPerDay > 0 ? "disabled" : ""}
                   />
                   <em>天</em>
                 </div>
+                <small class="field-hint" data-course-rule-coverage-hint="${subjectId}">
+                  ${minPerClassPerDay > 0 ? "已由每天至少规则自动覆盖 5 个教学日" : "不填则不限制分布天数"}
+                </small>
               </label>
               <label class="field-label compact-field" for="courseMaxConsecutive-${subjectId}">
                 <span>最多连续</span>
@@ -7136,7 +7171,7 @@ function adminCourseRuleItem(rule) {
           : `
             <input type="hidden" data-course-rule-min-day="${subjectId}" value="${Number(rule.minPerClassPerDay || 0)}" />
             <input type="hidden" data-course-rule-max-day="${subjectId}" value="${Number(rule.maxPerClassPerDay || 0)}" />
-            <input type="hidden" data-course-rule-min-weekly-days="${subjectId}" value="${Number(rule.minWeeklyDays || 0)}" />
+            <input type="hidden" data-course-rule-min-weekly-days="${subjectId}" value="${minWeeklyDays}" />
             <input type="hidden" data-course-rule-max-consecutive="${subjectId}" value="${maxConsecutive}" />
             <input type="hidden" data-course-rule-consecutive="${subjectId}" value="${maxConsecutive === 1 ? "false" : "true"}" />
             <input type="hidden" data-course-rule-forbidden-periods="${subjectId}" value="${escapeHtml(courseRuleForbiddenPeriodsValue(rule))}" />
@@ -9713,6 +9748,10 @@ document.addEventListener("input", (event) => {
   const assignmentInput = event.target.closest("[data-class-subject-teacher-input]");
   if (assignmentInput) {
     syncClassSubjectTeacherInput(assignmentInput);
+  }
+  const minDayInput = event.target.closest("[data-course-rule-min-day]");
+  if (minDayInput) {
+    syncCourseRuleCoverageInput(minDayInput.dataset.courseRuleMinDay);
   }
   if (event.target.closest("#classroomRoomSearch")) {
     classroomScreenState.search = event.target.value;

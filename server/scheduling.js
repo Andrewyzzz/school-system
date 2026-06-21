@@ -418,6 +418,10 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
   const fallbackAllowConsecutive =
     fallbackRule.allowConsecutive !== undefined ? Boolean(fallbackRule.allowConsecutive) : true;
   const allowConsecutive = normalizeAllowConsecutive(rule.allowConsecutive ?? fallbackRule.allowConsecutive, fallbackAllowConsecutive);
+  const minPerClassPerDay = normalizeMinPerClassPerDay(
+    rule.minPerClassPerDay ?? fallbackRule.minPerClassPerDay,
+    fallbackRule.minPerClassPerDay || 0,
+  );
   const maxConsecutiveFallback =
     fallbackRule.maxConsecutivePerClass !== undefined
       ? fallbackRule.maxConsecutivePerClass
@@ -429,18 +433,18 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
     maxConsecutiveFallback,
   );
   return {
-    minPerClassPerDay: normalizeMinPerClassPerDay(
-      rule.minPerClassPerDay ?? fallbackRule.minPerClassPerDay,
-      fallbackRule.minPerClassPerDay || 0,
-    ),
+    minPerClassPerDay,
     maxPerClassPerDay: normalizeMaxPerClassPerDay(
       rule.maxPerClassPerDay ?? fallbackRule.maxPerClassPerDay,
       fallbackRule.maxPerClassPerDay || 0,
     ),
-    minWeeklyDays: normalizeMinWeeklyDays(
-      rule.minWeeklyDays ?? fallbackRule.minWeeklyDays,
-      fallbackRule.minWeeklyDays || 0,
-    ),
+    minWeeklyDays:
+      minPerClassPerDay > 0
+        ? 0
+        : normalizeMinWeeklyDays(
+            rule.minWeeklyDays ?? fallbackRule.minWeeklyDays,
+            fallbackRule.minWeeklyDays || 0,
+          ),
     maxConsecutivePerClass,
     allowConsecutive: maxConsecutivePerClass === 1 ? false : allowConsecutive,
     forbiddenPeriods: normalizeSubjectForbiddenPeriods(rule.forbiddenPeriods ?? fallbackRule.forbiddenPeriods),
@@ -591,7 +595,10 @@ function schedulingSubjects(db, division, grade, term = currentTerm(db)) {
             name: subject.name,
             weeklyLessons: rule.weeklyLessons,
             durationMinutes: rule.durationMinutes,
+            minPerClassPerDay: rule.minPerClassPerDay,
             maxPerClassPerDay: rule.maxPerClassPerDay,
+            minWeeklyDays: rule.minWeeklyDays,
+            maxConsecutivePerClass: rule.maxConsecutivePerClass,
             allowConsecutive: rule.allowConsecutive,
             forbiddenPeriods: rule.forbiddenPeriods || [],
             preferredDayPart: rule.preferredDayPart,
@@ -1737,10 +1744,10 @@ function subjectRuleSummary(config, subjectId) {
   const subjectName = subject?.name || subjectId;
   const rules = [];
   const minPerClassPerDay = Number(subject?.minPerClassPerDay || 0);
-  if (minPerClassPerDay > 0) rules.push(`每班每天至少 ${minPerClassPerDay} 节`);
+  if (minPerClassPerDay > 0) rules.push(`每班每天至少 ${minPerClassPerDay} 节（自动覆盖 5 天）`);
   const maxPerClassPerDay = Number(subject?.maxPerClassPerDay || 0);
   if (maxPerClassPerDay > 0) rules.push(`每班每天最多 ${maxPerClassPerDay} 节`);
-  const minWeeklyDays = Number(subject?.minWeeklyDays || 0);
+  const minWeeklyDays = minPerClassPerDay > 0 ? 0 : Number(subject?.minWeeklyDays || 0);
   if (minWeeklyDays > 0) rules.push(`每周至少覆盖 ${minWeeklyDays} 天`);
   const maxConsecutivePerClass = Number(subject?.maxConsecutivePerClass || 0);
   if (maxConsecutivePerClass > 0) rules.push(`同班最多连续 ${maxConsecutivePerClass} 节`);
@@ -4024,17 +4031,6 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     throw error;
   }
 
-  const externalAssignments = globalTeacherBusyAssignments(db, config);
-  const conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
-  if (conflicts.length) {
-    draft.conflicts = conflicts;
-    draft.globalBusyCount = externalAssignments.length;
-    const error = new Error("存在教师、班级或教室时间冲突，不能发布");
-    error.statusCode = 400;
-    error.details = { conflicts };
-    throw error;
-  }
-
   if (!draft.assignments?.length) {
     const error = new Error("排课草稿为空，不能发布");
     error.statusCode = 400;
@@ -4056,6 +4052,17 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     const error = new Error(`排课草稿还有 ${unassignedCount} 节未排完，不能发布`);
     error.statusCode = 400;
     error.details = { unassignedCount };
+    throw error;
+  }
+
+  const externalAssignments = globalTeacherBusyAssignments(db, config);
+  const conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
+  if (conflicts.length) {
+    draft.conflicts = conflicts;
+    draft.globalBusyCount = externalAssignments.length;
+    const error = new Error("存在教师、班级或教室时间冲突，不能发布");
+    error.statusCode = 400;
+    error.details = { conflicts };
     throw error;
   }
 

@@ -1506,6 +1506,27 @@ h2 {
   width: 100%;
 }
 
+.compact-field.disabled-field {
+  opacity: 0.76;
+}
+
+.compact-field.disabled-field .input-with-unit {
+  background: #f5f7fb;
+}
+
+.compact-field.disabled-field input:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .input-with-unit {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
