@@ -646,6 +646,47 @@ def solve(payload):
                 }
             model.Add(sum(variables) + locked_count <= max_per_class_per_day)
 
+    date_keys = sorted({slot["date"] for slot in slots})
+    for school_class in config.get("classes") or []:
+        class_id = school_class["id"]
+        for subject in config.get("subjects") or []:
+            subject_id = subject["id"]
+            min_per_class_per_day = int(subject.get("minPerClassPerDay") or 0)
+            min_weekly_days = int(subject.get("minWeeklyDays") or 0)
+            day_presence_vars = []
+            fixed_covered_days = 0
+            for date in date_keys:
+                key = (class_id, subject_id, date)
+                variables = class_subject_day_vars.get(key, [])
+                locked_count = class_subject_day_locked.get(key, 0)
+                if min_per_class_per_day > 0:
+                    if locked_count >= min_per_class_per_day:
+                        pass
+                    elif variables:
+                        model.Add(sum(variables) + locked_count >= min_per_class_per_day)
+                    else:
+                        return {
+                            "ok": False,
+                            "error": "CP_SAT_INFEASIBLE",
+                            "message": f"{class_id} {date} {subject.get('name') or subject_id} 无法满足每日最低节数",
+                        }
+                if min_weekly_days > 0:
+                    if locked_count > 0:
+                        fixed_covered_days += 1
+                    elif variables:
+                        day_has_subject = model.NewBoolVar(f"day_has_{class_id}_{subject_id}_{date}")
+                        model.Add(sum(variables) >= 1).OnlyEnforceIf(day_has_subject)
+                        model.Add(sum(variables) == 0).OnlyEnforceIf(day_has_subject.Not())
+                        day_presence_vars.append(day_has_subject)
+            if min_weekly_days > 0:
+                if fixed_covered_days + len(day_presence_vars) < min_weekly_days:
+                    return {
+                        "ok": False,
+                        "error": "CP_SAT_INFEASIBLE",
+                        "message": f"{class_id} {subject.get('name') or subject_id} 无法满足每周覆盖天数",
+                    }
+                model.Add(sum(day_presence_vars) + fixed_covered_days >= min_weekly_days)
+
     teacher_load_vars = []
     max_load = model.NewIntVar(0, len(tasks) + len(locked_assignments) + len(external_assignments), "max_teacher_load")
     min_load = model.NewIntVar(0, len(tasks) + len(locked_assignments) + len(external_assignments), "min_teacher_load")
@@ -693,10 +734,13 @@ def solve(payload):
     ) | set(class_subject_day_locked.keys())
     for class_id, subject_id, date in class_subject_day_keys:
         subject = subjects_by_id.get(subject_id, {})
-        if subject.get("allowConsecutive", True) is not False:
+        max_consecutive_per_class = int(subject.get("maxConsecutivePerClass") or 0)
+        if not max_consecutive_per_class and subject.get("allowConsecutive", True) is False:
+            max_consecutive_per_class = 1
+        if max_consecutive_per_class <= 0 or max_consecutive_per_class >= len(period_numbers):
             continue
-        for index in range(0, len(period_numbers) - 1):
-            window = period_numbers[index : index + 2]
+        for index in range(0, len(period_numbers) - max_consecutive_per_class):
+            window = period_numbers[index : index + max_consecutive_per_class + 1]
             fixed_count = sum(
                 class_subject_day_period_locked.get((class_id, subject_id, date, period), 0)
                 for period in window
@@ -704,14 +748,14 @@ def solve(payload):
             variables = []
             for period in window:
                 variables.extend(class_subject_day_period_vars.get((class_id, subject_id, date, period), []))
-            if fixed_count > 1:
+            if fixed_count > max_consecutive_per_class:
                 return {
                     "ok": False,
                     "error": "CP_SAT_INFEASIBLE",
-                    "message": f"{class_id} {date} {subject.get('name') or subject_id} 已锁定课程违反不连堂规则",
+                    "message": f"{class_id} {date} {subject.get('name') or subject_id} 已锁定课程超过连续上限",
                 }
             if variables:
-                model.Add(sum(variables) + fixed_count <= 1)
+                model.Add(sum(variables) + fixed_count <= max_consecutive_per_class)
 
     teacher_day_keys = set(teacher_day_vars.keys()) | set(teacher_fixed_day_periods.keys())
     for teacher_id, date in teacher_day_keys:

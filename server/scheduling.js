@@ -370,6 +370,24 @@ function normalizeMaxPerClassPerDay(value, fallback = 0) {
   return Math.min(Math.max(number, 0), PERIODS.length);
 }
 
+function normalizeMinPerClassPerDay(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(number, 0), PERIODS.length);
+}
+
+function normalizeMinWeeklyDays(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(number, 0), 5);
+}
+
+function normalizeMaxConsecutivePerClass(value, fallback = 0) {
+  const number = Number.parseInt(value, 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(number, 0), PERIODS.length);
+}
+
 function normalizeAllowConsecutive(value, fallback = true) {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
@@ -397,15 +415,34 @@ function normalizeSubjectForbiddenPeriods(value) {
 }
 
 function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
+  const fallbackAllowConsecutive =
+    fallbackRule.allowConsecutive !== undefined ? Boolean(fallbackRule.allowConsecutive) : true;
+  const allowConsecutive = normalizeAllowConsecutive(rule.allowConsecutive ?? fallbackRule.allowConsecutive, fallbackAllowConsecutive);
+  const maxConsecutiveFallback =
+    fallbackRule.maxConsecutivePerClass !== undefined
+      ? fallbackRule.maxConsecutivePerClass
+      : allowConsecutive
+        ? 0
+        : 1;
+  const maxConsecutivePerClass = normalizeMaxConsecutivePerClass(
+    rule.maxConsecutivePerClass ?? fallbackRule.maxConsecutivePerClass,
+    maxConsecutiveFallback,
+  );
   return {
+    minPerClassPerDay: normalizeMinPerClassPerDay(
+      rule.minPerClassPerDay ?? fallbackRule.minPerClassPerDay,
+      fallbackRule.minPerClassPerDay || 0,
+    ),
     maxPerClassPerDay: normalizeMaxPerClassPerDay(
       rule.maxPerClassPerDay ?? fallbackRule.maxPerClassPerDay,
       fallbackRule.maxPerClassPerDay || 0,
     ),
-    allowConsecutive: normalizeAllowConsecutive(
-      rule.allowConsecutive ?? fallbackRule.allowConsecutive,
-      fallbackRule.allowConsecutive !== undefined ? Boolean(fallbackRule.allowConsecutive) : true,
+    minWeeklyDays: normalizeMinWeeklyDays(
+      rule.minWeeklyDays ?? fallbackRule.minWeeklyDays,
+      fallbackRule.minWeeklyDays || 0,
     ),
+    maxConsecutivePerClass,
+    allowConsecutive: maxConsecutivePerClass === 1 ? false : allowConsecutive,
     forbiddenPeriods: normalizeSubjectForbiddenPeriods(rule.forbiddenPeriods ?? fallbackRule.forbiddenPeriods),
     preferredDayPart: normalizePreferredDayPart(
       rule.preferredDayPart ?? fallbackRule.preferredDayPart,
@@ -1229,6 +1266,13 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
       term,
       weeklyLessons: options.weeklyLessons ?? existingRule?.weeklyLessons ?? 1,
       durationMinutes: options.durationMinutes ?? existingRule?.durationMinutes ?? DEFAULT_LESSON_DURATION_MINUTES,
+      minPerClassPerDay: options.minPerClassPerDay ?? existingRule?.minPerClassPerDay ?? 0,
+      maxPerClassPerDay: options.maxPerClassPerDay ?? existingRule?.maxPerClassPerDay ?? 0,
+      minWeeklyDays: options.minWeeklyDays ?? existingRule?.minWeeklyDays ?? 0,
+      maxConsecutivePerClass: options.maxConsecutivePerClass ?? existingRule?.maxConsecutivePerClass ?? 0,
+      allowConsecutive: options.allowConsecutive ?? existingRule?.allowConsecutive ?? true,
+      forbiddenPeriods: options.forbiddenPeriods ?? existingRule?.forbiddenPeriods ?? [],
+      preferredDayPart: options.preferredDayPart ?? existingRule?.preferredDayPart ?? "any",
       requiredRoomType: options.requiredRoomType ?? existingRule?.requiredRoomType ?? SUBJECT_DEFAULT_ROOM_TYPES[subject.id] ?? "homeroom",
     },
     actorAccount,
@@ -1275,6 +1319,13 @@ export function deleteGradeCourse(db, options = {}, actorAccount = null) {
       term,
       weeklyLessons: currentRule?.weeklyLessons || 1,
       durationMinutes: currentRule?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+      minPerClassPerDay: currentRule?.minPerClassPerDay || 0,
+      maxPerClassPerDay: currentRule?.maxPerClassPerDay || 0,
+      minWeeklyDays: currentRule?.minWeeklyDays || 0,
+      maxConsecutivePerClass: currentRule?.maxConsecutivePerClass || 0,
+      allowConsecutive: currentRule?.allowConsecutive ?? true,
+      forbiddenPeriods: currentRule?.forbiddenPeriods || [],
+      preferredDayPart: currentRule?.preferredDayPart || "any",
       requiredRoomType: currentRule?.requiredRoomType || SUBJECT_DEFAULT_ROOM_TYPES[subjectId] || "homeroom",
     },
     actorAccount,
@@ -1685,9 +1736,15 @@ function subjectRuleSummary(config, subjectId) {
   const subject = scheduleSubjectRuleFor(config, subjectId);
   const subjectName = subject?.name || subjectId;
   const rules = [];
+  const minPerClassPerDay = Number(subject?.minPerClassPerDay || 0);
+  if (minPerClassPerDay > 0) rules.push(`每班每天至少 ${minPerClassPerDay} 节`);
   const maxPerClassPerDay = Number(subject?.maxPerClassPerDay || 0);
   if (maxPerClassPerDay > 0) rules.push(`每班每天最多 ${maxPerClassPerDay} 节`);
-  if (subject?.allowConsecutive === false) rules.push("不允许同班连堂");
+  const minWeeklyDays = Number(subject?.minWeeklyDays || 0);
+  if (minWeeklyDays > 0) rules.push(`每周至少覆盖 ${minWeeklyDays} 天`);
+  const maxConsecutivePerClass = Number(subject?.maxConsecutivePerClass || 0);
+  if (maxConsecutivePerClass > 0) rules.push(`同班最多连续 ${maxConsecutivePerClass} 节`);
+  else if (subject?.allowConsecutive === false) rules.push("不允许同班连堂");
   if ((subject?.forbiddenPeriods || []).length) {
     rules.push(`禁排第 ${(subject.forbiddenPeriods || []).map(Number).join("、")} 节`);
   }
@@ -1734,15 +1791,15 @@ function subjectHardRuleViolation(config, subjectId, slot, assignments = [], cla
     };
   }
 
-  if (subject.allowConsecutive === false) {
-    const adjacent = sameClassSubjectDayItems.find(
-      (assignment) => Math.abs(Number(assignment.period) - period) === 1,
-    );
-    if (adjacent) {
+  const maxConsecutivePerClass =
+    Number(subject.maxConsecutivePerClass || 0) || (subject.allowConsecutive === false ? 1 : 0);
+  if (maxConsecutivePerClass > 0) {
+    const projectedPeriods = [...sameClassSubjectDayItems.map((assignment) => Number(assignment.period)), period];
+    if (maxConsecutiveRun(projectedPeriods) > maxConsecutivePerClass) {
       return {
         type: "subject-consecutive",
-        title: `${subjectName} 不允许同班连堂`,
-        text: `${subjectName} 已设置不允许同班连堂，第 ${adjacent.period} 节旁边不能再排第 ${period} 节。`,
+        title: `${subjectName} 同班连堂超上限`,
+        text: `${subjectName} 已设置同班最多连续 ${maxConsecutivePerClass} 节，加入第 ${period} 节会超过上限。`,
       };
     }
   }
@@ -2299,9 +2356,12 @@ function scheduleQualityScore(config, assignments) {
     score += Math.abs(count - targetClassDayLoad) * 4;
     score += Math.max(0, count - targetClassDayLoad) * 12;
   });
-  classSubjectDay.forEach((count) => {
-    score += Math.max(0, count - 1) * 18;
-    score += Math.max(0, count - 2) * 1000;
+  classSubjectDay.forEach((count, key) => {
+    const [, subjectId] = String(key || "").split(":");
+    const subject = config.subjects.find((item) => item.id === subjectId) || {};
+    const preferredMax = Math.max(1, Number(subject.maxPerClassPerDay || 1));
+    score += Math.max(0, count - preferredMax) * 18;
+    score += Math.max(0, count - Math.max(preferredMax, 2)) * 1000;
   });
   teacherDayLoad.forEach((count) => {
     score += Math.max(0, count - 4) * 10;
@@ -2471,9 +2531,12 @@ function buildScheduleQualityReport(config, assignments = [], conflicts = [], me
   let sameSubjectSameDay = 0;
   const concentratedLessons = [];
   classSubjectDay.forEach((count, key) => {
-    if (count > 1) {
-      sameSubjectSameDay += count - 1;
-      const [classId, subjectId, date] = key.split(":");
+    const [, subjectId, date] = key.split(":");
+    const subject = config.subjects.find((item) => item.id === subjectId) || {};
+    const preferredMax = Math.max(1, Number(subject.maxPerClassPerDay || 1));
+    if (count > preferredMax) {
+      sameSubjectSameDay += count - preferredMax;
+      const [classId] = key.split(":");
       concentratedLessons.push(
         ...assignments
           .filter((assignment) => assignment.classId === classId && assignment.subjectId === subjectId && assignment.date === date)
@@ -2817,7 +2880,11 @@ export function buildSchedulePrecheck(config, options = {}) {
     );
   }
 
-  const lockedConflicts = validateScheduleConflicts(lockedAssignments, { externalAssignments, config });
+  const lockedConflicts = validateScheduleConflicts(lockedAssignments, {
+    externalAssignments,
+    config,
+    checkCourseDistribution: false,
+  });
   lockedConflicts.slice(0, 5).forEach((conflict, index) => {
     checks.push(
       precheckItem(
@@ -2844,7 +2911,30 @@ export function buildSchedulePrecheck(config, options = {}) {
       return;
     }
 
+    const minPerClassPerDay = Number(subject.minPerClassPerDay || 0);
     const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
+    if (minPerClassPerDay > 0 && maxPerClassPerDay > 0 && minPerClassPerDay > maxPerClassPerDay) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_daily_min_max_${subject.id}`,
+          `${subject.name} 每日上下限冲突`,
+          `${subject.name} 设置为每天至少 ${minPerClassPerDay} 节，但每天最多 ${maxPerClassPerDay} 节，请调整课程分布规则。`,
+          { subjectId: subject.id, minPerClassPerDay, maxPerClassPerDay },
+        ),
+      );
+    }
+    if (minPerClassPerDay > 0 && Number(subject.weeklyLessons || 0) < minPerClassPerDay * 5) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_daily_min_capacity_${subject.id}`,
+          `${subject.name} 周课时不足以满足每天都有`,
+          `${subject.name} 每班每周 ${subject.weeklyLessons} 节，但每天至少 ${minPerClassPerDay} 节需要 ${minPerClassPerDay * 5} 节。`,
+          { subjectId: subject.id, weeklyLessons: subject.weeklyLessons, minPerClassPerDay },
+        ),
+      );
+    }
     if (maxPerClassPerDay > 0 && Number(subject.weeklyLessons || 0) > maxPerClassPerDay * 5) {
       checks.push(
         precheckItem(
@@ -2853,6 +2943,18 @@ export function buildSchedulePrecheck(config, options = {}) {
           `${subject.name} 周课时超过每日上限容量`,
           `${subject.name} 每班每周需要 ${subject.weeklyLessons} 节，但设置为每班每天最多 ${maxPerClassPerDay} 节，5 天最多只能排 ${maxPerClassPerDay * 5} 节。`,
           { subjectId: subject.id, weeklyLessons: subject.weeklyLessons, maxPerClassPerDay },
+        ),
+      );
+    }
+    const minWeeklyDays = Number(subject.minWeeklyDays || 0);
+    if (minWeeklyDays > 0 && Number(subject.weeklyLessons || 0) < minWeeklyDays) {
+      checks.push(
+        precheckItem(
+          "error",
+          `subject_min_weekly_days_${subject.id}`,
+          `${subject.name} 覆盖天数超过周课时`,
+          `${subject.name} 每班每周 ${subject.weeklyLessons} 节，但要求至少覆盖 ${minWeeklyDays} 天，请增加周课时或降低覆盖天数。`,
+          { subjectId: subject.id, weeklyLessons: subject.weeklyLessons, minWeeklyDays },
         ),
       );
     }
@@ -3449,6 +3551,7 @@ export function validateScheduleConflicts(assignments, options = {}) {
   const teacherDayItems = new Map();
   const classSlots = new Map();
   const roomSlots = new Map();
+  const classSubjectDateItems = new Map();
   const externalAssignments = options.externalAssignments || [];
   const config = options.config || null;
   const allAssignments = [
@@ -3469,6 +3572,10 @@ export function validateScheduleConflicts(assignments, options = {}) {
     const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
     if (!classSlots.has(classKey)) classSlots.set(classKey, []);
     classSlots.get(classKey).push(assignment);
+
+    const classSubjectDateKey = `${assignment.classId}:${assignment.subjectId}:${assignment.date}`;
+    if (!classSubjectDateItems.has(classSubjectDateKey)) classSubjectDateItems.set(classSubjectDateKey, []);
+    classSubjectDateItems.get(classSubjectDateKey).push(assignment);
 
     const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
     if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
@@ -3599,6 +3706,54 @@ export function validateScheduleConflicts(assignments, options = {}) {
       ].join("、")}`,
     });
   });
+
+  if (config && options.checkCourseDistribution !== false) {
+    const weekDates = weekDateKeys(config);
+    (config.classes || []).forEach((schoolClass) => {
+      (config.subjects || []).forEach((subject) => {
+        const subjectName = subject.name || subject.subjectName || subject.id;
+        const minPerClassPerDay = Number(subject.minPerClassPerDay || 0);
+        const maxPerClassPerDay = Number(subject.maxPerClassPerDay || 0);
+        const minWeeklyDays = Number(subject.minWeeklyDays || 0);
+        const maxConsecutivePerClass =
+          Number(subject.maxConsecutivePerClass || 0) || (subject.allowConsecutive === false ? 1 : 0);
+        let coveredDays = 0;
+        weekDates.forEach((date) => {
+          const items = classSubjectDateItems.get(`${schoolClass.id}:${subject.id}:${date}`) || [];
+          if (items.length) coveredDays += 1;
+          if (minPerClassPerDay > 0 && items.length < minPerClassPerDay) {
+            conflicts.push({
+              type: "subject-min-per-day",
+              title: `${schoolClass.name} ${subjectName} 未满足每日最低节数`,
+              text: `${formatDate(date)}：${subjectName} 已设置每天至少 ${minPerClassPerDay} 节，当前只有 ${items.length} 节。`,
+            });
+          }
+          if (maxPerClassPerDay > 0 && items.length > maxPerClassPerDay) {
+            conflicts.push({
+              type: "subject-max-per-day",
+              title: `${schoolClass.name} ${subjectName} 超过每日上限`,
+              text: `${formatDate(date)}：${subjectName} 已设置每天最多 ${maxPerClassPerDay} 节，当前有 ${items.length} 节。`,
+            });
+          }
+          const longestRun = maxConsecutiveRun(items.map((item) => item.period));
+          if (maxConsecutivePerClass > 0 && longestRun > maxConsecutivePerClass) {
+            conflicts.push({
+              type: "subject-consecutive",
+              title: `${schoolClass.name} ${subjectName} 连堂超过上限`,
+              text: `${formatDate(date)}：${subjectName} 已设置最多连续 ${maxConsecutivePerClass} 节，当前最长连续 ${longestRun} 节。`,
+            });
+          }
+        });
+        if (minWeeklyDays > 0 && coveredDays < minWeeklyDays) {
+          conflicts.push({
+            type: "subject-min-weekly-days",
+            title: `${schoolClass.name} ${subjectName} 覆盖天数不足`,
+            text: `${subjectName} 已设置每周至少覆盖 ${minWeeklyDays} 天，当前只覆盖 ${coveredDays} 天。`,
+          });
+        }
+      });
+    });
+  }
 
   return conflicts;
 }

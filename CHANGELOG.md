@@ -2,6 +2,30 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 排课课程分布规则与操作界面收口
+
+- 类型：功能 / 前端 / 后端 / 排课 / 求解器 / 测试
+- 影响范围：行政排课 / 课程规则 / OR-Tools / 冲突校验 / 质量诊断
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/scheduling.js`
+  - `node --check tests/phase1-production.test.js`
+  - `node --check tests/scheduling-jobs.test.js`
+  - `node --check tests/scheduling-solver-benchmark.test.js`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/codex-pycache python3 -m py_compile server/solver/ortools_scheduler.py`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`（3 个规模均为 OR-Tools CP-SAT，fallback 0，冲突 0，平均耗时 13.7 秒，平均评分 67）
+  - 浏览器验证：`http://127.0.0.1:4184/?v=course-distribution-rules` 行政排课页显示“课程与分布规则”“禁排硬约束”两个清晰分区，编辑态每门课均显示每天至少、每天最多、覆盖天数、最多连续字段。
+- 内容：
+  - 课程规则新增“每天至少几节、每天最多几节、每周至少覆盖几天、同班最多连续几节”，支持语文每天都有、体育一天最多一节、数学最多连续两节等真实教务规则。
+  - OR-Tools CP-SAT、后端冲突校验、排课前预检、手动调整校验和本地试运行逻辑均纳入新课程分布规则。
+  - 行政排课页面把“编辑课程”整理为“课程与分布规则”，把课程分布规则集中在课程配置内，硬约束区域专注禁排规则，降低操作混乱感。
+  - 质量诊断的“同班同科过度集中”改为参考每门课自己的每日上限，避免把已允许的数学连堂误报成异常。
+  - 生产回归测试新增课程分布断言，覆盖每班每天语文 1 节、体育每天最多 1 节、数学最多连续 2 节。
+
 ## 2026-06-21 - 学期管理支持删除误建学期
 
 - 类型：功能 / 前端 / 后端 / 学期管理

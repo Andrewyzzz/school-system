@@ -100,6 +100,19 @@ function addDays(dateKey, offset) {
   return date.toISOString().slice(0, 10);
 }
 
+function maxConsecutiveRun(periods = []) {
+  const sorted = [...new Set(periods.map(Number).filter(Number.isFinite))].sort((a, b) => a - b);
+  let current = 0;
+  let best = 0;
+  let previous = null;
+  sorted.forEach((period) => {
+    current = previous !== null && period === previous + 1 ? current + 1 : 1;
+    best = Math.max(best, current);
+    previous = period;
+  });
+  return best;
+}
+
 function findChangeRequestCandidate(db, config, lesson) {
   const weekDates = Array.from({ length: 5 }, (_, index) => addDays(config.weekStart, index));
   const periods = config.periods || [];
@@ -396,6 +409,41 @@ assert.ok(
 );
 
 configureClassTeachers(db, { stageId: "primary", grade: 1 }, admin);
+const primaryGradeConfig = buildSchedulingConfig(db, { divisionId: "elementary", gradeId: "elementary-g1" });
+updateGradeCourseRules(
+  db,
+  {
+    stageId: "primary",
+    grade: 1,
+    rules: primaryGradeConfig.courseRules.map((rule) => ({
+      ...rule,
+      ...(rule.subjectId === "chinese"
+        ? {
+            minPerClassPerDay: 1,
+            maxPerClassPerDay: 1,
+            minWeeklyDays: 5,
+            maxConsecutivePerClass: 1,
+            allowConsecutive: false,
+          }
+        : {}),
+      ...(rule.subjectId === "math"
+        ? {
+            maxPerClassPerDay: 2,
+            maxConsecutivePerClass: 2,
+            allowConsecutive: true,
+          }
+        : {}),
+      ...(rule.subjectId === "pe"
+        ? {
+            maxPerClassPerDay: 1,
+            maxConsecutivePerClass: 1,
+            allowConsecutive: false,
+          }
+        : {}),
+    })),
+  },
+  admin,
+);
 
 const schedule = generateScheduleDraft(
   db,
@@ -430,6 +478,28 @@ assert.ok(
   schedule.draft.assignments.filter((assignment) => assignment.subjectId === "pe").every((assignment) => assignment.roomType === "playground"),
   "体育课应排到操场",
 );
+const scheduleWeekDates = Array.from({ length: 5 }, (_, index) => addDays(schedule.config.weekStart, index));
+schedule.config.classes.forEach((schoolClass) => {
+  scheduleWeekDates.forEach((date) => {
+    const chineseCount = schedule.draft.assignments.filter(
+      (assignment) =>
+        assignment.classId === schoolClass.id && assignment.subjectId === "chinese" && assignment.date === date,
+    ).length;
+    assert.equal(chineseCount, 1, `${schoolClass.name} ${date} 语文应每天正好 1 节`);
+
+    const peCount = schedule.draft.assignments.filter(
+      (assignment) => assignment.classId === schoolClass.id && assignment.subjectId === "pe" && assignment.date === date,
+    ).length;
+    assert.ok(peCount <= 1, `${schoolClass.name} ${date} 体育每天最多 1 节`);
+
+    const mathRun = maxConsecutiveRun(
+      schedule.draft.assignments
+        .filter((assignment) => assignment.classId === schoolClass.id && assignment.subjectId === "math" && assignment.date === date)
+        .map((assignment) => assignment.period),
+    );
+    assert.ok(mathRun <= 2, `${schoolClass.name} ${date} 数学最多连续 2 节`);
+  });
+});
 assert.ok(
   schedule.draft.assignments
     .filter((assignment) => assignment.subjectId === "physics" || assignment.subjectId === "chemistry")
