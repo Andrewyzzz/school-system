@@ -303,6 +303,33 @@ assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "lab"
 assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "computer" && room.name === "信息机房2"));
 assert.ok(roomResourceResult.config.rooms.some((room) => room.roomType === "playground" && room.name === "东操场"));
 
+const dynamicRoomDb = createInitialData({ teacherCount: 1000 });
+const dynamicRoomResult = updateRoomResources(
+  dynamicRoomDb,
+  {
+    stageId: "primary",
+    grade: 1,
+    roomResourceTypes: [
+      { type: "lab", name: "实验室", unit: "间", max: 20 },
+      { type: "dance-room", name: "舞蹈房", unit: "间", max: 5 },
+    ],
+    roomCounts: {
+      lab: 2,
+      "dance-room": 1,
+    },
+    roomCatalog: [
+      { roomType: "lab", name: "物理实验室A" },
+      { roomType: "lab", name: "化学实验室B" },
+      { roomType: "dance-room", name: "舞蹈房A", roomTypeName: "舞蹈房" },
+    ],
+  },
+  actor(dynamicRoomDb, "admin"),
+);
+assert.ok(dynamicRoomResult.config.roomResourceTypes.some((resource) => resource.type === "dance-room" && resource.name === "舞蹈房"));
+assert.equal(dynamicRoomResult.config.roomResourceTypes.some((resource) => resource.type === "music"), false);
+assert.equal(dynamicRoomResult.config.roomResourceCounts["dance-room"], 1);
+assert.ok(dynamicRoomResult.config.rooms.some((room) => room.roomType === "dance-room" && room.name === "舞蹈房A"));
+
 assert.throws(
   () =>
     generateScheduleDraft(

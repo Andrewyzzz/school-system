@@ -100,7 +100,8 @@ def teacher_rules(config):
 
 
 def normalize_room_type(value):
-    return value if value in ROOM_TYPES else "homeroom"
+    text = str(value or "homeroom").strip()
+    return text or "homeroom"
 
 
 def rooms_for_task(config, task):

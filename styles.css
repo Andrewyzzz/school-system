@@ -778,6 +778,36 @@ h2 {
   grid-template-columns: repeat(5, minmax(92px, 1fr)) auto;
 }
 
+.room-resource-type-list,
+.room-resource-add-row {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+}
+
+.room-resource-type-list {
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+}
+
+.room-resource-type-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.7fr) minmax(90px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.room-resource-type-row > span {
+  padding-bottom: 11px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.room-resource-add-row {
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: end;
+}
+
 .class-structure-controls .field-label {
   margin-bottom: 0;
 }
@@ -4275,6 +4305,16 @@ td {
 
   .room-catalog-list {
     grid-template-columns: 1fr;
+  }
+
+  .room-resource-type-list,
+  .room-resource-type-row,
+  .room-resource-add-row {
+    grid-template-columns: 1fr;
+  }
+
+  .room-resource-type-row > span {
+    padding-bottom: 0;
   }
 
   .compact-button {

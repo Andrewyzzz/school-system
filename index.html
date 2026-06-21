@@ -377,42 +377,15 @@
                 <strong>教室资源</strong>
                 <span id="roomResourceHelp">普通教室跟随班级结构自动生成；这里维护实验室、机房、操场等会参与排课冲突校验的专用教室。</span>
               </div>
-              <div class="class-structure-controls room-resource-controls">
-                <label class="field-label compact-field" for="roomCountLabInput">
-                  <span>实验室</span>
-                  <div class="input-with-unit">
-                    <input id="roomCountLabInput" type="number" min="0" max="20" step="1" />
-                    <em>间</em>
-                  </div>
+              <div class="room-resource-type-list" id="roomResourceTypeControls"></div>
+              <div class="room-resource-add-row">
+                <label class="field-label compact-field" for="newRoomResourceTypeName">
+                  <span>新增资源类型</span>
+                  <input id="newRoomResourceTypeName" type="text" placeholder="例如 舞蹈房、录播室、心理教室" />
                 </label>
-                <label class="field-label compact-field" for="roomCountComputerInput">
-                  <span>机房</span>
-                  <div class="input-with-unit">
-                    <input id="roomCountComputerInput" type="number" min="0" max="20" step="1" />
-                    <em>间</em>
-                  </div>
-                </label>
-                <label class="field-label compact-field" for="roomCountPlaygroundInput">
-                  <span>操场</span>
-                  <div class="input-with-unit">
-                    <input id="roomCountPlaygroundInput" type="number" min="0" max="10" step="1" />
-                    <em>个</em>
-                  </div>
-                </label>
-                <label class="field-label compact-field" for="roomCountArtInput">
-                  <span>美术室</span>
-                  <div class="input-with-unit">
-                    <input id="roomCountArtInput" type="number" min="0" max="20" step="1" />
-                    <em>间</em>
-                  </div>
-                </label>
-                <label class="field-label compact-field" for="roomCountMusicInput">
-                  <span>音乐室</span>
-                  <div class="input-with-unit">
-                    <input id="roomCountMusicInput" type="number" min="0" max="20" step="1" />
-                    <em>间</em>
-                  </div>
-                </label>
+                <button class="ghost-button compact-button" id="addRoomResourceType" type="button">
+                  添加类型
+                </button>
                 <button class="primary-button compact-button" id="saveRoomResources" type="button">
                   保存教室资源
                 </button>

@@ -144,7 +144,7 @@ const SCHEDULE_ROOM_TYPES = {
   music: "音乐室",
 };
 
-const SCHEDULE_SPECIAL_ROOM_RESOURCES = [
+const DEFAULT_SCHEDULE_ROOM_RESOURCES = [
   { type: "lab", label: "实验室", unit: "间", max: 20 },
   { type: "computer", label: "机房", unit: "间", max: 20 },
   { type: "playground", label: "操场", unit: "个", max: 10 },
@@ -1613,11 +1613,53 @@ function normalizePreferredDayPart(value) {
 }
 
 function normalizeScheduleRoomType(value) {
-  return Object.hasOwn(SCHEDULE_ROOM_TYPES, value) ? value : "homeroom";
+  const raw = String(value || "homeroom").trim();
+  if (Object.hasOwn(SCHEDULE_ROOM_TYPES, raw)) return raw;
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "homeroom";
 }
 
-function scheduleRoomTypeText(value) {
-  return SCHEDULE_ROOM_TYPES[normalizeScheduleRoomType(value)] || SCHEDULE_ROOM_TYPES.homeroom;
+function roomResourceTypes(config = state.schedulingConfig) {
+  const byType = new Map();
+  const addResource = (resource) => {
+    const type = normalizeScheduleRoomType(resource.type);
+    if (!type || type === "homeroom") return;
+    byType.set(type, {
+      type,
+      label: resource.label || resource.name || SCHEDULE_ROOM_TYPES[type] || type,
+      unit: resource.unit || (type === "playground" ? "个" : "间"),
+      max: Number(resource.max || 30),
+      defaultCount: Number(resource.defaultCount || 0),
+      custom: Boolean(resource.custom || !Object.hasOwn(SCHEDULE_ROOM_TYPES, type)),
+    });
+  };
+  (Array.isArray(config.roomResourceTypes) ? config.roomResourceTypes : DEFAULT_SCHEDULE_ROOM_RESOURCES).forEach((resource) => {
+    addResource({
+      ...resource,
+      label: resource.label || resource.name,
+    });
+  });
+  (config.rooms || []).forEach((room) => {
+    const type = normalizeScheduleRoomType(room.roomType || room.type);
+    if (type === "homeroom" || byType.has(type)) return;
+    addResource({
+      type,
+      label: room.roomTypeName || SCHEDULE_ROOM_TYPES[type] || type,
+      unit: room.unit || "间",
+      max: 30,
+      custom: true,
+    });
+  });
+  return Array.from(byType.values());
+}
+
+function scheduleRoomTypeText(value, config = state.schedulingConfig) {
+  const type = normalizeScheduleRoomType(value);
+  if (type === "homeroom") return SCHEDULE_ROOM_TYPES.homeroom;
+  return roomResourceTypes(config).find((resource) => resource.type === type)?.label || SCHEDULE_ROOM_TYPES[type] || type;
 }
 
 function periodDayPart(period) {
@@ -3535,7 +3577,8 @@ function classRoomCatalogHtml(
 
 function roomResourceSummary(config = state.schedulingConfig) {
   const rooms = config.rooms || [];
-  const counts = Object.fromEntries(SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource) => [resource.type, 0]));
+  const resources = roomResourceTypes(config);
+  const counts = Object.fromEntries(resources.map((resource) => [resource.type, 0]));
   let homeroomCount = 0;
   rooms.forEach((room) => {
     const roomType = normalizeScheduleRoomType(room.roomType || room.type);
@@ -3556,9 +3599,10 @@ function roomResourceSummary(config = state.schedulingConfig) {
 
 function roomResourcePreviewHtml(config = state.schedulingConfig, counts = roomResourceSummary(config).counts) {
   const summary = roomResourceSummary(config);
+  const resources = roomResourceTypes(config);
   const tags = [
     `<span class="class-structure-tag">普通教室 ${summary.homeroomCount} 间</span>`,
-    ...SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource) => {
+    ...resources.map((resource) => {
       const count = Number(counts[resource.type] || 0);
       return `<span class="class-structure-tag">${escapeHtml(resource.label)} ${count} ${escapeHtml(resource.unit)}</span>`;
     }),
@@ -3571,7 +3615,7 @@ function defaultRoomCatalogName(config, resource, index, count) {
 }
 
 function roomResourceCatalogFromConfig(config = state.schedulingConfig) {
-  const order = new Map(SCHEDULE_SPECIAL_ROOM_RESOURCES.map((resource, index) => [resource.type, index]));
+  const order = new Map(roomResourceTypes(config).map((resource, index) => [resource.type, index]));
   return (config.rooms || [])
     .filter((room) => normalizeScheduleRoomType(room.roomType || room.type) !== "homeroom")
     .sort((a, b) => {
@@ -3585,6 +3629,8 @@ function roomResourceCatalogFromConfig(config = state.schedulingConfig) {
       id: room.id || "",
       name: room.name || "",
       roomType: normalizeScheduleRoomType(room.roomType || room.type),
+      roomTypeName: room.roomTypeName || scheduleRoomTypeText(room.roomType || room.type, config),
+      unit: room.unit || "",
     }));
 }
 
@@ -3598,7 +3644,7 @@ function roomResourceCatalogRows(
     if (!existingByType.has(room.roomType)) existingByType.set(room.roomType, []);
     existingByType.get(room.roomType).push(room);
   });
-  return SCHEDULE_SPECIAL_ROOM_RESOURCES.flatMap((resource) => {
+  return roomResourceTypes(config).flatMap((resource) => {
     const count = Math.max(Number(counts[resource.type] || 0), 0);
     return Array.from({ length: count }, (_, index) => {
       const existing = (existingByType.get(resource.type) || [])[index] || {};
@@ -3641,16 +3687,35 @@ function roomResourceCatalogHtml(
     .join("");
 }
 
-function roomResourceInputId(roomType) {
-  return `#roomCount${roomType.slice(0, 1).toUpperCase()}${roomType.slice(1)}Input`;
-}
-
-function setRoomResourceInputs(config = state.schedulingConfig) {
-  const summary = roomResourceSummary(config);
-  SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
-    const input = document.querySelector(roomResourceInputId(resource.type));
-    if (input) input.value = summary.counts[resource.type] || 0;
-  });
+function roomResourceTypeControlsHtml(config = state.schedulingConfig, counts = roomResourceSummary(config).counts) {
+  const resources = roomResourceTypes(config);
+  if (!resources.length) {
+    return `<div class="empty-state">当前没有专用教室类型。需要资源教室时，先添加类型。</div>`;
+  }
+  return resources
+    .map(
+      (resource) => `
+        <label class="room-resource-type-row" data-room-resource-type-row data-room-resource-type="${escapeHtml(resource.type)}">
+          <span>${escapeHtml(resource.label)}</span>
+          <div class="input-with-unit">
+            <input
+              data-room-resource-count
+              data-room-type="${escapeHtml(resource.type)}"
+              data-room-type-name="${escapeHtml(resource.label)}"
+              data-room-unit="${escapeHtml(resource.unit)}"
+              type="number"
+              min="0"
+              max="${Number(resource.max || 30)}"
+              step="1"
+              value="${Number(counts[resource.type] || 0)}"
+            />
+            <em>${escapeHtml(resource.unit)}</em>
+          </div>
+          <button class="ghost-button icon-danger" data-delete-room-resource-type="${escapeHtml(resource.type)}" type="button">删除</button>
+        </label>
+      `,
+    )
+    .join("");
 }
 
 function updateRoomResourcePreview() {
@@ -3686,7 +3751,7 @@ function buildLocalSpecialRooms(config, roomCounts, roomCatalog = roomResourceCa
     if (!catalogByType.has(roomType)) catalogByType.set(roomType, []);
     catalogByType.get(roomType).push(room);
   });
-  return SCHEDULE_SPECIAL_ROOM_RESOURCES.flatMap((resource) => {
+  return roomResourceTypes(config).flatMap((resource) => {
     const count = Math.max(Number(roomCounts[resource.type] || 0), 0);
     return Array.from({ length: count }, (_, index) => {
       const catalogRoom = (catalogByType.get(resource.type) || [])[index] || {};
@@ -3695,7 +3760,8 @@ function buildLocalSpecialRooms(config, roomCounts, roomCatalog = roomResourceCa
         id: roomId,
         name: String(catalogRoom.name || "").trim() || defaultRoomCatalogName(config, resource, index + 1, count),
         roomType: resource.type,
-        roomTypeName: SCHEDULE_ROOM_TYPES[resource.type],
+        roomTypeName: resource.label,
+        unit: resource.unit,
         sourceClassId: "",
       };
     });
@@ -3816,8 +3882,8 @@ function collectClassRoomCatalogFromForm() {
 function collectRoomResourceCountsFromForm(options = {}) {
   const validate = options.validate !== false;
   const counts = {};
-  SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
-    const input = document.querySelector(roomResourceInputId(resource.type));
+  roomResourceTypes().forEach((resource) => {
+    const input = document.querySelector(`[data-room-resource-count][data-room-type="${resource.type}"]`);
     const value = Number.parseInt(input?.value || "0", 10);
     if (validate && (!Number.isFinite(value) || value < 0 || value > resource.max)) {
       throw new Error(`${resource.label}数量需在 0-${resource.max} 之间`);
@@ -3833,15 +3899,85 @@ function collectRoomCatalogFromForm() {
       id: input.dataset.roomId || "",
       roomType: normalizeScheduleRoomType(input.dataset.roomType || ""),
       name: input.value.trim(),
+      roomTypeName: scheduleRoomTypeText(input.dataset.roomType || ""),
     }))
     .filter((room) => room.roomType !== "homeroom");
+}
+
+function collectRoomResourceTypesFromForm() {
+  return Array.from(document.querySelectorAll("[data-room-resource-type-row]")).map((row) => ({
+    type: normalizeScheduleRoomType(row.dataset.roomResourceType || ""),
+    name: row.querySelector("[data-room-resource-count]")?.dataset.roomTypeName || scheduleRoomTypeText(row.dataset.roomResourceType || ""),
+    unit: row.querySelector("[data-room-resource-count]")?.dataset.roomUnit || "间",
+    max: Number(row.querySelector("[data-room-resource-count]")?.max || 30),
+  }));
 }
 
 function applyLocalRoomResources(roomCounts, roomCatalog = collectRoomCatalogFromForm()) {
   const config = state.schedulingConfig;
   const homeroomRooms = (config.rooms || []).filter((room) => normalizeScheduleRoomType(room.roomType || room.type) === "homeroom");
+  config.roomResourceTypes = collectRoomResourceTypesFromForm();
   config.rooms = [...homeroomRooms, ...buildLocalSpecialRooms(config, roomCounts, roomCatalog)];
   resetCourseDraftAfterConfigChange();
+}
+
+function createRoomResourceTypeId(name) {
+  const ascii = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  let id = ascii || `custom-${Date.now().toString(36)}`;
+  const existing = new Set(roomResourceTypes().map((resource) => resource.type));
+  let index = 1;
+  while (existing.has(id) || id === "homeroom") {
+    id = `${ascii || `custom-${Date.now().toString(36)}`}-${index}`;
+    index += 1;
+  }
+  return id;
+}
+
+function addRoomResourceType() {
+  const input = document.querySelector("#newRoomResourceTypeName");
+  const name = input?.value.trim() || "";
+  if (!name) {
+    showToast("请输入要新增的教室资源类型");
+    return;
+  }
+  const exists = roomResourceTypes().some((resource) => resource.label === name);
+  if (exists) {
+    showToast("该教室资源类型已存在");
+    return;
+  }
+  const nextType = {
+    type: createRoomResourceTypeId(name),
+    label: name,
+    name,
+    unit: "间",
+    max: 30,
+    defaultCount: 0,
+    custom: true,
+  };
+  state.schedulingConfig.roomResourceTypes = [...roomResourceTypes(), nextType];
+  if (input) input.value = "";
+  renderAdminScheduling();
+}
+
+function deleteRoomResourceType(type) {
+  const normalized = normalizeScheduleRoomType(type);
+  if (!normalized || normalized === "homeroom") return;
+  const usedByCourse = (state.schedulingConfig.courseRules || []).some(
+    (rule) => rule.enabled && normalizeScheduleRoomType(rule.requiredRoomType || "homeroom") === normalized,
+  );
+  if (usedByCourse) {
+    showToast("已有课程要求这个教室类型，请先在课程规则里调整所需教室");
+    return;
+  }
+  state.schedulingConfig.roomResourceTypes = roomResourceTypes().filter((resource) => resource.type !== normalized);
+  state.schedulingConfig.rooms = (state.schedulingConfig.rooms || []).filter(
+    (room) => normalizeScheduleRoomType(room.roomType || room.type) !== normalized,
+  );
+  renderAdminScheduling();
 }
 
 async function saveAdminRoomResources() {
@@ -3865,6 +4001,7 @@ async function saveAdminRoomResources() {
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           roomCounts,
+          roomResourceTypes: collectRoomResourceTypesFromForm(),
           roomCatalog,
         },
       });
@@ -5687,9 +5824,9 @@ function renderAdminScheduling() {
     classStructure.regularCount,
     classStructure.experimentalCount,
   );
-  setRoomResourceInputs(config);
   document.querySelector("#roomResourceHelp").textContent =
     `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室；下方目录名称会用于排课、换教室和教室二维码。`;
+  document.querySelector("#roomResourceTypeControls").innerHTML = roomResourceTypeControlsHtml(config, roomSummary.counts);
   document.querySelector("#roomResourcePreview").innerHTML = roomResourcePreviewHtml(config, roomSummary.counts);
   document.querySelector("#roomResourceCatalog").innerHTML = roomResourceCatalogHtml(config, roomSummary.counts);
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
@@ -5704,6 +5841,9 @@ function renderAdminScheduling() {
     `${config.divisionName}${config.gradeName}直接按班级逐科指定老师，空格子不会参与排课，全部匹配后才能生成。`;
   document.querySelector("#courseRulesHelp").textContent =
     `${config.divisionName}${config.gradeName}可配置开设课程、周课时和每节时长，保存后重新生成排课时生效。`;
+  document.querySelector("#newCourseRoomType").innerHTML = scheduleRoomTypeOptions(
+    document.querySelector("#newCourseRoomType")?.value || "homeroom",
+  );
   document.querySelector("#courseRulesStatus").textContent =
     `${(config.courseRules || []).filter((rule) => rule.enabled).length} 门课 · ${(config.constraints || []).length} 条硬约束`;
   document.querySelector("#courseRulesStatus").className = (config.constraints || []).length
@@ -6697,9 +6837,16 @@ function courseRuleConstraintSummary(rule) {
 
 function scheduleRoomTypeOptions(selected = "homeroom") {
   const normalized = normalizeScheduleRoomType(selected);
-  return Object.entries(SCHEDULE_ROOM_TYPES)
+  const options = [
+    { value: "homeroom", label: SCHEDULE_ROOM_TYPES.homeroom },
+    ...roomResourceTypes().map((resource) => ({ value: resource.type, label: resource.label })),
+  ];
+  if (!options.some((option) => option.value === normalized)) {
+    options.push({ value: normalized, label: scheduleRoomTypeText(normalized) });
+  }
+  return options
     .map(
-      ([value, label]) => `
+      ({ value, label }) => `
         <option value="${value}" ${normalized === value ? "selected" : ""}>${label}</option>
       `,
     )
@@ -9555,6 +9702,12 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const deleteRoomTypeButton = event.target.closest("[data-delete-room-resource-type]");
+  if (deleteRoomTypeButton) {
+    deleteRoomResourceType(deleteRoomTypeButton.dataset.deleteRoomResourceType);
+    return;
+  }
+
   const deleteScheduleConstraintButton = event.target.closest("[data-delete-schedule-constraint]");
   if (deleteScheduleConstraintButton) {
     await deleteAdminScheduleConstraint(deleteScheduleConstraintButton.dataset.deleteScheduleConstraint);
@@ -9596,9 +9749,8 @@ document.querySelector("#confirmSchedule").addEventListener("click", confirmAndP
 document.querySelector("#refreshSchedulePrecheck").addEventListener("click", refreshBackendSchedulePrecheck);
 document.querySelector("#saveClassStructure").addEventListener("click", saveAdminClassStructure);
 document.querySelector("#saveRoomResources").addEventListener("click", saveAdminRoomResources);
-SCHEDULE_SPECIAL_ROOM_RESOURCES.forEach((resource) => {
-  document.querySelector(roomResourceInputId(resource.type))?.addEventListener("input", updateRoomResourcePreview);
-});
+document.querySelector("#addRoomResourceType").addEventListener("click", addRoomResourceType);
+document.querySelector("#roomResourceTypeControls").addEventListener("input", updateRoomResourcePreview);
 document.querySelector("#saveCourseRules").addEventListener("click", saveAdminCourseRules);
 document.querySelector("#addGradeCourse").addEventListener("click", addAdminGradeCourse);
 document.querySelector("#addScheduleConstraint").addEventListener("click", addAdminScheduleConstraint);

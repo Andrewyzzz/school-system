@@ -30,7 +30,7 @@ const ROOM_TYPES = {
   music: "音乐室",
 };
 
-const SPECIAL_ROOM_RESOURCE_TYPES = [
+const DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES = [
   { type: "lab", code: "LAB", name: "实验室", defaultCount: 2, max: 20 },
   { type: "computer", code: "COMPUTER", name: "机房", defaultCount: 1, max: 20 },
   { type: "playground", code: "PLAYGROUND", name: "操场", defaultCount: 1, max: 10 },
@@ -382,8 +382,14 @@ function normalizePreferredDayPart(value, fallback = "any") {
 }
 
 function normalizeRoomType(value, fallback = "homeroom") {
-  const text = String(value || fallback || "homeroom").trim();
-  return Object.hasOwn(ROOM_TYPES, text) ? text : "homeroom";
+  const raw = String(value || fallback || "homeroom").trim();
+  if (Object.hasOwn(ROOM_TYPES, raw)) return raw;
+  const normalized = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (normalized) return normalized;
+  return fallback === "homeroom" ? "homeroom" : normalizeRoomType(fallback, "homeroom");
 }
 
 function normalizeSubjectForbiddenPeriods(value) {
@@ -599,24 +605,58 @@ function gradeClassStructure(classes = []) {
 }
 
 function specialRoomTypeSet() {
-  return new Set(SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => resource.type));
+  return new Set(DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => resource.type));
 }
 
 function specialRoomCounts(rooms = []) {
-  const counts = Object.fromEntries(SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => [resource.type, 0]));
-  const types = specialRoomTypeSet();
+  const counts = Object.fromEntries(DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => [resource.type, 0]));
   rooms.forEach((room) => {
     if (room.active === false) return;
     const roomType = normalizeRoomType(room.roomType || room.type, "homeroom");
-    if (!types.has(roomType)) return;
+    if (roomType === "homeroom") return;
     counts[roomType] = (counts[roomType] || 0) + 1;
   });
   return counts;
 }
 
-function normalizeRoomResourceCounts(roomCounts = {}, fallback = {}) {
+function normalizeRoomResourceTypes(roomResourceTypes = null, fallbackRooms = []) {
+  const fromFallbackRooms = roomCatalogFromRows(fallbackRooms).map((room) => ({
+    type: room.roomType,
+    code: room.roomType.toUpperCase().replace(/[^A-Z0-9]+/g, "-"),
+    name: room.roomTypeName || ROOM_TYPES[room.roomType] || room.name || room.roomType,
+    unit: room.unit || (room.roomType === "playground" ? "个" : "间"),
+    defaultCount: 0,
+    max: 30,
+  }));
+  const source = Array.isArray(roomResourceTypes) ? roomResourceTypes : [...DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES, ...fromFallbackRooms];
+  const byType = new Map();
+  source.forEach((resource) => {
+    const type = normalizeRoomType(resource.type, "");
+    if (!type || type === "homeroom") return;
+    byType.set(type, {
+      type,
+      code: String(resource.code || type).toUpperCase().replace(/[^A-Z0-9]+/g, "-") || type.toUpperCase(),
+      name: normalizeRoomName(resource.name || ROOM_TYPES[type] || type),
+      unit: normalizeRoomName(resource.unit || (type === "playground" ? "个" : "间")),
+      defaultCount: normalizeClassCount(resource.defaultCount, 0, { min: 0, max: 30 }),
+      max: normalizeClassCount(resource.max, 30, { min: 1, max: 100 }),
+      custom: !Object.hasOwn(ROOM_TYPES, type),
+    });
+  });
+  return Array.from(byType.values());
+}
+
+function roomResourceTypesForScope(db, term, division, rooms = []) {
+  const override = activeRoomResourceOverride(db, term, division);
+  return normalizeRoomResourceTypes(
+    override && Array.isArray(override.roomResourceTypes) ? override.roomResourceTypes : null,
+    rooms,
+  );
+}
+
+function normalizeRoomResourceCounts(roomCounts = {}, fallback = {}, roomResourceTypes = DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES) {
   return Object.fromEntries(
-    SPECIAL_ROOM_RESOURCE_TYPES.map((resource) => [
+    roomResourceTypes.map((resource) => [
       resource.type,
       normalizeClassCount(roomCounts[resource.type], Number(fallback[resource.type] ?? resource.defaultCount), {
         min: 0,
@@ -635,13 +675,12 @@ function defaultSpecialRoomName(division, resource, index, count) {
 }
 
 function roomCatalogFromRows(rooms = []) {
-  const types = specialRoomTypeSet();
   return rooms
-    .filter((room) => room.active !== false && types.has(normalizeRoomType(room.roomType || room.type, "homeroom")))
+    .filter((room) => room.active !== false && normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom")
     .sort((a, b) => {
       const typeOrder =
-        SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(a.roomType || a.type, "homeroom")) -
-        SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(b.roomType || b.type, "homeroom"));
+        DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(a.roomType || a.type, "homeroom")) -
+        DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES.findIndex((resource) => resource.type === normalizeRoomType(b.roomType || b.type, "homeroom"));
       if (typeOrder) return typeOrder;
       return String(a.id || a.name || "").localeCompare(String(b.id || b.name || ""));
     })
@@ -649,29 +688,32 @@ function roomCatalogFromRows(rooms = []) {
       id: room.id,
       name: normalizeRoomName(room.name),
       roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+      roomTypeName: normalizeRoomName(room.roomTypeName || ROOM_TYPES[normalizeRoomType(room.roomType || room.type, "homeroom")] || ""),
+      unit: normalizeRoomName(room.unit || ""),
     }));
 }
 
 function normalizeRoomResourceCatalog(roomCatalog = []) {
   if (!Array.isArray(roomCatalog)) return [];
-  const types = specialRoomTypeSet();
   return roomCatalog
     .map((room) => ({
       id: String(room.id || "").trim(),
       name: normalizeRoomName(room.name),
       roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
+      roomTypeName: normalizeRoomName(room.roomTypeName || room.typeName || ""),
+      unit: normalizeRoomName(room.unit || ""),
     }))
-    .filter((room) => types.has(room.roomType));
+    .filter((room) => room.roomType !== "homeroom");
 }
 
-function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = []) {
+function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = [], roomResourceTypes = DEFAULT_SPECIAL_ROOM_RESOURCE_TYPES) {
   const rows = [];
   const catalogByType = new Map();
   normalizeRoomResourceCatalog(roomCatalog).forEach((room) => {
     if (!catalogByType.has(room.roomType)) catalogByType.set(room.roomType, []);
     catalogByType.get(room.roomType).push(room);
   });
-  SPECIAL_ROOM_RESOURCE_TYPES.forEach((resource) => {
+  roomResourceTypes.forEach((resource) => {
     const count = normalizeClassCount(roomCounts[resource.type], resource.defaultCount, { min: 0, max: resource.max });
     for (let index = 1; index <= count; index += 1) {
       const roomId = `ROOM-${division.stageId}-${resource.code}-${String(index).padStart(2, "0")}`;
@@ -683,6 +725,8 @@ function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = []) {
         stageId: division.stageId,
         name: catalogRoom?.name || defaultSpecialRoomName(division, resource, index, count),
         roomType: resource.type,
+        roomTypeName: resource.name,
+        unit: resource.unit,
         capacity: 1,
         qrCode: `ROOM:${roomId}`,
         displayKey: `screen-${roomId.toLowerCase()}`,
@@ -705,6 +749,7 @@ export function buildSchedulingConfig(db, options = {}) {
   const constraints = publicScheduleConstraints(db, division, grade, term);
   const teacherRules = publicTeacherScheduleRules(db, division, subjects, term);
   const scopedRooms = schedulingRooms(db, division, classes, term);
+  const roomResourceTypes = roomResourceTypesForScope(db, term, division, scopedRooms);
 
   return {
     divisionId: division.id,
@@ -722,13 +767,14 @@ export function buildSchedulingConfig(db, options = {}) {
     classCount: classes.length,
     classStructure,
     roomResourceCounts: specialRoomCounts(scopedRooms),
+    roomResourceTypes,
     classes,
     rooms: scopedRooms
       .map((room) => ({
         id: room.id,
         name: room.name,
         roomType: normalizeRoomType(room.roomType || room.type, "homeroom"),
-        roomTypeName: ROOM_TYPES[normalizeRoomType(room.roomType || room.type, "homeroom")],
+        roomTypeName: room.roomTypeName || ROOM_TYPES[normalizeRoomType(room.roomType || room.type, "homeroom")] || normalizeRoomType(room.roomType || room.type, "homeroom"),
         sourceClassId: classes.find((schoolClass) => schoolClass.roomId === room.id)?.id || "",
         capacity: Number(room.capacity || 1),
       })),
@@ -870,20 +916,23 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
   assertEditableScheduleTerm(scopeConfig, "修改教室资源");
   const classes = schedulingClasses(db, division, grade, term);
   const previousRooms = schedulingRooms(db, division, classes, term);
-  const roomCounts = normalizeRoomResourceCounts(options.roomCounts || {}, specialRoomCounts(previousRooms));
   const submittedCatalog = normalizeRoomResourceCatalog(options.roomCatalog);
   const roomCatalog = submittedCatalog.length ? submittedCatalog : roomCatalogFromRows(previousRooms);
-  const specialTypes = specialRoomTypeSet();
+  const roomResourceTypes = normalizeRoomResourceTypes(
+    Array.isArray(options.roomResourceTypes) ? options.roomResourceTypes : null,
+    previousRooms,
+  );
+  const roomCounts = normalizeRoomResourceCounts(options.roomCounts || {}, specialRoomCounts(previousRooms), roomResourceTypes);
 
   db.rooms = (db.rooms || []).filter(
     (room) =>
       !(
         itemBelongsToTerm(room, term) &&
         room.stageId === division.stageId &&
-        specialTypes.has(normalizeRoomType(room.roomType || room.type, "homeroom"))
+        normalizeRoomType(room.roomType || room.type, "homeroom") !== "homeroom"
       ),
   );
-  const roomRows = buildSpecialRoomRows(division, term, roomCounts, roomCatalog);
+  const roomRows = buildSpecialRoomRows(division, term, roomCounts, roomCatalog, roomResourceTypes);
   db.rooms.push(...roomRows);
 
   db.roomResourceOverrides = (db.roomResourceOverrides || []).filter(
@@ -897,6 +946,7 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
     stageId: division.stageId,
     stageName: division.name,
     roomCounts,
+    roomResourceTypes,
     roomCatalog: roomCatalogFromRows(roomRows),
     active: true,
     updatedAt: now,
@@ -916,6 +966,7 @@ export function updateRoomResources(db, options = {}, actorAccount = null) {
     termId: term.id,
     stageId: division.stageId,
     roomCounts,
+    roomResourceTypes,
     roomCatalog: roomCatalogFromRows(roomRows),
     actorAccountId: actorAccount?.id || "",
     actorName: actorAccount?.name || "",
@@ -1547,7 +1598,8 @@ function roomById(config, roomId) {
 }
 
 function roomTypeName(roomType = "homeroom") {
-  return ROOM_TYPES[normalizeRoomType(roomType)] || ROOM_TYPES.homeroom;
+  const normalized = normalizeRoomType(roomType);
+  return ROOM_TYPES[normalized] || normalized;
 }
 
 function roomsForTask(config, task) {

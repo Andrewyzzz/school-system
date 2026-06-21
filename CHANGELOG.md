@@ -2,6 +2,27 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-21 - 教室资源类型支持自定义增删
+
+- 类型：功能 / 前端 / 后端 / 排课 / 求解器
+- 影响范围：行政排课 / 教室资源 / 课程规则 / OR-Tools
+- 提交：本次提交
+- 部署：未部署
+- 验证：
+  - `node --check app.js`
+  - `node --check server/scheduling.js`
+  - `node --check tests/phase1-production.test.js`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/codex-pycache python3 -m py_compile server/solver/ortools_scheduler.py`
+  - `node tests/phase1-production.test.js`
+  - `node tests/scheduling-jobs.test.js`
+  - `node tests/scheduling-solver-benchmark.test.js`
+  - `git diff --check`
+- 内容：
+  - 教室资源类型不再固定为实验室、机房、操场、美术室、音乐室，行政可在页面上添加或删除类型。
+  - 课程规则“教室要求”下拉改为读取当前教室资源类型，新增舞蹈房、录播室等类型后可直接绑定课程。
+  - 后端保存 `roomResourceTypes`、数量和具体教室目录，支持某个学部/学期没有音乐室或新增自定义资源类型。
+  - OR-Tools 求解器不再把未知教室类型降级为普通教室，自定义类型继续参与教室资源约束。
+
 ## 2026-06-21 - 教室目录支持自定义名称
 
 - 类型：功能 / 前端 / 后端 / 排课
