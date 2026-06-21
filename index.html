@@ -388,6 +388,16 @@
                 <small>按科目课时规则</small>
               </article>
               <article class="metric">
+                <span>课程/规则</span>
+                <strong id="adminRuleCount">0/0</strong>
+                <small id="adminRuleHelp">课程与硬约束</small>
+              </article>
+              <article class="metric">
+                <span>老师/教室</span>
+                <strong id="adminResourceCount">0/0</strong>
+                <small id="adminResourceHelp">可用资源池</small>
+              </article>
+              <article class="metric">
                 <span>教师冲突</span>
                 <strong id="adminConflictCount">0</strong>
                 <small>同一时间重复上课</small>
@@ -656,6 +666,7 @@
                 <p>确认后生成老师端课时任务，老师可在“我的课表”按自然周查看。</p>
               </div>
             </div>
+            <div class="schedule-readiness-card" id="scheduleReadinessPanel"></div>
             <div class="admin-schedule-actions">
               <button class="primary-button" id="generateSchedule" type="button">
                 <span aria-hidden="true">✓</span>

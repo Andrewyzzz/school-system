@@ -5302,11 +5302,19 @@ function renderAdminScheduling() {
     selectedClassAssignments.find((assignment) => assignment.id === state.selectedScheduleAssignmentId) ||
     selectedClassAssignments[0] ||
     null;
+  const enabledCourseRules = (config.courseRules || []).filter((rule) => rule.enabled);
+  const hardConstraintCount = (config.constraints || []).length;
+  const teacherCount = (config.teachers || []).length;
+  const roomCount = (config.rooms || []).length;
 
   document.querySelector("#adminDivisionName").textContent = config.divisionName;
   document.querySelector("#adminGradeName").textContent = config.gradeName;
   document.querySelector("#adminClassCount").textContent = `${config.classCount} 个班`;
   document.querySelector("#adminRequiredLessons").textContent = requiredScheduleLessonCount();
+  document.querySelector("#adminRuleCount").textContent = `${enabledCourseRules.length}/${hardConstraintCount}`;
+  document.querySelector("#adminRuleHelp").textContent = `${enabledCourseRules.length} 门课程 · ${hardConstraintCount} 条硬约束`;
+  document.querySelector("#adminResourceCount").textContent = `${teacherCount}/${roomCount}`;
+  document.querySelector("#adminResourceHelp").textContent = `${teacherCount} 名可选老师 · ${roomCount} 间教室`;
   document.querySelector("#adminConflictCount").textContent = conflicts.length;
   document.querySelector("#adminPublishStatus").textContent = scheduleStatusText(draft.status);
   document.querySelector("#adminPublishTime").textContent =
@@ -5383,7 +5391,6 @@ function renderAdminScheduling() {
   document.querySelector("#toggleCourseEditMode").textContent = courseRulesEditMode ? "完成编辑" : "编辑";
   document.querySelector("#adminSchedulePreviewHelp").textContent =
     `按${config.gradeName}班级查看生成结果，确认前为草稿，确认后同步到老师端 ${formatWeekRange(config.weekStart)} 课表。`;
-  const enabledCourseRules = (config.courseRules || []).filter((rule) => rule.enabled);
   document.querySelector("#courseRuleList").innerHTML = enabledCourseRules.length
     ? enabledCourseRules.map(adminCourseRuleItem).join("")
     : `<div class="empty-state">当前年级还没有课程，请先新增课程</div>`;
@@ -5400,6 +5407,16 @@ function renderAdminScheduling() {
     Number(draft.unassignedCount || 0),
     Number(draft.requiredLessonCount || requiredScheduleLessonCount()) - Number(assignments.length || 0),
   );
+  const readiness = scheduleReadinessState({
+    config,
+    draft,
+    assignments,
+    conflicts,
+    missingTeacherAssignments,
+    precheck,
+    termReadOnly,
+    unassignedCount,
+  });
   document.querySelector("#schedulePrecheckStatus").textContent = schedulePrecheckStatusText(precheck);
   document.querySelector("#schedulePrecheckStatus").className = schedulePrecheckStatusClass(precheck);
   document.querySelector("#schedulePrecheckBlockingCount").textContent = Number(precheck?.blockingCount || 0);
@@ -5409,6 +5426,7 @@ function renderAdminScheduling() {
     ? `${Number(precheck.requiredLessonCount || 0)} 节课时任务`
     : "等待读取";
   document.querySelector("#schedulePrecheckList").innerHTML = schedulePrecheckListHtml(precheck);
+  document.querySelector("#scheduleReadinessPanel").innerHTML = scheduleReadinessHtml(readiness);
   const completionWarningHtml =
     assignments.length > 0 && unassignedCount > 0
       ? `<article class="warning-item diagnostic-item">
@@ -5452,17 +5470,14 @@ function renderAdminScheduling() {
   document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassAssignments);
 
   const generateButton = document.querySelector("#generateSchedule");
-  generateButton.disabled = termReadOnly || schedulingBackendState.loading || missingTeacherAssignments.length > 0 || precheckBlocked;
+  generateButton.disabled = schedulingBackendState.loading || !readiness.canGenerate;
+  generateButton.title = readiness.generateReason || "";
   generateButton.innerHTML = schedulingBackendState.loading
     ? `<span aria-hidden="true">…</span>生成中`
     : `<span aria-hidden="true">✓</span>一键生成排课`;
-  document.querySelector("#confirmSchedule").disabled =
-    termReadOnly ||
-    schedulingBackendState.loading ||
-    assignments.length === 0 ||
-    conflicts.length > 0 ||
-    unassignedCount > 0 ||
-    draft.status === "published";
+  const confirmButton = document.querySelector("#confirmSchedule");
+  confirmButton.disabled = schedulingBackendState.loading || !readiness.canPublish;
+  confirmButton.title = readiness.publishReason || "";
   document.querySelector("#saveCourseRules").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addGradeCourse").disabled = termReadOnly || schedulingBackendState.loading;
@@ -6773,6 +6788,206 @@ function schedulePrecheckStatusClass(precheck) {
   if (precheck.status === "blocked") return "status-pill warning";
   if (precheck.status === "warning") return "status-pill warning";
   return "status-pill done";
+}
+
+function scheduleReadinessTagClass(stateName) {
+  if (stateName === "blocked") return "exception";
+  if (stateName === "warning") return "scheduled";
+  if (stateName === "done" || stateName === "ready") return "completed";
+  return "pending";
+}
+
+function scheduleReadinessLabel(stateName) {
+  if (stateName === "blocked") return "需处理";
+  if (stateName === "warning") return "提醒";
+  if (stateName === "done") return "完成";
+  if (stateName === "ready") return "可继续";
+  return "待处理";
+}
+
+function scheduleReadinessState({
+  config,
+  draft,
+  assignments,
+  conflicts,
+  missingTeacherAssignments,
+  precheck,
+  termReadOnly,
+  unassignedCount,
+}) {
+  const requiresPrecheck = backendMode() && currentRole() === "admin";
+  const missingCount = missingTeacherAssignments.length;
+  const precheckBlocked = Number(precheck?.blockingCount || 0) > 0;
+  const warningCount = Number(precheck?.warningCount || 0);
+  const hasDraft = assignments.length > 0;
+  const published = draft.status === "published";
+  const hasIncompleteDraft = hasDraft && unassignedCount > 0;
+  const hasConflicts = conflicts.length > 0;
+  const items = [
+    {
+      state: termReadOnly ? "blocked" : "done",
+      title: termReadOnly ? "学期已归档" : "学期可编辑",
+      text: termReadOnly ? "历史学期只读，不能生成或发布课表。" : `${config.termName || "当前学期"}正在编辑。`,
+      target: "#termManagementStatus",
+    },
+    {
+      state: missingCount ? "blocked" : "done",
+      title: missingCount ? "班级老师未配齐" : "班级老师已配齐",
+      text: missingCount ? `还有 ${missingCount} 个班级课程缺任课老师。` : "所有班级课程已有明确任课老师。",
+      target: "#subjectConfigList",
+    },
+    {
+      state: !requiresPrecheck ? "done" : !precheck ? "pending" : precheckBlocked ? "blocked" : warningCount ? "warning" : "done",
+      title: !requiresPrecheck
+        ? "本地模式可生成"
+        : !precheck
+          ? "等待排课预检"
+          : precheckBlocked
+            ? "预检存在阻塞项"
+            : warningCount
+              ? "预检通过但需关注"
+              : "预检已通过",
+      text: !requiresPrecheck
+        ? "当前演示模式不强制后端预检。"
+        : !precheck
+          ? "先执行预检，确认老师、教室和硬约束具备可行条件。"
+          : precheckBlocked
+            ? `${Number(precheck.blockingCount || 0)} 个阻塞项必须先处理。`
+            : warningCount
+              ? `${warningCount} 个提醒项不会阻止生成，但可能影响质量。`
+              : `${Number(precheck.requiredLessonCount || 0)} 节课时任务已通过预检。`,
+      target: "#schedulePrecheckList",
+    },
+    {
+      state: !hasDraft ? "pending" : hasConflicts || hasIncompleteDraft ? "blocked" : "done",
+      title: !hasDraft ? "尚未生成草稿" : hasConflicts ? "草稿存在冲突" : hasIncompleteDraft ? "草稿尚未排完" : "草稿可发布",
+      text: !hasDraft
+        ? "预检和老师配置完成后，可生成本周排课草稿。"
+        : hasConflicts
+          ? `当前草稿有 ${conflicts.length} 个硬冲突。`
+          : hasIncompleteDraft
+            ? `当前草稿还有 ${unassignedCount} 节未排入课表。`
+            : "当前草稿无硬冲突，课节已全部排入课表。",
+      target: "#conflictList",
+    },
+  ];
+  const canGenerate = !termReadOnly && !missingCount && (!requiresPrecheck || (precheck && !precheckBlocked));
+  const canPublish = !termReadOnly && hasDraft && !published && !hasConflicts && !hasIncompleteDraft;
+  let status = "ready";
+  let title = "可以生成排课草稿";
+  let text = "配置已经满足生成条件，可以进入自动排课。";
+  let action = { label: "生成草稿", clickTarget: "#generateSchedule" };
+
+  if (termReadOnly) {
+    status = "blocked";
+    title = "当前学期已归档";
+    text = "历史学期不能继续生成、调整或发布课表。";
+    action = { label: "查看学期状态", scrollTarget: "#termManagementStatus" };
+  } else if (missingCount) {
+    status = "blocked";
+    title = "先补齐班级任课老师";
+    text = `还有 ${missingCount} 个班级课程没有指定老师，补齐后才能生成。`;
+    action = { label: "去补老师", scrollTarget: "#subjectConfigList" };
+  } else if (requiresPrecheck && !precheck) {
+    status = "pending";
+    title = "先执行排课预检";
+    text = "预检会提前发现老师池、教室和硬约束问题，避免长时间无效求解。";
+    action = { label: "重新预检", clickTarget: "#refreshSchedulePrecheck" };
+  } else if (precheckBlocked) {
+    status = "blocked";
+    title = "预检有阻塞项";
+    text = `${Number(precheck.blockingCount || 0)} 个阻塞项需要处理后才能生成排课。`;
+    action = { label: "查看阻塞项", scrollTarget: "#schedulePrecheckList" };
+  } else if (published) {
+    status = "done";
+    title = "课表已发布";
+    text = "老师端已读取当前正式版本，如需变更请走调课或新版本发布。";
+    action = { label: "查看版本", scrollTarget: "#scheduleVersionList" };
+  } else if (hasConflicts) {
+    status = "blocked";
+    title = "先处理草稿冲突";
+    text = `当前草稿有 ${conflicts.length} 个冲突，处理后才能发布。`;
+    action = { label: "查看冲突", scrollTarget: "#conflictList" };
+  } else if (hasIncompleteDraft) {
+    status = "blocked";
+    title = "草稿尚未排完";
+    text = `还有 ${unassignedCount} 节课未排入课表，需要放宽规则或补充资源。`;
+    action = { label: "查看诊断", scrollTarget: "#conflictList" };
+  } else if (hasDraft) {
+    status = warningCount ? "warning" : "ready";
+    title = warningCount ? "可以发布，但建议先看提醒" : "可以发布到老师端";
+    text = warningCount ? `${warningCount} 个提醒项不会阻止发布，但建议发布前确认。` : "当前草稿无硬冲突，发布后会同步到老师端课表、签到和薪资。";
+    action = { label: "发布到老师端", clickTarget: "#confirmSchedule" };
+  }
+
+  return {
+    status,
+    title,
+    text,
+    items,
+    action,
+    canGenerate,
+    canPublish,
+    generateReason: canGenerate
+      ? ""
+      : termReadOnly
+        ? "当前学期已归档，不能生成。"
+        : missingCount
+          ? `还有 ${missingCount} 个班级课程缺任课老师。`
+          : requiresPrecheck && !precheck
+            ? "请先执行排课预检。"
+            : precheckBlocked
+              ? "预检存在阻塞项。"
+              : "当前状态不能生成排课。",
+    publishReason: canPublish
+      ? ""
+      : termReadOnly
+        ? "当前学期已归档，不能发布。"
+        : !hasDraft
+          ? "请先生成排课草稿。"
+          : published
+            ? "当前课表已经发布。"
+            : hasConflicts
+              ? `当前草稿有 ${conflicts.length} 个冲突。`
+              : hasIncompleteDraft
+                ? `当前草稿还有 ${unassignedCount} 节未排。`
+                : "当前状态不能发布。",
+  };
+}
+
+function scheduleReadinessHtml(readiness) {
+  const action = readiness.action || {};
+  const actionAttr = action.clickTarget
+    ? `data-click-target="${escapeHtml(action.clickTarget)}"`
+    : action.scrollTarget
+      ? `data-scroll-target="${escapeHtml(action.scrollTarget)}"`
+      : "";
+  return `
+    <article class="schedule-readiness ${readiness.status}">
+      <header>
+        <div>
+          <span>生成前状态</span>
+          <strong>${escapeHtml(readiness.title)}</strong>
+          <p>${escapeHtml(readiness.text)}</p>
+        </div>
+        <span class="tag ${scheduleReadinessTagClass(readiness.status)}">${scheduleReadinessLabel(readiness.status)}</span>
+      </header>
+      <div class="schedule-readiness-steps">
+        ${readiness.items
+          .map(
+            (item) => `
+              <button class="schedule-readiness-step ${item.state}" data-scroll-target="${escapeHtml(item.target)}" type="button">
+                <span class="tag ${scheduleReadinessTagClass(item.state)}">${scheduleReadinessLabel(item.state)}</span>
+                <strong>${escapeHtml(item.title)}</strong>
+                <small>${escapeHtml(item.text)}</small>
+              </button>
+            `,
+          )
+          .join("")}
+      </div>
+      ${actionAttr ? `<button class="mini-button primary" ${actionAttr} type="button">${escapeHtml(action.label || "查看")}</button>` : ""}
+    </article>
+  `;
 }
 
 function schedulePrecheckListHtml(precheck) {
@@ -8873,6 +9088,26 @@ document.addEventListener("click", async (event) => {
   const jumpButton = event.target.closest("[data-view-jump]");
   if (jumpButton) {
     switchView(jumpButton.dataset.viewJump);
+    return;
+  }
+
+  const scrollTargetButton = event.target.closest("[data-scroll-target]");
+  if (scrollTargetButton) {
+    const target = document.querySelector(scrollTargetButton.dataset.scrollTarget);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    return;
+  }
+
+  const clickTargetButton = event.target.closest("[data-click-target]");
+  if (clickTargetButton) {
+    const target = document.querySelector(clickTargetButton.dataset.clickTarget);
+    if (target && !target.disabled) {
+      target.click();
+    } else if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
     return;
   }
 
