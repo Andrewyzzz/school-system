@@ -862,12 +862,27 @@ h2 {
 }
 
 .term-copy-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-height: 44px;
   color: var(--muted);
   font-size: 13px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.term-copy-toggle input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.term-copy-toggle span {
+  overflow-wrap: anywhere;
 }
 
 .term-list {
