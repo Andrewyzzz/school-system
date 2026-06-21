@@ -40,6 +40,7 @@ import {
   createAcademicTerm,
   createNotification,
   createSession,
+  deleteAcademicTerm,
   ensureDatabase,
   exportPayrollDetails,
   findActiveSession,
@@ -403,6 +404,21 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const result = archiveAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
+    if (
+      req.method === "DELETE" &&
+      parts[0] === "api" &&
+      parts[1] === "terms" &&
+      parts[2] &&
+      parts.length === 3
+    ) {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const result = deleteAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
       return;

@@ -3091,6 +3091,29 @@ async function archiveBackendTerm(termId) {
   render();
 }
 
+async function deleteBackendTerm(termId) {
+  if (!backendMode() || currentRole() !== "admin") return;
+  const term = termManagementState.terms.find((item) => item.id === termId);
+  if (!term) return;
+  if (!window.confirm(`确认删除误建学期“${term.name}”？仅未投入使用的计划学期可以删除，已产生业务数据的学期会被系统拦截。`)) return;
+  termManagementState = { ...termManagementState, loading: true, error: "" };
+  renderAdminScheduling();
+  try {
+    const result = await apiRequest(`/api/terms/${encodeURIComponent(termId)}`, { method: "DELETE" });
+    applyTermContext(result);
+    showToast("误建学期已删除");
+  } catch (error) {
+    termManagementState = {
+      ...termManagementState,
+      loaded: true,
+      loading: false,
+      error: error.message || "删除学期失败",
+    };
+    showToast(termManagementState.error);
+  }
+  render();
+}
+
 function applyBackendScheduleResult(result) {
   if (result.config) {
     state.schedulingConfig = result.config;
@@ -5711,6 +5734,11 @@ function renderTermManagement() {
             ${
               !isCurrent && !archived
                 ? `<button class="mini-button danger" data-archive-term="${escapeHtml(term.id)}" type="button">归档</button>`
+                : ""
+            }
+            ${
+              !isCurrent && !archived
+                ? `<button class="mini-button danger" data-delete-term="${escapeHtml(term.id)}" type="button">删除</button>`
                 : ""
             }
           </div>
@@ -9632,6 +9660,12 @@ document.addEventListener("click", async (event) => {
   const archiveTermButton = event.target.closest("[data-archive-term]");
   if (archiveTermButton) {
     await archiveBackendTerm(archiveTermButton.dataset.archiveTerm);
+    return;
+  }
+
+  const deleteTermButton = event.target.closest("[data-delete-term]");
+  if (deleteTermButton) {
+    await deleteBackendTerm(deleteTermButton.dataset.deleteTerm);
     return;
   }
 

@@ -7,6 +7,7 @@ import {
   createInitialData,
   createNotification,
   createSession,
+  deleteAcademicTerm,
   exportPayrollDetails,
   findActiveSession,
   generateTeacherPayrollDetail,
@@ -143,6 +144,47 @@ assert.equal(termContext.currentTerm.current, true);
 
 const termDb = createInitialData({ teacherCount: 1000 });
 const termAdmin = actor(termDb, "admin");
+const wrongTermDb = createInitialData({ teacherCount: 1000 });
+const wrongTermAdmin = actor(wrongTermDb, "admin");
+const wrongTerm = createAcademicTerm(
+  wrongTermDb,
+  {
+    name: "误建学期",
+    schoolYear: "2026-2027",
+    semester: "测试学期",
+    startDate: "2026-08-01",
+    endDate: "2026-08-31",
+    copyConfig: true,
+  },
+  wrongTermAdmin,
+).term;
+assert.ok(wrongTermDb.classes.some((schoolClass) => schoolClass.termId === wrongTerm.id));
+const deletedWrongTermResult = deleteAcademicTerm(wrongTermDb, wrongTerm.id, wrongTermAdmin);
+assert.equal(deletedWrongTermResult.terms.some((term) => term.id === wrongTerm.id), false);
+assert.equal(wrongTermDb.classes.some((schoolClass) => schoolClass.termId === wrongTerm.id), false);
+
+const usedTermDb = createInitialData({ teacherCount: 1000 });
+const usedTermAdmin = actor(usedTermDb, "admin");
+const usedTerm = createAcademicTerm(
+  usedTermDb,
+  {
+    name: "已有业务数据学期",
+    schoolYear: "2026-2027",
+    semester: "测试学期",
+    startDate: "2026-08-01",
+    endDate: "2026-08-31",
+    copyConfig: false,
+  },
+  usedTermAdmin,
+).term;
+usedTermDb.scheduleDrafts.push({
+  id: "DRAFT-USED-TERM",
+  termId: usedTerm.id,
+  termName: usedTerm.name,
+  assignments: [],
+});
+assert.throws(() => deleteAcademicTerm(usedTermDb, usedTerm.id, usedTermAdmin), /不能删除/);
+
 const createdTermResult = createAcademicTerm(
   termDb,
   {

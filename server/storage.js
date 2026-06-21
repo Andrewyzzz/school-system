@@ -1147,6 +1147,89 @@ export function archiveAcademicTerm(db, termId = "", actorAccount = null) {
   return queryTerms(db);
 }
 
+function termUsageCounts(db, termId = "") {
+  const count = (key, predicate = (item) => item.termId === termId) => (db[key] || []).filter(predicate).length;
+  return {
+    scheduleDrafts: count("scheduleDrafts"),
+    scheduleVersions: count("scheduleVersions"),
+    lessonInstances: count("lessonInstances"),
+    attendanceRecords: count("attendanceRecords", (record) => {
+      if (record.termId === termId) return true;
+      const lesson = (db.lessonInstances || []).find((item) => item.id === record.lessonId);
+      return lesson?.termId === termId;
+    }),
+    scheduleChangeRequests: count("scheduleChangeRequests"),
+    workloadConfirmations: count("workloadConfirmations"),
+    payrollDetails: count("payrollDetails"),
+    payrollBatches: count("payrollBatches"),
+  };
+}
+
+function termHasBusinessUsage(usageCounts) {
+  return Object.values(usageCounts).some((value) => Number(value || 0) > 0);
+}
+
+function removeTermConfigRows(db, termId = "") {
+  [
+    "classes",
+    "rooms",
+    "gradeCourseRules",
+    "teacherAssignments",
+    "scheduleConstraints",
+    "teacherScheduleRules",
+    "roomResourceOverrides",
+  ].forEach((key) => {
+    db[key] = (db[key] || []).filter((row) => row.termId !== termId);
+  });
+}
+
+export function deleteAcademicTerm(db, termId = "", actorAccount = null) {
+  ensureTerms(db);
+  const target = db.terms.find((term) => term.id === termId);
+  if (!target) {
+    const error = new Error("学期不存在");
+    error.statusCode = 404;
+    throw error;
+  }
+  if (target.current) {
+    const error = new Error("当前学期不能删除，请先切换到其他学期");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (target.status !== "planned") {
+    const error = new Error("只有未投入使用的计划中学期可以删除，已进行或归档学期请保留归档记录");
+    error.statusCode = 409;
+    throw error;
+  }
+  if ((db.terms || []).length <= 1) {
+    const error = new Error("至少需要保留一个学期");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const usageCounts = termUsageCounts(db, target.id);
+  if (termHasBusinessUsage(usageCounts)) {
+    const error = new Error("该学期已经产生排课、考勤或薪资数据，不能删除，请使用归档");
+    error.statusCode = 409;
+    error.details = usageCounts;
+    throw error;
+  }
+
+  const removedConfig = copiedConfigSummary(db, target.id);
+  removeTermConfigRows(db, target.id);
+  db.terms = (db.terms || []).filter((term) => term.id !== target.id);
+  db.meta.updatedAt = new Date().toISOString();
+  appendAuditLog(db, {
+    action: "term_delete",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    termId: target.id,
+    termName: target.name,
+    removedConfig,
+  });
+  return queryTerms(db);
+}
+
 export function findActiveSession(db, token = "") {
   const tokenHashValue = hashToken(token);
   const session = ensureSessions(db).find(
