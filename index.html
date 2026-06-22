@@ -1625,10 +1625,11 @@
                 <div class="panel-heading compact-heading">
                   <div>
                     <h3 id="payrollRuleTitle">专任教师工资规则</h3>
-                    <p>已启用学校专任教师工资规则引擎；JSON 配置保留给后续精细规则维护。</p>
+                    <p>维护不同档位和岗位对应的金额。保存后，未锁定的薪资会按新规则重新试算。</p>
                   </div>
                   <button class="ghost-button" id="savePayrollRules" type="button">保存规则</button>
                 </div>
+                <div class="payroll-scheme-editor" id="payrollSchemeEditor"></div>
                 <div class="payroll-rule-grid">
                   <label class="field-label">兼容基本工资<input id="ruleBaseSalary" type="number" min="0" /></label>
                   <label class="field-label">兼容岗位工资<input id="rulePositionSalary" type="number" min="0" /></label>
@@ -1640,10 +1641,13 @@
                   <label class="field-label">个税起征点<input id="ruleTaxThreshold" type="number" min="0" /></label>
                   <label class="field-label">试算税率<input id="ruleTaxRate" type="number" min="0" step="0.01" /></label>
                 </div>
-                <label class="field-label full-field" for="ruleTeacherSchemeJson">
-                  专任教师工资规则 JSON
-                  <textarea id="ruleTeacherSchemeJson" class="config-textarea" spellcheck="false"></textarea>
-                </label>
+                <details class="advanced-json-details">
+                  <summary>高级 JSON 配置</summary>
+                  <label class="field-label full-field" for="ruleTeacherSchemeJson">
+                    专任教师工资规则 JSON
+                    <textarea id="ruleTeacherSchemeJson" class="config-textarea" spellcheck="false"></textarea>
+                  </label>
+                </details>
               </section>
               <section class="payroll-rule-box" aria-labelledby="salaryProfileTitle">
                 <div class="panel-heading compact-heading">
@@ -1695,10 +1699,44 @@
                   <label><input id="salaryRoleEliteClass" type="checkbox" /> 特优班</label>
                   <label><input id="salaryRoleQingbeiClass" type="checkbox" /> 清北班</label>
                 </div>
-                <label class="field-label full-field" for="salaryManualItemsJson">
-                  财务补充项 JSON
-                  <textarea id="salaryManualItemsJson" class="config-textarea small" spellcheck="false"></textarea>
-                </label>
+                <section class="manual-item-editor" aria-labelledby="manualItemTitle">
+                  <div class="settlement-band-heading">
+                    <div>
+                      <h4 id="manualItemTitle">特殊奖扣</h4>
+                      <p>只用于临时补发、特殊奖励、人工扣减等例外项；常规岗位津贴应在上方岗位角色和规则中维护。</p>
+                    </div>
+                  </div>
+                  <div class="manual-item-form">
+                    <label class="field-label" for="salaryManualItemName">
+                      项目名称
+                      <input id="salaryManualItemName" type="text" placeholder="例如 校级公开课奖励" />
+                    </label>
+                    <label class="field-label" for="salaryManualItemCategory">
+                      类型
+                      <select class="lesson-select" id="salaryManualItemCategory">
+                        <option value="supplement">奖励/补发</option>
+                        <option value="deduction">扣减</option>
+                      </select>
+                    </label>
+                    <label class="field-label" for="salaryManualItemAmount">
+                      金额
+                      <input id="salaryManualItemAmount" type="number" min="0" step="1" placeholder="0" />
+                    </label>
+                    <label class="field-label" for="salaryManualItemBasis">
+                      说明
+                      <input id="salaryManualItemBasis" type="text" placeholder="审批单号、原因或备注" />
+                    </label>
+                    <button class="ghost-button" id="addSalaryManualItem" type="button">添加奖扣项</button>
+                  </div>
+                  <div class="manual-item-list" id="salaryManualItemsList"></div>
+                </section>
+                <details class="advanced-json-details">
+                  <summary>高级补充项 JSON</summary>
+                  <label class="field-label full-field" for="salaryManualItemsJson">
+                    财务补充项 JSON
+                    <textarea id="salaryManualItemsJson" class="config-textarea small" spellcheck="false"></textarea>
+                  </label>
+                </details>
               </section>
             </details>
           </section>

@@ -4202,6 +4202,136 @@ td {
   min-height: 42px;
 }
 
+.payroll-scheme-editor {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.payroll-scheme-note {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  line-height: 1.6;
+}
+
+.payroll-scheme-card {
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.payroll-scheme-card h4,
+.manual-item-editor h4 {
+  margin: 0 0 4px;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.payroll-scheme-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.payroll-scheme-grid,
+.manual-item-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.payroll-scheme-grid .field-label,
+.manual-item-form .field-label {
+  margin-bottom: 0;
+}
+
+.payroll-scheme-grid input,
+.manual-item-form input {
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: #fff;
+}
+
+.manual-item-editor {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.manual-item-editor .settlement-band-heading {
+  margin-bottom: 12px;
+}
+
+.manual-item-form {
+  align-items: end;
+}
+
+.manual-item-form button {
+  min-height: 42px;
+}
+
+.manual-item-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.manual-item-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.manual-item-row div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.manual-item-row span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.manual-item-row .supplement {
+  color: var(--primary-strong);
+}
+
+.manual-item-row .deduction {
+  color: var(--action);
+}
+
+.mini-button.danger {
+  color: var(--action);
+  border-color: rgba(188, 0, 12, 0.22);
+}
+
+.advanced-json-details {
+  margin-top: 12px;
+}
+
+.advanced-json-details summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 800;
+}
+
 .full-field {
   display: grid;
   gap: 8px;
@@ -4423,6 +4553,8 @@ td {
   .settlement-workflow-steps,
   .settlement-actions,
   .settlement-calculation-grid,
+  .payroll-scheme-grid,
+  .manual-item-form,
   .payroll-rule-grid,
   .salary-profile-grid,
   .checkbox-grid.salary-role-grid,
@@ -5304,6 +5436,11 @@ td {
 
   .settlement-lesson-samples li {
     display: grid;
+  }
+
+  .manual-item-row {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
   }
 
   .teacher-pay-strip {

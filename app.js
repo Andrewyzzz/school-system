@@ -2942,6 +2942,9 @@ function payrollRulesFromInputs() {
       throw new Error(`专任教师工资规则 JSON 格式错误：${error.message}`);
     }
   }
+  teacherSalaryScheme = applyPayrollSchemeEditorInputs(
+    teacherSalaryScheme || payrollRuleState.rules?.teacherSalaryScheme || {},
+  );
   return {
     baseSalary: Number(document.querySelector("#ruleBaseSalary").value || 0),
     positionSalary: Number(document.querySelector("#rulePositionSalary").value || 0),
@@ -2961,12 +2964,19 @@ async function saveBackendPayrollRules() {
     showToast("请使用后端财务账号保存薪资规则");
     return;
   }
+  let payrollRules;
+  try {
+    payrollRules = payrollRulesFromInputs();
+  } catch (error) {
+    showToast(error.message || "薪资规则填写有误");
+    return;
+  }
   payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
   renderSettlement();
   try {
     const data = await apiRequest("/api/payroll-rules", {
       method: "PATCH",
-      body: { payrollRules: payrollRulesFromInputs() },
+      body: { payrollRules },
     });
     payrollRuleState = {
       loading: false,
@@ -3030,12 +3040,19 @@ async function saveBackendTeacherSalaryProfile() {
     showToast("请使用后端财务账号维护教师工资档案");
     return;
   }
+  let salaryProfile;
+  try {
+    salaryProfile = salaryProfileFromInputs();
+  } catch (error) {
+    showToast(error.message || "工资档案填写有误");
+    return;
+  }
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
   try {
     await apiRequest(`/api/teachers/${teacherId}/salary-profile`, {
       method: "PATCH",
-      body: { salaryProfile: salaryProfileFromInputs() },
+      body: { salaryProfile },
     });
     resetFinanceTeacherDetailState();
     financeTeacherPage.loaded = false;
@@ -9271,6 +9288,169 @@ const salaryRoleLabels = {
   olympiadHomeroom: "奥数班主任",
 };
 
+const salarySchemeMoneyGroups = [
+  {
+    title: "职称/学历档基本工资",
+    description: "老师工资档案选择哪个职称/学历档，就命中这里对应的基本工资金额。",
+    path: "baseSalaryByQualification",
+    labels: salaryQualificationLabels,
+  },
+  {
+    title: "考核工资档位",
+    description: "老师工资档案中的考核档命中这里的固定考核工资。",
+    path: "assessmentSalary",
+    labels: salaryAssessmentLabels,
+  },
+  {
+    title: "住房补贴档位",
+    description: "老师工资档案中的住房档命中这里的住房补贴。",
+    path: "housingAllowance",
+    labels: salaryHousingLabels,
+  },
+  {
+    title: "校龄工资阶梯",
+    description: "按校龄年限取值，6 年及以上按 6 年档封顶。",
+    path: "seniorityAllowance",
+    labels: {
+      1: "1 年",
+      2: "2 年",
+      3: "3 年",
+      4: "4 年",
+      5: "5 年",
+      6: "6 年及以上",
+    },
+  },
+];
+
+const stageAllowanceGroups = [
+  {
+    stageId: "high",
+    title: "高中部岗位津贴",
+    fields: {
+      gradeHead: "年级主任",
+      deputyGradeHead: "年级副主任",
+      homeroomPerStudent: "班主任每生",
+      teachingResearchLeader: "教研组长",
+      lessonPrepLeader: "备课组长",
+      lessonPrepLargeGroup: "大备课组长",
+      graduateDegree: "研究生学历",
+      graduatingClass: "毕业班",
+      eliteClass: "特优班",
+      qingbeiClass: "清北班",
+    },
+  },
+  {
+    stageId: "middle",
+    title: "初中部岗位津贴",
+    fields: {
+      gradeHead: "年级主任",
+      deputyGradeHead: "年级副主任",
+      subjectCenterDirector: "学科中心主任",
+      lessonPrepLeader: "备课组长",
+      homeroomPerStudent: "班主任每生",
+      graduatingClass: "毕业班",
+    },
+  },
+  {
+    stageId: "primary",
+    title: "小学部岗位津贴",
+    fields: {
+      gradeHead: "年级主任",
+      teachingResearchLeader: "教研组长",
+      teachingResearchDeputy: "教研副组长",
+      lessonPrepHigh: "高段备课组长",
+      lessonPrepLow: "低段备课组长",
+      lessonPrepDeputy: "备课副组长",
+      homeroomBase: "班主任固定",
+      homeroomPerStudent: "班主任每生",
+      firstGrade: "一年级",
+      doubleChinese: "双班语文",
+      graduatingClass: "毕业班",
+      standardizedExam: "统考科目",
+      olympiadHomeroom: "奥数班主任",
+    },
+  },
+];
+
+function getNestedValue(source, pathValue, fallback = 0) {
+  return String(pathValue)
+    .split(".")
+    .reduce((value, key) => (value && value[key] !== undefined ? value[key] : undefined), source) ?? fallback;
+}
+
+function setNestedNumber(target, pathValue, value) {
+  const keys = String(pathValue).split(".");
+  let cursor = target;
+  keys.slice(0, -1).forEach((key) => {
+    if (!cursor[key] || typeof cursor[key] !== "object") cursor[key] = {};
+    cursor = cursor[key];
+  });
+  cursor[keys[keys.length - 1]] = Number(value || 0);
+}
+
+function schemeNumberInput(pathValue, label, value) {
+  return `
+    <label class="field-label">
+      ${escapeHtml(label)}
+      <input type="number" min="0" step="1" value="${Number(value || 0)}" data-scheme-path="${escapeHtml(pathValue)}" />
+    </label>
+  `;
+}
+
+function renderPayrollSchemeEditor(rules = {}) {
+  const editor = document.querySelector("#payrollSchemeEditor");
+  if (!editor) return;
+  if (editor.contains(document.activeElement)) return;
+  const scheme = rules.teacherSalaryScheme || {};
+  const fixedGroups = salarySchemeMoneyGroups
+    .map((group) => {
+      const fields = Object.entries(group.labels)
+        .map(([key, label]) => schemeNumberInput(`${group.path}.${key}`, label, getNestedValue(scheme, `${group.path}.${key}`, 0)))
+        .join("");
+      return `
+        <section class="payroll-scheme-card">
+          <div>
+            <h4>${escapeHtml(group.title)}</h4>
+            <p>${escapeHtml(group.description)}</p>
+          </div>
+          <div class="payroll-scheme-grid">${fields}</div>
+        </section>
+      `;
+    })
+    .join("");
+  const allowanceGroups = stageAllowanceGroups
+    .map((group) => {
+      const fields = Object.entries(group.fields)
+        .map(([key, label]) =>
+          schemeNumberInput(`postAllowances.${group.stageId}.${key}`, label, getNestedValue(scheme, `postAllowances.${group.stageId}.${key}`, 0)),
+        )
+        .join("");
+      return `
+        <section class="payroll-scheme-card">
+          <div>
+            <h4>${escapeHtml(group.title)}</h4>
+            <p>老师工资档案勾选对应岗位角色后，系统按这里的标准自动计算岗位津贴。</p>
+          </div>
+          <div class="payroll-scheme-grid">${fields}</div>
+        </section>
+      `;
+    })
+    .join("");
+  editor.innerHTML = `
+    <div class="payroll-scheme-note">这些金额是全校规则；老师个人命中哪个档位，在下方“当前老师工资档案”里设置。</div>
+    ${fixedGroups}
+    ${allowanceGroups}
+  `;
+}
+
+function applyPayrollSchemeEditorInputs(teacherSalaryScheme = {}) {
+  const next = clone(teacherSalaryScheme || {});
+  document.querySelectorAll("#payrollSchemeEditor [data-scheme-path]").forEach((input) => {
+    setNestedNumber(next, input.dataset.schemePath, input.value);
+  });
+  return next;
+}
+
 function payrollRowByName(payroll, name) {
   return (payroll?.rows || []).find((row) => row.name === name) || null;
 }
@@ -9674,6 +9854,7 @@ function renderPayrollRulesPanel() {
   if (schemeInput && document.activeElement !== schemeInput) {
     schemeInput.value = JSON.stringify(rules.teacherSalaryScheme || {}, null, 2);
   }
+  renderPayrollSchemeEditor(rules);
   const saveButton = document.querySelector("#savePayrollRules");
   if (saveButton) {
     saveButton.disabled = payrollRuleState.loading || !backendMode() || currentRole() !== "finance";
@@ -9720,6 +9901,7 @@ function renderSalaryProfilePanel(payroll) {
       "#salaryRoleEliteClass",
       "#salaryRoleQingbeiClass",
     ].forEach((selector) => setCheckboxValue(selector, false));
+    renderSalaryManualItemsEditor([]);
     return;
   }
 
@@ -9739,6 +9921,91 @@ function renderSalaryProfilePanel(payroll) {
   setCheckboxValue("#salaryRoleGraduatingClass", profile.roles?.graduatingClass);
   setCheckboxValue("#salaryRoleEliteClass", profile.roles?.eliteClass);
   setCheckboxValue("#salaryRoleQingbeiClass", profile.roles?.qingbeiClass);
+  renderSalaryManualItemsEditor(profile.manualItems || []);
+}
+
+function currentSalaryManualItemsFromInput() {
+  const input = document.querySelector("#salaryManualItemsJson");
+  if (!input?.value?.trim()) return [];
+  try {
+    const parsed = JSON.parse(input.value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function setSalaryManualItems(items = []) {
+  const normalizedItems = items
+    .map((item) => ({
+      name: String(item.name || "").trim(),
+      amount: Number(item.amount || 0),
+      basis: String(item.basis || "").trim(),
+      category: item.category === "deduction" ? "deduction" : "supplement",
+    }))
+    .filter((item) => item.name && item.amount);
+  const input = document.querySelector("#salaryManualItemsJson");
+  if (input) input.value = JSON.stringify(normalizedItems, null, 2);
+  renderSalaryManualItemsEditor(normalizedItems);
+}
+
+function renderSalaryManualItemsEditor(items = currentSalaryManualItemsFromInput()) {
+  const list = document.querySelector("#salaryManualItemsList");
+  if (!list) return;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty-state">暂无特殊奖扣。常规岗位津贴请通过岗位角色和规则自动计算。</div>`;
+    return;
+  }
+  list.innerHTML = items
+    .map(
+      (item, index) => `
+        <article class="manual-item-row">
+          <div>
+            <strong>${escapeHtml(item.name)}</strong>
+            <span>${item.category === "deduction" ? "扣减" : "奖励/补发"} · ${escapeHtml(item.basis || "未填写说明")}</span>
+          </div>
+          <strong class="${item.category === "deduction" ? "deduction" : "supplement"}">
+            ${item.category === "deduction" ? "-" : "+"}${formatCurrency(Math.abs(Number(item.amount || 0)))}
+          </strong>
+          <button class="mini-button danger" data-remove-manual-item="${index}" type="button">删除</button>
+        </article>
+      `,
+    )
+    .join("");
+}
+
+function addSalaryManualItemFromInputs() {
+  const nameInput = document.querySelector("#salaryManualItemName");
+  const categoryInput = document.querySelector("#salaryManualItemCategory");
+  const amountInput = document.querySelector("#salaryManualItemAmount");
+  const basisInput = document.querySelector("#salaryManualItemBasis");
+  const name = nameInput?.value.trim() || "";
+  const amount = Number(amountInput?.value || 0);
+  const category = categoryInput?.value === "deduction" ? "deduction" : "supplement";
+  const basis = basisInput?.value.trim() || "";
+  if (!name || amount <= 0) {
+    showToast("请填写奖扣名称和大于 0 的金额");
+    return;
+  }
+  const signedAmount = category === "deduction" ? -Math.abs(amount) : Math.abs(amount);
+  setSalaryManualItems([
+    ...currentSalaryManualItemsFromInput(),
+    {
+      name,
+      amount: signedAmount,
+      basis: basis || "财务特殊奖扣项",
+      category,
+    },
+  ]);
+  if (nameInput) nameInput.value = "";
+  if (amountInput) amountInput.value = "";
+  if (basisInput) basisInput.value = "";
+}
+
+function removeSalaryManualItem(index) {
+  const items = currentSalaryManualItemsFromInput();
+  items.splice(index, 1);
+  setSalaryManualItems(items);
 }
 
 function renderWarnings() {
@@ -10770,6 +11037,17 @@ document.addEventListener("click", async (event) => {
     } else if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
+    return;
+  }
+
+  if (event.target.closest("#addSalaryManualItem")) {
+    addSalaryManualItemFromInputs();
+    return;
+  }
+
+  const removeManualItemButton = event.target.closest("[data-remove-manual-item]");
+  if (removeManualItemButton) {
+    removeSalaryManualItem(Number(removeManualItemButton.dataset.removeManualItem));
     return;
   }
 
