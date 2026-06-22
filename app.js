@@ -712,6 +712,11 @@ let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
 let qrScanner = null;
 let courseRulesEditMode = false;
+let notificationComposerState = {
+  sending: false,
+  message: "",
+  error: "",
+};
 let teacherWorkloadState = {
   teacherId: "",
   month: "2026-06",
@@ -1433,7 +1438,7 @@ function formatWeekRange(weekStartKey) {
 }
 
 function roleNotices(role = currentRole()) {
-  const source = state.backendNotices?.length ? state.backendNotices : state.notices || [];
+  const source = backendMode() ? state.backendNotices || [] : state.notices || [];
   return source
     .filter((notice) => notice.audience === role || notice.audience === "all")
     .sort((a, b) => b.time.localeCompare(a.time));
@@ -1472,6 +1477,76 @@ async function markBackendNoticeRead(noticeId) {
     state.backendNotices = state.backendNotices.map((notice) => (notice.id === noticeId ? next : notice));
   } catch (error) {
     console.warn("通知已读失败", error);
+  }
+}
+
+function canPublishNotifications() {
+  return ["admin", "finance", "system_admin"].includes(currentRole());
+}
+
+function clearNotificationComposer() {
+  const titleInput = document.querySelector("#notificationTitleInput");
+  const textInput = document.querySelector("#notificationTextInput");
+  if (titleInput) titleInput.value = "";
+  if (textInput) textInput.value = "";
+  notificationComposerState = { sending: false, message: "", error: "" };
+  renderNotificationCenter();
+}
+
+async function publishNotificationFromComposer() {
+  if (!canPublishNotifications()) {
+    showToast("当前账号没有发布通知权限");
+    return;
+  }
+  if (!backendMode()) {
+    showToast("请在生产后端登录后发布通知");
+    return;
+  }
+
+  const audience = document.querySelector("#notificationAudienceSelect")?.value || "teacher";
+  const level = document.querySelector("#notificationLevelSelect")?.value || "info";
+  const title = document.querySelector("#notificationTitleInput")?.value.trim() || "";
+  const text = document.querySelector("#notificationTextInput")?.value.trim() || "";
+  if (!title || !text) {
+    notificationComposerState = {
+      sending: false,
+      message: "",
+      error: "标题和正文不能为空",
+    };
+    renderNotificationCenter();
+    return;
+  }
+
+  notificationComposerState = { sending: true, message: "发送中", error: "" };
+  renderNotificationCenter();
+  try {
+    await apiRequest("/api/notifications", {
+      method: "POST",
+      body: {
+        audience,
+        level,
+        title,
+        text,
+      },
+    });
+    document.querySelector("#notificationTitleInput").value = "";
+    document.querySelector("#notificationTextInput").value = "";
+    notificationComposerState = {
+      sending: false,
+      message: audience === currentRole() || audience === "all" ? "已发布" : "已发布给接收端",
+      error: "",
+    };
+    await loadBackendNotifications();
+    showToast("通知已发布");
+    render();
+  } catch (error) {
+    notificationComposerState = {
+      sending: false,
+      message: "",
+      error: error.message || "通知发布失败",
+    };
+    showToast(notificationComposerState.error);
+    renderNotificationCenter();
   }
 }
 
@@ -5562,10 +5637,33 @@ function renderNotificationCenter() {
 
   const role = currentRole();
   const notices = roleNotices(role);
+  const composer = document.querySelector("#notificationComposerForm");
+  const composerStatus = document.querySelector("#notificationComposerStatus");
+  const sendButton = document.querySelector("#sendNotificationButton");
+  const clearButton = document.querySelector("#clearNotificationDraft");
+  const canPublish = canPublishNotifications();
   const candidateId = state.selectedNoticeId || notices[0]?.id || "";
   const selectedId = notices.some((notice) => notice.id === candidateId) ? candidateId : notices[0]?.id || "";
   title.textContent = role === "teacher" ? "老师通知中心" : role === "admin" ? "行政通知中心" : "财务通知中心";
   count.textContent = `${notices.length} 条`;
+  if (composer && composerStatus && sendButton && clearButton) {
+    composer.classList.toggle("is-hidden", !canPublish);
+    const canSend = canPublish && backendMode() && !notificationComposerState.sending;
+    composerStatus.textContent = !canPublish
+      ? "只读"
+      : notificationComposerState.sending
+        ? "发送中"
+        : notificationComposerState.error
+          ? notificationComposerState.error
+          : notificationComposerState.message || (backendMode() ? "可发送" : "需后端登录");
+    composerStatus.className = notificationComposerState.error
+      ? "status-pill warning"
+      : notificationComposerState.message
+        ? "status-pill done"
+        : "status-pill";
+    sendButton.disabled = !canSend;
+    clearButton.disabled = notificationComposerState.sending;
+  }
   list.innerHTML = notices.length
     ? notices
         .map(
@@ -10212,6 +10310,15 @@ document.querySelector("#loginForm").addEventListener("submit", (event) => {
   ).catch((error) => {
     document.querySelector("#loginError").textContent = error.message || "登录失败";
   });
+});
+
+document.querySelector("#notificationComposerForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  publishNotificationFromComposer();
+});
+
+document.querySelector("#clearNotificationDraft").addEventListener("click", () => {
+  clearNotificationComposer();
 });
 
 document.querySelector("#logoutButton").addEventListener("click", logout);

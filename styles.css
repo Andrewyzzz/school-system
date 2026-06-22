@@ -503,6 +503,60 @@ h2 {
   gap: 14px;
 }
 
+.notification-composer {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 14px;
+}
+
+.notification-composer.is-hidden {
+  display: none;
+}
+
+.notification-composer-heading,
+.notification-composer-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.notification-composer-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.notification-composer-heading span:not(.status-pill) {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.notification-composer-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(240px, 1.6fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.notification-composer .field-label,
+.notification-composer .lesson-select {
+  margin-bottom: 0;
+}
+
+.notification-composer textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 96px;
+}
+
+.notification-composer-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
 .notification-mail-list {
   display: grid;
   gap: 12px;
@@ -3948,6 +4002,10 @@ td {
   }
 
   .mail-notice {
+    grid-template-columns: 1fr;
+  }
+
+  .notification-composer-grid {
     grid-template-columns: 1fr;
   }
 

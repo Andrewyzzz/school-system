@@ -1085,6 +1085,48 @@
               </div>
               <span class="status-pill" id="notificationCenterCount">0 条</span>
             </div>
+            <form class="notification-composer" id="notificationComposerForm">
+              <div class="notification-composer-heading">
+                <div>
+                  <strong>发布通知</strong>
+                  <span>发送后会进入对应账号的首页通知栏和通知中心。</span>
+                </div>
+                <span class="status-pill" id="notificationComposerStatus">可发送</span>
+              </div>
+              <div class="notification-composer-grid">
+                <label class="field-label" for="notificationAudienceSelect">
+                  <span>接收范围</span>
+                  <select class="lesson-select" id="notificationAudienceSelect">
+                    <option value="teacher">全体老师</option>
+                    <option value="all">全部账号</option>
+                    <option value="finance">财务内部</option>
+                    <option value="admin">行政内部</option>
+                  </select>
+                </label>
+                <label class="field-label" for="notificationLevelSelect">
+                  <span>通知等级</span>
+                  <select class="lesson-select" id="notificationLevelSelect">
+                    <option value="info">普通通知</option>
+                    <option value="warning">重要通知</option>
+                  </select>
+                </label>
+                <label class="field-label notification-title-field" for="notificationTitleInput">
+                  <span>标题</span>
+                  <input id="notificationTitleInput" type="text" maxlength="60" placeholder="例如 本月工资核对提醒" />
+                </label>
+              </div>
+              <label class="field-label" for="notificationTextInput">
+                <span>正文</span>
+                <textarea id="notificationTextInput" rows="4" maxlength="500" placeholder="请输入通知内容"></textarea>
+              </label>
+              <div class="notification-composer-actions">
+                <button class="primary-button" id="sendNotificationButton" type="submit">
+                  <span aria-hidden="true">✓</span>
+                  发布通知
+                </button>
+                <button class="ghost-button" id="clearNotificationDraft" type="button">清空</button>
+              </div>
+            </form>
             <div class="notification-mail-list" id="notificationMailList"></div>
           </section>
         </section>
