@@ -717,6 +717,17 @@ let notificationComposerState = {
   message: "",
   error: "",
 };
+let notificationRecipientState = {
+  mode: "teacher",
+  stageId: "",
+  grade: "",
+  search: "",
+  teachers: [],
+  selectedTeacherIds: [],
+  loading: false,
+  loaded: false,
+  error: "",
+};
 let teacherWorkloadState = {
   teacherId: "",
   month: "2026-06",
@@ -1484,6 +1495,188 @@ function canPublishNotifications() {
   return ["admin", "finance", "system_admin"].includes(currentRole());
 }
 
+function notificationTeacherTargetModes() {
+  return new Set(["stage", "grade", "teachers"]);
+}
+
+function notificationTargetMode() {
+  return document.querySelector("#notificationAudienceSelect")?.value || notificationRecipientState.mode || "teacher";
+}
+
+function notificationRecipientQueryReady(mode = notificationRecipientState.mode) {
+  if (mode === "stage") return Boolean(notificationRecipientState.stageId);
+  if (mode === "grade") return Boolean(notificationRecipientState.stageId && notificationRecipientState.grade);
+  if (mode === "teachers") return true;
+  return false;
+}
+
+function notificationTeacherLabel(teacher) {
+  return `${teacher.name} · ${backendTeacherDepartment(teacher)} · ${teacher.gradeText || teacher.grade || "年级未设置"} · ${backendTeacherSubject(teacher)} · ${teacher.id}`;
+}
+
+function notificationSelectedTeacherIdsFromControl() {
+  const select = document.querySelector("#notificationTeacherSelect");
+  if (!select) return notificationRecipientState.selectedTeacherIds || [];
+  return Array.from(select.selectedOptions || []).map((option) => option.value).filter(Boolean);
+}
+
+function notificationRecipientSummaryText(mode = notificationRecipientState.mode) {
+  if (!notificationTeacherTargetModes().has(mode)) return "";
+  if (!backendMode()) return "生产后端登录后可按学部、年级或指定老师发布。";
+  if (!notificationRecipientQueryReady(mode)) {
+    if (mode === "stage") return "请选择学部后刷新名单。";
+    if (mode === "grade") return "请选择学部和年级后刷新名单。";
+  }
+  if (notificationRecipientState.loading) return "正在读取老师名单…";
+  if (notificationRecipientState.error) return notificationRecipientState.error;
+  const count = notificationRecipientState.teachers.length;
+  if (mode === "teachers") {
+    const selectedCount = notificationRecipientState.selectedTeacherIds.length;
+    return `当前候选 ${count} 人，已选择 ${selectedCount} 人；可输入姓名、工号或科目后刷新名单。`;
+  }
+  return `当前范围匹配 ${count} 位老师，发布时会精准发送给这些老师。`;
+}
+
+function resetNotificationRecipientList({ keepSelection = false } = {}) {
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    teachers: [],
+    selectedTeacherIds: keepSelection ? notificationRecipientState.selectedTeacherIds : [],
+    loading: false,
+    loaded: false,
+    error: "",
+  };
+}
+
+function readNotificationRecipientControls() {
+  const mode = notificationTargetMode();
+  const stageId = document.querySelector("#notificationStageSelect")?.value || "";
+  const grade = document.querySelector("#notificationGradeSelect")?.value || "";
+  const search = document.querySelector("#notificationTeacherSearch")?.value.trim() || "";
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    mode,
+    stageId,
+    grade,
+    search,
+    selectedTeacherIds: notificationSelectedTeacherIdsFromControl(),
+  };
+}
+
+async function loadNotificationRecipientTeachers({ force = false, keepSelection = true } = {}) {
+  if (!backendMode() || !notificationTeacherTargetModes().has(notificationRecipientState.mode)) return;
+  if (!notificationRecipientQueryReady(notificationRecipientState.mode)) {
+    resetNotificationRecipientList({ keepSelection: false });
+    renderNotificationCenter();
+    return;
+  }
+  if (notificationRecipientState.loading || (notificationRecipientState.loaded && !force)) return;
+
+  notificationRecipientState = { ...notificationRecipientState, loading: true, error: "" };
+  renderNotificationCenter();
+  try {
+    const allItems = [];
+    const baseParams = new URLSearchParams({
+      pageSize: "100",
+      status: "active",
+    });
+    if (notificationRecipientState.stageId) baseParams.set("stageId", notificationRecipientState.stageId);
+    if (notificationRecipientState.grade) baseParams.set("grade", notificationRecipientState.grade);
+    if (notificationRecipientState.mode === "grade") baseParams.set("strictGrade", "true");
+    if (notificationRecipientState.search) baseParams.set("search", notificationRecipientState.search);
+
+    let page = 1;
+    let totalPages = 1;
+    const broadTeacherSearch =
+      notificationRecipientState.mode === "teachers" &&
+      !notificationRecipientState.stageId &&
+      !notificationRecipientState.grade &&
+      !notificationRecipientState.search;
+    do {
+      const params = new URLSearchParams(baseParams);
+      params.set("page", String(page));
+      const result = await apiRequest(`/api/teachers?${params.toString()}`);
+      const items = result.items || [];
+      items.forEach(upsertTeacher);
+      allItems.push(...items);
+      totalPages = broadTeacherSearch ? 1 : Number(result.meta?.totalPages || 1);
+      page += 1;
+    } while (page <= totalPages);
+
+    const availableIds = new Set(allItems.map((teacher) => teacher.id));
+    const selectedTeacherIds = keepSelection
+      ? (notificationRecipientState.selectedTeacherIds || []).filter((id) => availableIds.has(id))
+      : [];
+    notificationRecipientState = {
+      ...notificationRecipientState,
+      teachers: allItems,
+      selectedTeacherIds,
+      loading: false,
+      loaded: true,
+      error: "",
+    };
+  } catch (error) {
+    notificationRecipientState = {
+      ...notificationRecipientState,
+      teachers: [],
+      loading: false,
+      loaded: true,
+      error: error.message || "老师名单读取失败",
+    };
+  }
+  renderNotificationCenter();
+}
+
+function renderNotificationRecipientControls(canPublish) {
+  const mode = notificationTargetMode();
+  notificationRecipientState.mode = mode;
+  const panel = document.querySelector("#notificationTargetPanel");
+  const picker = document.querySelector("#notificationTeacherPicker");
+  const stageSelect = document.querySelector("#notificationStageSelect");
+  const gradeSelect = document.querySelector("#notificationGradeSelect");
+  const searchInput = document.querySelector("#notificationTeacherSearch");
+  const teacherSelect = document.querySelector("#notificationTeacherSelect");
+  const help = document.querySelector("#notificationTargetHelp");
+  const refreshButton = document.querySelector("#refreshNotificationRecipients");
+  if (!panel || !picker || !stageSelect || !gradeSelect || !searchInput || !teacherSelect || !help || !refreshButton) {
+    return;
+  }
+
+  const targetModes = notificationTeacherTargetModes();
+  const showTargetPanel = canPublish && targetModes.has(mode);
+  panel.classList.toggle("is-hidden", !showTargetPanel);
+  if (!showTargetPanel) return;
+
+  stageSelect.innerHTML = financeStageOptions(notificationRecipientState.stageId);
+  gradeSelect.innerHTML = financeGradeOptions(notificationRecipientState.stageId, notificationRecipientState.grade);
+  stageSelect.value = notificationRecipientState.stageId;
+  gradeSelect.value = notificationRecipientState.grade;
+  searchInput.value = notificationRecipientState.search;
+  gradeSelect.disabled = mode === "stage" || !notificationRecipientState.stageId;
+  searchInput.disabled = mode !== "teachers";
+  refreshButton.disabled = notificationRecipientState.loading || !backendMode() || !notificationRecipientQueryReady(mode);
+
+  const pickerVisible = mode === "teachers" || notificationRecipientState.teachers.length > 0 || notificationRecipientState.loading;
+  picker.classList.toggle("is-hidden", !pickerVisible);
+  teacherSelect.disabled = mode !== "teachers" || notificationRecipientState.loading;
+  teacherSelect.innerHTML = notificationRecipientState.teachers.length
+    ? notificationRecipientState.teachers
+        .map(
+          (teacher) => `
+            <option value="${teacher.id}" ${notificationRecipientState.selectedTeacherIds.includes(teacher.id) ? "selected" : ""}>
+              ${escapeHtml(notificationTeacherLabel(teacher))}
+            </option>
+          `,
+        )
+        .join("")
+    : `<option value="">暂无老师</option>`;
+  help.textContent = notificationRecipientSummaryText(mode);
+
+  if (backendMode() && !notificationRecipientState.loaded && !notificationRecipientState.loading && notificationRecipientQueryReady(mode)) {
+    loadNotificationRecipientTeachers({ keepSelection: true });
+  }
+}
+
 function clearNotificationComposer() {
   const titleInput = document.querySelector("#notificationTitleInput");
   const textInput = document.querySelector("#notificationTextInput");
@@ -1503,7 +1696,28 @@ async function publishNotificationFromComposer() {
     return;
   }
 
-  const audience = document.querySelector("#notificationAudienceSelect")?.value || "teacher";
+  readNotificationRecipientControls();
+  const mode = notificationRecipientState.mode;
+  let audience = mode;
+  let teacherIds = [];
+  if (notificationTeacherTargetModes().has(mode)) {
+    audience = "teacher";
+    if (mode !== "teachers") {
+      await loadNotificationRecipientTeachers({ force: true, keepSelection: false });
+      teacherIds = notificationRecipientState.teachers.map((teacher) => teacher.id);
+    } else {
+      teacherIds = notificationRecipientState.selectedTeacherIds;
+    }
+    if (!teacherIds.length) {
+      notificationComposerState = {
+        sending: false,
+        message: "",
+        error: mode === "teachers" ? "请至少选择一位老师" : "当前范围没有匹配老师",
+      };
+      renderNotificationCenter();
+      return;
+    }
+  }
   const level = document.querySelector("#notificationLevelSelect")?.value || "info";
   const title = document.querySelector("#notificationTitleInput")?.value.trim() || "";
   const text = document.querySelector("#notificationTextInput")?.value.trim() || "";
@@ -1527,6 +1741,7 @@ async function publishNotificationFromComposer() {
         level,
         title,
         text,
+        teacherIds,
       },
     });
     document.querySelector("#notificationTitleInput").value = "";
@@ -5663,6 +5878,7 @@ function renderNotificationCenter() {
         : "status-pill";
     sendButton.disabled = !canSend;
     clearButton.disabled = notificationComposerState.sending;
+    renderNotificationRecipientControls(canPublish);
   }
   list.innerHTML = notices.length
     ? notices
@@ -10319,6 +10535,74 @@ document.querySelector("#notificationComposerForm").addEventListener("submit", (
 
 document.querySelector("#clearNotificationDraft").addEventListener("click", () => {
   clearNotificationComposer();
+});
+
+document.querySelector("#notificationAudienceSelect").addEventListener("change", () => {
+  readNotificationRecipientControls();
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    selectedTeacherIds: [],
+    loaded: false,
+    teachers: [],
+    error: "",
+  };
+  renderNotificationCenter();
+});
+
+document.querySelector("#notificationStageSelect").addEventListener("change", (event) => {
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    stageId: event.target.value,
+    grade: "",
+    selectedTeacherIds: [],
+    loaded: false,
+    teachers: [],
+    error: "",
+  };
+  renderNotificationCenter();
+});
+
+document.querySelector("#notificationGradeSelect").addEventListener("change", (event) => {
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    grade: event.target.value,
+    selectedTeacherIds: [],
+    loaded: false,
+    teachers: [],
+    error: "",
+  };
+  renderNotificationCenter();
+});
+
+document.querySelector("#notificationTeacherSearch").addEventListener("change", (event) => {
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    search: event.target.value.trim(),
+    selectedTeacherIds: [],
+    loaded: false,
+    teachers: [],
+    error: "",
+  };
+  renderNotificationCenter();
+});
+
+document.querySelector("#notificationTeacherSelect").addEventListener("change", () => {
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    selectedTeacherIds: notificationSelectedTeacherIdsFromControl(),
+  };
+  renderNotificationCenter();
+});
+
+document.querySelector("#refreshNotificationRecipients").addEventListener("click", () => {
+  readNotificationRecipientControls();
+  notificationRecipientState = {
+    ...notificationRecipientState,
+    loaded: false,
+    teachers: [],
+    error: "",
+  };
+  loadNotificationRecipientTeachers({ force: true, keepSelection: true });
 });
 
 document.querySelector("#logoutButton").addEventListener("click", logout);

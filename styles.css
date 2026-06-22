@@ -546,6 +546,45 @@ h2 {
   margin-bottom: 0;
 }
 
+.notification-target-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(0, 32, 104, 0.1);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.notification-target-panel.is-hidden,
+.notification-teacher-picker.is-hidden {
+  display: none;
+}
+
+.notification-target-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.notification-teacher-picker {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.7fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.notification-teacher-picker select {
+  min-height: 148px;
+}
+
+.notification-teacher-picker p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .notification-composer textarea {
   width: 100%;
   resize: vertical;
@@ -4006,6 +4045,11 @@ td {
   }
 
   .notification-composer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .notification-target-grid,
+  .notification-teacher-picker {
     grid-template-columns: 1fr;
   }
 

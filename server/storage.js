@@ -1548,6 +1548,16 @@ function teacherGradeValues(db, teacher) {
   return Array.from(new Set(assignmentGrades.length ? assignmentGrades : stage?.grades || [])).sort((a, b) => a - b);
 }
 
+function teacherAssignedGradeValues(db, teacher) {
+  return Array.from(
+    new Set(
+      (db.teacherAssignments || [])
+        .filter((assignment) => assignment.teacherIds.includes(teacher.id))
+        .map((assignment) => assignment.grade),
+    ),
+  ).sort((a, b) => a - b);
+}
+
 function publicPersonnelRows(db) {
   const accountsByTeacherId = new Map();
   db.accounts.forEach((account) => {
@@ -1938,11 +1948,15 @@ export function queryTeachers(db, query = {}) {
   const subjectId = String(query.subjectId || "").trim();
   const status = String(query.status || "active").trim();
   const month = String(query.month || "2026-06").trim();
+  const strictGrade = String(query.strictGrade || "false") === "true";
 
   const filtered = db.teachers.filter((teacher) => {
     if (status && teacher.status !== status) return false;
     if (stageId && teacher.stageId !== stageId) return false;
-    if (Number.isFinite(grade) && !teacherGradeValues(db, teacher).includes(grade)) return false;
+    if (Number.isFinite(grade)) {
+      const gradeValues = strictGrade ? teacherAssignedGradeValues(db, teacher) : teacherGradeValues(db, teacher);
+      if (!gradeValues.includes(grade)) return false;
+    }
     if (subjectId && teacher.primarySubjectId !== subjectId) return false;
     if (!search) return true;
     return [

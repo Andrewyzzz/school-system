@@ -1098,6 +1098,9 @@
                   <span>接收范围</span>
                   <select class="lesson-select" id="notificationAudienceSelect">
                     <option value="teacher">全体老师</option>
+                    <option value="stage">按学部</option>
+                    <option value="grade">按年级</option>
+                    <option value="teachers">指定老师</option>
                     <option value="all">全部账号</option>
                     <option value="finance">财务内部</option>
                     <option value="admin">行政内部</option>
@@ -1114,6 +1117,32 @@
                   <span>标题</span>
                   <input id="notificationTitleInput" type="text" maxlength="60" placeholder="例如 本月工资核对提醒" />
                 </label>
+              </div>
+              <div class="notification-target-panel" id="notificationTargetPanel">
+                <div class="notification-target-grid">
+                  <label class="field-label" for="notificationStageSelect">
+                    <span>学部</span>
+                    <select class="lesson-select" id="notificationStageSelect"></select>
+                  </label>
+                  <label class="field-label" for="notificationGradeSelect">
+                    <span>年级</span>
+                    <select class="lesson-select" id="notificationGradeSelect"></select>
+                  </label>
+                  <label class="field-label" for="notificationTeacherSearch">
+                    <span>搜索老师</span>
+                    <input id="notificationTeacherSearch" type="search" placeholder="姓名 / 工号 / 科目" />
+                  </label>
+                  <button class="ghost-button compact-button" id="refreshNotificationRecipients" type="button">
+                    刷新名单
+                  </button>
+                </div>
+                <div class="notification-teacher-picker" id="notificationTeacherPicker">
+                  <label class="field-label" for="notificationTeacherSelect">
+                    <span>老师名单</span>
+                    <select class="lesson-select" id="notificationTeacherSelect" multiple size="6"></select>
+                  </label>
+                  <p id="notificationTargetHelp"></p>
+                </div>
               </div>
               <label class="field-label" for="notificationTextInput">
                 <span>正文</span>
