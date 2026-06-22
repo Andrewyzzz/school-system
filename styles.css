@@ -3860,6 +3860,7 @@ td {
 
 .settlement-filter-band,
 .settlement-teacher-card,
+.settlement-calculation-panel,
 .settlement-flow-band,
 .settlement-detail-panel,
 .settlement-config-details {
@@ -3929,6 +3930,7 @@ td {
 }
 
 .settlement-flow-band,
+.settlement-calculation-panel,
 .settlement-detail-panel {
   padding: 16px;
 }
@@ -4049,6 +4051,86 @@ td {
   background: var(--surface-soft);
   border-color: var(--line);
   box-shadow: none;
+}
+
+.settlement-calculation-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settlement-calc-item {
+  min-height: 150px;
+  padding: 14px;
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.settlement-calc-item div:first-child {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settlement-calc-item span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.settlement-calc-item strong {
+  color: var(--primary-strong);
+  font-size: 22px;
+  white-space: nowrap;
+}
+
+.settlement-calc-item p,
+.settlement-calc-item small,
+.settlement-calc-item em {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.settlement-calc-item small {
+  color: var(--ink);
+}
+
+.lesson-calc-item {
+  grid-column: span 2;
+  background: #fff;
+}
+
+.settlement-lesson-samples {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settlement-lesson-samples li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.settlement-lesson-samples li span {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.settlement-lesson-samples li strong {
+  font-size: 15px;
 }
 
 .settlement-detail-panel .table-wrap {
@@ -4340,6 +4422,7 @@ td {
   .salary-total,
   .settlement-workflow-steps,
   .settlement-actions,
+  .settlement-calculation-grid,
   .payroll-rule-grid,
   .salary-profile-grid,
   .checkbox-grid.salary-role-grid,
@@ -5195,6 +5278,7 @@ td {
 
   .settlement-filter-band,
   .settlement-teacher-card,
+  .settlement-calculation-panel,
   .settlement-flow-band,
   .settlement-detail-panel,
   .settlement-config-details {
@@ -5212,6 +5296,14 @@ td {
 
   .settlement-step {
     min-height: auto;
+  }
+
+  .lesson-calc-item {
+    grid-column: auto;
+  }
+
+  .settlement-lesson-samples li {
+    display: grid;
   }
 
   .teacher-pay-strip {

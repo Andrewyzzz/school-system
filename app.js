@@ -9228,6 +9228,189 @@ function renderSettlementWorkspaceState({
   }
 }
 
+const salaryQualificationLabels = {
+  seniorProfessor: "正高",
+  seniorTeacher: "高级",
+  firstOrDoctor: "一级/博士",
+  secondOrMaster: "二级/硕士",
+  thirdOrBachelor: "三级/本科",
+  ungradedOrJuniorCollege: "未评级/大专",
+};
+
+const salaryAssessmentLabels = {
+  high: "高中专任",
+  middle: "初中专任",
+  primaryCoreHigh: "小学高段核心",
+  primaryCoreLow: "小学低段核心",
+  primarySpecial: "小学艺体信息心理",
+};
+
+const salaryHousingLabels = {
+  chief: "首席",
+  backboneOrGradeHead: "骨干/年级主任",
+  teacher: "普通教师",
+};
+
+const salaryRoleLabels = {
+  homeroom: "班主任",
+  gradeHead: "年级主任",
+  deputyGradeHead: "年级副主任",
+  teachingResearchLeader: "教研组长",
+  teachingResearchDeputy: "教研副组长",
+  lessonPrepLeader: "备课组长",
+  lessonPrepLargeGroup: "大备课组",
+  lessonPrepDeputy: "备课副组长",
+  subjectCenterDirector: "学科中心主任",
+  graduateDegree: "研究生学历",
+  graduatingClass: "毕业班",
+  eliteClass: "特优班",
+  qingbeiClass: "清北班",
+  firstGrade: "一年级",
+  doubleChinese: "双班语文",
+  standardizedExam: "统考科目",
+  olympiadHomeroom: "奥数班主任",
+};
+
+function payrollRowByName(payroll, name) {
+  return (payroll?.rows || []).find((row) => row.name === name) || null;
+}
+
+function salaryLabel(labels, value, fallback = "未设置") {
+  return labels[value] || value || fallback;
+}
+
+function activeSalaryRoleLabels(profile = {}) {
+  const roles = profile.roles || {};
+  return Object.entries(salaryRoleLabels)
+    .filter(([key]) => roles[key] === true)
+    .map(([, label]) => label);
+}
+
+function lessonLineSummary(payroll = {}) {
+  const lines = Array.isArray(payroll.lines) ? payroll.lines : [];
+  const payableLines = lines.filter((line) => line.payable);
+  const units = payableLines.reduce((sum, line) => sum + Number(line.units || 0), 0);
+  const amount = payableLines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
+  return {
+    lines,
+    payableLines,
+    units,
+    amount,
+  };
+}
+
+function settlementCalculationItemHtml(title, amount, meta, formula, className = "") {
+  return `
+    <article class="settlement-calc-item ${className}">
+      <div>
+        <span>${escapeHtml(title)}</span>
+        <strong>${formatCurrency(amount || 0)}</strong>
+      </div>
+      <p>${escapeHtml(meta)}</p>
+      <small>${escapeHtml(formula)}</small>
+    </article>
+  `;
+}
+
+function renderSettlementCalculationPanel(payroll = null, { loading = false, error = "" } = {}) {
+  const grid = document.querySelector("#settlementCalculationGrid");
+  if (!grid) return;
+
+  if (loading) {
+    grid.innerHTML = `<div class="empty-state">正在读取工资档案和计算依据...</div>`;
+    return;
+  }
+
+  if (error) {
+    grid.innerHTML = `<div class="empty-state">${escapeHtml(error)}</div>`;
+    return;
+  }
+
+  if (!payroll) {
+    grid.innerHTML = `<div class="empty-state">选择老师并生成或读取工资后，这里会展示每一项工资的档位、规则和金额。</div>`;
+    return;
+  }
+
+  const profile = payroll.salaryProfile || payroll.teacher?.salaryProfile || {};
+  const rows = payroll.rows || [];
+  if (!rows.length) {
+    grid.innerHTML = `<div class="empty-state">当前薪资暂无可展开的计算明细。</div>`;
+    return;
+  }
+
+  const baseRow = payrollRowByName(payroll, "基本工资");
+  const assessmentRow = payrollRowByName(payroll, "考核工资");
+  const seniorityRow = payrollRowByName(payroll, "校龄工资");
+  const housingRow = payrollRowByName(payroll, "住房补贴");
+  const lessonRow = payrollRowByName(payroll, "课时工资");
+  const roleRows = rows.filter((row) => row.category === "allowance" && !["住房补贴", "课时工资"].includes(row.name));
+  const manualRows = rows.filter((row) => ["supplement", "deduction"].includes(row.category) && row.name !== "个税代扣");
+  const activeRoles = activeSalaryRoleLabels(profile);
+  const lessonSummary = lessonLineSummary(payroll);
+  const probationRate = Number(profile.probationRate ?? 1);
+  const probationText = probationRate === 1 ? "全额" : `试用期比例 ${Math.round(probationRate * 100)}%`;
+  const lessonSamples = lessonSummary.payableLines
+    .slice(0, 4)
+    .map(
+      (line) => `
+        <li>
+          <span>${escapeHtml([line.date, line.time, line.className, line.ruleName].filter(Boolean).join(" · "))}</span>
+          <strong>${formatCurrency(line.amount || 0)}</strong>
+        </li>
+      `,
+    )
+    .join("");
+
+  grid.innerHTML = `
+    ${settlementCalculationItemHtml(
+      "基本工资",
+      baseRow?.amount || 0,
+      `职称/学历档：${salaryLabel(salaryQualificationLabels, profile.qualificationGrade)}`,
+      `${salaryLabel(salaryQualificationLabels, profile.qualificationGrade)}档命中 ${formatCurrency(baseRow?.amount || 0)}；${probationText}`,
+    )}
+    ${settlementCalculationItemHtml(
+      "考核工资",
+      assessmentRow?.amount || 0,
+      `考核档：${salaryLabel(salaryAssessmentLabels, profile.assessmentBand)}`,
+      `按老师所属学段/岗位考核档取值：${formatCurrency(assessmentRow?.amount || 0)}`,
+    )}
+    ${settlementCalculationItemHtml(
+      "校龄工资",
+      seniorityRow?.amount || 0,
+      `校龄：${profile.schoolYears ?? 0} 年`,
+      seniorityRow?.basis || "按校龄阶梯取值，6年及以上封顶",
+    )}
+    ${settlementCalculationItemHtml(
+      "住房补贴",
+      housingRow?.amount || 0,
+      `住房档：${salaryLabel(salaryHousingLabels, profile.housingTier)}`,
+      `按住房补贴档取值：${formatCurrency(housingRow?.amount || 0)}`,
+    )}
+    ${settlementCalculationItemHtml(
+      "岗位/补充项",
+      roleRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) +
+        manualRows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+      activeRoles.length ? `已启用：${activeRoles.join("、")}` : "未启用额外岗位津贴",
+      [...roleRows, ...manualRows].length
+        ? [...roleRows, ...manualRows].map((row) => `${row.name} ${formatCurrency(row.amount || 0)}`).join("；")
+        : "无岗位津贴、补充项或人工扣减",
+    )}
+    <article class="settlement-calc-item lesson-calc-item">
+      <div>
+        <span>课时工资</span>
+        <strong>${formatCurrency(lessonRow?.amount || 0)}</strong>
+      </div>
+      <p>已完成 ${lessonSummary.payableLines.length} 节，可计 ${lessonSummary.units} 课时单位</p>
+      <small>只统计签入+签出完成且未异常的课次；未完成、异常、被拦截的课次金额为 0。</small>
+      ${
+        lessonSamples
+          ? `<ul class="settlement-lesson-samples">${lessonSamples}</ul>`
+          : `<em>本月暂无完成课次，因此课时工资为 0。</em>`
+      }
+    </article>
+  `;
+}
+
 function renderSettlement() {
   if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     renderBackendSettlement();
@@ -9262,6 +9445,10 @@ function renderSettlement() {
       rows: salaryRows(teacherId),
     },
     confirmationStatus: settled ? "locked" : "",
+  });
+  renderSettlementCalculationPanel({
+    rows: salaryRows(teacherId).map(([name, basis, amount]) => ({ name, basis, amount, category: "preview" })),
+    salaryProfile: teacherById(teacherId)?.salaryProfile || {},
   });
   renderPayrollRulesPanel();
   renderSalaryProfilePanel(null);
@@ -9299,6 +9486,7 @@ function renderBackendSettlement() {
     document.querySelector("#unlockTeacherPayroll").disabled = true;
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
     renderSettlementWorkspaceState({ teacherId: "", payroll: null });
+    renderSettlementCalculationPanel(null);
     renderPayrollRulesPanel();
     renderSalaryProfilePanel(null);
     return;
@@ -9344,6 +9532,7 @@ function renderBackendSettlement() {
       payroll,
       loading: true,
     });
+    renderSettlementCalculationPanel(null, { loading: true });
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9368,6 +9557,7 @@ function renderBackendSettlement() {
       payroll: null,
       error: financeTeacherDetailState.error,
     });
+    renderSettlementCalculationPanel(null, { error: financeTeacherDetailState.error });
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9392,6 +9582,7 @@ function renderBackendSettlement() {
       payroll: null,
       confirmationStatus: financeTeacherDetailState.workload?.confirmation?.status || "",
     });
+    renderSettlementCalculationPanel(null);
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9420,6 +9611,7 @@ function renderBackendSettlement() {
     confirmationStatus,
     loading: financeTeacherDetailState.loading,
   });
+  renderSettlementCalculationPanel(payroll);
   table.innerHTML = (payroll.rows || [])
     .map(
       (row) => `
