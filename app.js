@@ -919,6 +919,11 @@ const views = {
     title: "薪资结算",
     el: document.querySelector("#settlementView"),
   },
+  payrollConfig: {
+    role: "finance,admin",
+    title: "薪资配置",
+    el: document.querySelector("#payrollConfigView"),
+  },
   warnings: {
     role: "teacher,finance,admin",
     title: "异常提醒",
@@ -2675,6 +2680,12 @@ function renderFinanceTeacherFilters(context = "overview") {
       search: "#settlementTeacherSearch",
       teacher: "#settlementTeacherSelect",
     },
+    payrollConfig: {
+      stage: "#payrollConfigStageFilter",
+      grade: "#payrollConfigGradeFilter",
+      search: "#payrollConfigTeacherSearch",
+      teacher: "#payrollConfigTeacherSelect",
+    },
   }[context];
   if (!map) return;
 
@@ -2708,6 +2719,11 @@ function financeReadFilterInputs(context = "overview") {
       stage: "#settlementStageFilter",
       grade: "#settlementGradeFilter",
       search: "#settlementTeacherSearch",
+    },
+    payrollConfig: {
+      stage: "#payrollConfigStageFilter",
+      grade: "#payrollConfigGradeFilter",
+      search: "#payrollConfigTeacherSearch",
     },
   }[context];
   if (!map) return {};
@@ -2972,7 +2988,7 @@ async function saveBackendPayrollRules() {
     return;
   }
   payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
-  renderSettlement();
+  renderPayrollConfig();
   try {
     const data = await apiRequest("/api/payroll-rules", {
       method: "PATCH",
@@ -3048,7 +3064,7 @@ async function saveBackendTeacherSalaryProfile() {
     return;
   }
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
-  renderSettlement();
+  renderPayrollConfig();
   try {
     await apiRequest(`/api/teachers/${teacherId}/salary-profile`, {
       method: "PATCH",
@@ -3327,7 +3343,7 @@ async function loadFinanceTeacherPage(overrides = {}) {
     };
   }
 
-  if (["finance", "financeRecords", "settlement"].includes(state.activeView)) {
+  if (["finance", "financeRecords", "settlement", "payrollConfig"].includes(state.activeView)) {
     render();
   }
 }
@@ -3419,7 +3435,7 @@ async function loadFinanceTeacherDetail(
     };
   }
 
-  if (["financeRecords", "settlement"].includes(state.activeView)) {
+  if (["financeRecords", "settlement", "payrollConfig"].includes(state.activeView)) {
     render();
   }
 }
@@ -5757,6 +5773,7 @@ function render() {
   renderStep("财务首页", renderFinanceDashboard);
   renderStep("老师记录", renderFinanceRecords);
   renderStep("薪资结算", renderSettlement);
+  renderStep("薪资配置", renderPayrollConfig);
   renderStep("异常提醒", renderWarnings);
   renderStep("教室二维码库", renderClassroomScreens);
   saveState();
@@ -9648,8 +9665,6 @@ function renderSettlement() {
     rows: salaryRows(teacherId).map(([name, basis, amount]) => ({ name, basis, amount, category: "preview" })),
     salaryProfile: teacherById(teacherId)?.salaryProfile || {},
   });
-  renderPayrollRulesPanel();
-  renderSalaryProfilePanel(null);
   document.querySelector("#settlementSalaryTable").innerHTML = salaryRows(teacherId)
     .map(
       ([name, basis, amount]) => `
@@ -9685,15 +9700,9 @@ function renderBackendSettlement() {
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
     renderSettlementWorkspaceState({ teacherId: "", payroll: null });
     renderSettlementCalculationPanel(null);
-    renderPayrollRulesPanel();
-    renderSalaryProfilePanel(null);
     return;
   }
   ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
-  if (!payrollRuleState.loaded && !payrollRuleState.loading) {
-    loadPayrollRules();
-  }
-  renderPayrollRulesPanel();
 
   const detail =
     financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
@@ -9731,7 +9740,6 @@ function renderBackendSettlement() {
       loading: true,
     });
     renderSettlementCalculationPanel(null, { loading: true });
-    renderSalaryProfilePanel(null);
     return;
   }
 
@@ -9756,7 +9764,6 @@ function renderBackendSettlement() {
       error: financeTeacherDetailState.error,
     });
     renderSettlementCalculationPanel(null, { error: financeTeacherDetailState.error });
-    renderSalaryProfilePanel(null);
     return;
   }
 
@@ -9781,11 +9788,9 @@ function renderBackendSettlement() {
       confirmationStatus: financeTeacherDetailState.workload?.confirmation?.status || "",
     });
     renderSettlementCalculationPanel(null);
-    renderSalaryProfilePanel(null);
     return;
   }
 
-  renderSalaryProfilePanel(payroll);
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
@@ -9821,6 +9826,37 @@ function renderBackendSettlement() {
       `,
     )
     .join("");
+}
+
+function renderPayrollConfig() {
+  if (!["finance", "admin"].includes(currentRole())) return;
+  if (backendMode() && !financeTeacherPage.loaded && !financeTeacherPage.loading) {
+    loadFinanceTeacherPage();
+  }
+  renderFinanceTeacherFilters("payrollConfig");
+  if (!payrollRuleState.loaded && !payrollRuleState.loading) {
+    loadPayrollRules();
+  }
+  renderPayrollRulesPanel();
+
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!teacherId) {
+    renderSalaryProfilePanel(null);
+    return;
+  }
+  if (backendMode()) {
+    ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
+    const payroll =
+      financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
+        ? financeTeacherDetailState.payroll
+        : null;
+    renderSalaryProfilePanel(payroll);
+    return;
+  }
+  renderSalaryProfilePanel({
+    teacher: teacherById(teacherId),
+    salaryProfile: teacherById(teacherId)?.salaryProfile || {},
+  });
 }
 
 function renderPayrollRulesPanel() {
@@ -11403,6 +11439,9 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
     if (state.activeView === "settlement" && state.selectedFinanceTeacherId) {
       await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     }
+    if (state.activeView === "payrollConfig" && state.selectedFinanceTeacherId) {
+      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
+    }
     return;
   }
 
@@ -11417,6 +11456,7 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeStageFilter", "overview"],
   ["#financeRecordsStageFilter", "records"],
   ["#settlementStageFilter", "settlement"],
+  ["#payrollConfigStageFilter", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("change", () => {
     applyFinanceTeacherFilters(context, { resetGrade: true });
@@ -11427,6 +11467,7 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeGradeFilter", "overview"],
   ["#financeRecordsGradeFilter", "records"],
   ["#settlementGradeFilter", "settlement"],
+  ["#payrollConfigGradeFilter", "payrollConfig"],
   ["#financeTeacherPageSize", "overview"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("change", () => {
@@ -11438,6 +11479,7 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeTeacherSearchButton", "overview"],
   ["#financeRecordsSearchButton", "records"],
   ["#settlementTeacherSearchButton", "settlement"],
+  ["#payrollConfigTeacherSearchButton", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("click", () => {
     applyFinanceTeacherFilters(context);
@@ -11448,6 +11490,7 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeTeacherSearch", "overview"],
   ["#financeRecordsSearch", "records"],
   ["#settlementTeacherSearch", "settlement"],
+  ["#payrollConfigTeacherSearch", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -11705,6 +11748,16 @@ document.querySelector("#settlementTeacherSelect").addEventListener("change", as
     return;
   }
   renderSettlement();
+});
+
+document.querySelector("#payrollConfigTeacherSelect").addEventListener("change", async (event) => {
+  state.selectedFinanceTeacherId = event.target.value;
+  resetFinanceTeacherDetailState();
+  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
+    return;
+  }
+  renderPayrollConfig();
 });
 
 document.querySelector("#settleTeacherPayroll").addEventListener("click", async () => {

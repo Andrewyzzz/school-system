@@ -129,6 +129,10 @@
             <span aria-hidden="true">¥</span>
             薪资结算
           </button>
+          <button class="nav-item" data-view="payrollConfig" data-role="finance,admin" type="button">
+            <span aria-hidden="true">⚙</span>
+            薪资配置
+          </button>
           <button class="nav-item" data-view="warnings" data-role="teacher,finance,admin" type="button">
             <span aria-hidden="true">!</span>
             异常提醒
@@ -1616,11 +1620,39 @@
                 </table>
               </div>
             </section>
-            <details class="settlement-config-details">
-              <summary>
-                <span>薪资规则与老师档案配置</span>
-                <small>日常结算不用打开；规则或个人档案变更时再维护。</small>
-              </summary>
+          </section>
+        </section>
+
+        <section class="view" id="payrollConfigView" aria-labelledby="payrollConfigTitle">
+          <section class="panel table-panel payroll-config-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="payrollConfigTitle">薪资配置</h2>
+                <p>维护全校薪资规则、老师工资档案和单个老师的特殊奖扣。薪资结算页只负责复核与锁定。</p>
+              </div>
+            </div>
+            <div class="settlement-filter-band" aria-label="工资档案老师筛选">
+              <div class="finance-list-toolbar compact-teacher-picker">
+                <label class="field-label" for="payrollConfigStageFilter">
+                  学部
+                  <select class="lesson-select" id="payrollConfigStageFilter"></select>
+                </label>
+                <label class="field-label" for="payrollConfigGradeFilter">
+                  年级
+                  <select class="lesson-select" id="payrollConfigGradeFilter"></select>
+                </label>
+                <label class="field-label" for="payrollConfigTeacherSearch">
+                  搜索老师
+                  <input id="payrollConfigTeacherSearch" type="search" placeholder="姓名、工号、学科、手机号" />
+                </label>
+                <label class="field-label" for="payrollConfigTeacherSelect">
+                  选择老师
+                  <select class="lesson-select" id="payrollConfigTeacherSelect"></select>
+                </label>
+                <button class="ghost-button" id="payrollConfigTeacherSearchButton" type="button">查询</button>
+              </div>
+            </div>
+            <div class="payroll-config-layout">
               <section class="payroll-rule-box" aria-labelledby="payrollRuleTitle">
                 <div class="panel-heading compact-heading">
                   <div>
@@ -1738,7 +1770,7 @@
                   </label>
                 </details>
               </section>
-            </details>
+            </div>
           </section>
         </section>
 

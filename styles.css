@@ -4168,6 +4168,21 @@ td {
   padding: 16px;
 }
 
+.payroll-config-panel {
+  padding-bottom: 18px;
+}
+
+.payroll-config-layout {
+  display: grid;
+  gap: 16px;
+  margin: 0 20px 18px;
+}
+
+.payroll-config-layout .payroll-rule-box {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
 .compact-heading {
   margin-bottom: 12px;
 }
@@ -5413,6 +5428,7 @@ td {
   .settlement-calculation-panel,
   .settlement-flow-band,
   .settlement-detail-panel,
+  .payroll-config-layout,
   .settlement-config-details {
     margin: 0 16px 16px;
   }
