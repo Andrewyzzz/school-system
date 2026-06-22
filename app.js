@@ -9279,6 +9279,24 @@ function salaryLabel(labels, value, fallback = "未设置") {
   return labels[value] || value || fallback;
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function humanizePayrollBasis(basis = "") {
+  const replacements = {
+    ...salaryQualificationLabels,
+    ...salaryAssessmentLabels,
+    ...salaryHousingLabels,
+  };
+  return Object.entries(replacements)
+    .sort((a, b) => b[0].length - a[0].length)
+    .reduce((text, [key, label]) => {
+      const pattern = new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(key)}(?=$|[^A-Za-z0-9_])`, "g");
+      return text.replace(pattern, `$1${label}`);
+    }, String(basis || ""));
+}
+
 function activeSalaryRoleLabels(profile = {}) {
   const roles = profile.roles || {};
   return Object.entries(salaryRoleLabels)
@@ -9457,7 +9475,7 @@ function renderSettlement() {
       ([name, basis, amount]) => `
         <tr>
           <td class="row-title" data-label="薪资项目">${name}</td>
-          <td class="muted" data-label="计算口径">${basis}</td>
+          <td class="muted" data-label="计算口径">${humanizePayrollBasis(basis)}</td>
           <td data-label="金额">${formatCurrency(amount)}</td>
         </tr>
       `,
@@ -9617,7 +9635,7 @@ function renderBackendSettlement() {
       (row) => `
         <tr>
           <td class="row-title" data-label="薪资项目">${row.name}</td>
-          <td class="muted" data-label="计算口径">${row.basis}</td>
+          <td class="muted" data-label="计算口径">${humanizePayrollBasis(row.basis)}</td>
           <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
         </tr>
       `,
