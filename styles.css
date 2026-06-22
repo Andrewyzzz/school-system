@@ -3854,20 +3854,235 @@ td {
   background: var(--rose-soft);
 }
 
-.settlement-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 20px 18px;
-  flex-wrap: wrap;
+.settlement-workspace-panel .panel-heading {
+  align-items: flex-start;
 }
 
-.payroll-rule-box {
+.settlement-filter-band,
+.settlement-teacher-card,
+.settlement-flow-band,
+.settlement-detail-panel,
+.settlement-config-details {
   margin: 0 20px 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
+  background: #fff;
+}
+
+.settlement-filter-band {
+  padding: 16px;
   background: var(--surface-soft);
+}
+
+.settlement-filter-band .finance-list-toolbar {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.settlement-filter-band .field-label {
+  margin-bottom: 0;
+}
+
+.settlement-teacher-card {
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-left: 4px solid var(--primary);
+}
+
+.settlement-teacher-card div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.settlement-teacher-card span,
+.settlement-band-heading p,
+.settlement-step p,
+.settlement-config-details small {
+  color: var(--muted);
+}
+
+.settlement-teacher-card strong {
+  font-size: 24px;
+  color: var(--ink);
+}
+
+.settlement-teacher-card small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.settlement-teacher-card p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.settlement-teacher-state {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settlement-flow-band,
+.settlement-detail-panel {
+  padding: 16px;
+}
+
+.settlement-band-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.settlement-band-heading h3 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.settlement-band-heading p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.settlement-workflow-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settlement-step {
+  min-height: 132px;
+  padding: 14px;
+  display: grid;
+  align-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.settlement-step span {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.settlement-step strong {
+  font-size: 16px;
+  color: var(--ink);
+}
+
+.settlement-step p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.settlement-step.done {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(240, 253, 250, 0.72);
+}
+
+.settlement-step.done span {
+  color: #fff;
+  background: var(--teal);
+}
+
+.settlement-step.current {
+  border-color: rgba(0, 32, 104, 0.28);
+  background: var(--primary-soft);
+}
+
+.settlement-step.current span {
+  color: #fff;
+  background: var(--primary);
+}
+
+.settlement-step.blocked {
+  background: #fff;
+  opacity: 0.78;
+}
+
+.settlement-actions {
+  display: grid;
+  grid-template-columns: 1.1fr 1.1fr 1.5fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.settlement-action-group {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.settlement-action-group > span {
+  width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.settlement-action-group button {
+  flex: 1 1 120px;
+}
+
+.settlement-action-group .primary-button:disabled {
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+.settlement-detail-panel .table-wrap {
+  padding: 0;
+}
+
+.settlement-config-details {
+  overflow: hidden;
+  background: var(--surface-soft);
+}
+
+.settlement-config-details summary {
+  cursor: pointer;
+  min-height: 64px;
+  padding: 14px 16px;
+  display: grid;
+  gap: 4px;
+  list-style: none;
+}
+
+.settlement-config-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.settlement-config-details summary span {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.payroll-rule-box {
+  margin: 0;
+  border-top: 1px solid var(--line);
+  background: #fff;
   padding: 16px;
 }
 
@@ -4123,6 +4338,8 @@ td {
   .summary-grid,
   .pay-preview,
   .salary-total,
+  .settlement-workflow-steps,
+  .settlement-actions,
   .payroll-rule-grid,
   .salary-profile-grid,
   .checkbox-grid.salary-role-grid,
@@ -4974,6 +5191,27 @@ td {
   .salary-total {
     grid-template-columns: 1fr;
     padding: 0 16px 16px;
+  }
+
+  .settlement-filter-band,
+  .settlement-teacher-card,
+  .settlement-flow-band,
+  .settlement-detail-panel,
+  .settlement-config-details {
+    margin: 0 16px 16px;
+  }
+
+  .settlement-teacher-card,
+  .settlement-band-heading {
+    display: grid;
+  }
+
+  .settlement-teacher-state {
+    justify-content: flex-start;
+  }
+
+  .settlement-step {
+    min-height: auto;
   }
 
   .teacher-pay-strip {

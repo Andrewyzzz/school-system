@@ -9070,6 +9070,164 @@ function renderBackendFinanceRecords() {
     : `<tr><td colspan="8"><div class="empty-state">该老师暂无后端扫码记录</div></td></tr>`;
 }
 
+function selectedFinanceTeacherRecord(teacherId = state.selectedFinanceTeacherId) {
+  return (
+    financeTeacherPage.items.find((teacher) => teacher.id === teacherId) ||
+    financeTeacherDetailState.payroll?.teacher ||
+    teacherById(teacherId) ||
+    null
+  );
+}
+
+function backendConfirmationLabel(status = "", teacherId = "") {
+  if (status === "locked") return "工作量已锁定";
+  if (status === "school_approved") return "总校已审批";
+  if (status === "academic_approved") return "教务已审批";
+  if (status === "teacher_confirmed") return "老师已确认";
+  return teacherId ? confirmationText(teacherId) : "老师待确认";
+}
+
+function confirmationStageValue(status = "", teacherId = "") {
+  if (status === "locked" || status === "school_approved") return 3;
+  if (status === "academic_approved") return 2;
+  if (status === "teacher_confirmed") return 1;
+  return teacherId ? state.confirmationStages[teacherId] || 0 : 0;
+}
+
+function settlementStepState({ complete = false, current = false, blocked = false } = {}) {
+  if (complete) return "done";
+  if (current) return "current";
+  if (blocked) return "blocked";
+  return "waiting";
+}
+
+function settlementStepHtml(index, title, text, stepState) {
+  return `
+    <article class="settlement-step ${stepState}">
+      <span>${String(index).padStart(2, "0")}</span>
+      <strong>${title}</strong>
+      <p>${text}</p>
+    </article>
+  `;
+}
+
+function settlementNextActionText({ teacherId = "", payroll = null, confirmationStatus = "", loading = false, error = "" } = {}) {
+  if (!teacherId) return "先选择一位老师，再查看本月工资快照和可执行动作。";
+  if (loading) return "正在读取这位老师的工作量和薪资快照。";
+  if (error) return error;
+  const confirmationStage = confirmationStageValue(confirmationStatus, teacherId);
+  const hasPayrollSnapshot = Boolean(payroll?.generated || (!backendMode() && payroll?.rows?.length));
+  const hasPayrollPreview = Boolean(payroll?.rows?.length || payroll);
+  const payrollStatus = payroll?.generated?.status || (hasPayrollPreview ? "preview" : "missing");
+  if (!hasPayrollSnapshot) {
+    return hasPayrollPreview
+      ? "当前仅为后端试算明细，财务可生成本月薪资快照后进入正式流程。"
+      : "还没有本月薪资快照，财务可先生成本月薪资。";
+  }
+  if (confirmationStage < 1) return "等待老师确认本月工作量，未确认前不能完成最终结算。";
+  if (confirmationStage < 3) return "工作量已进入审批链路，需教务和总校审批完成后再复核工资。";
+  if (payrollStatus === "generated") return "工作量已完成审批，财务可以复核这位老师的工资。";
+  if (payrollStatus === "reviewed") return "财务已复核，可以锁定工资并进入发放口径。";
+  if (payrollStatus === "locked") return "这位老师本月工资已锁定，老师端只展示最终总薪资。";
+  return "薪资已试算，请按流程生成、复核并锁定。";
+}
+
+function renderSettlementWorkspaceState({
+  teacherId = state.selectedFinanceTeacherId,
+  teacher = null,
+  payroll = null,
+  confirmationStatus = "",
+  loading = false,
+  error = "",
+} = {}) {
+  const teacherCard = document.querySelector("#settlementTeacherCard");
+  const workflow = document.querySelector("#settlementWorkflowSteps");
+  const nextAction = document.querySelector("#settlementNextAction");
+  const listTeacher = selectedFinanceTeacherRecord(teacherId);
+  const selectedTeacher = teacher || listTeacher;
+  const confirmationLabel = backendConfirmationLabel(confirmationStatus, teacherId);
+  const confirmationStage = confirmationStageValue(confirmationStatus, teacherId);
+  const hasPayrollSnapshot = Boolean(payroll?.generated || (!backendMode() && payroll?.rows?.length));
+  const hasPayrollPreview = Boolean(payroll?.rows?.length || payroll);
+  const payrollStatus = payroll?.generated?.status || (hasPayrollPreview ? "preview" : "missing");
+  const payrollLabel = hasPayrollSnapshot ? payrollStatusLabel(payrollStatus) : hasPayrollPreview ? "试算" : "未生成";
+  const teacherDepartment = backendTeacherDepartment(selectedTeacher || listTeacher || {});
+  const teacherGradeText =
+    selectedTeacher?.gradeText ||
+    listTeacher?.gradeText ||
+    selectedTeacher?.grade ||
+    listTeacher?.grade ||
+    (financeTeacherPage.grade ? financeGradeLabel(financeTeacherPage.grade) : "年级未设置");
+  const teacherSubject = backendTeacherSubject(selectedTeacher || listTeacher || {});
+  const teacherMeta = selectedTeacher
+    ? [teacherDepartment, teacherGradeText, teacherSubject, selectedTeacher.id || listTeacher?.id]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+
+  if (teacherCard) {
+    teacherCard.innerHTML = teacherId
+      ? `
+        <div>
+          <span>当前老师</span>
+          <strong>${selectedTeacher?.name || teacherName(teacherId)}</strong>
+          <small>${teacherMeta}</small>
+        </div>
+        <div class="settlement-teacher-state">
+          <span class="tag ${confirmationStage >= 3 ? "completed" : confirmationStage > 0 ? "pending" : "exception"}">${confirmationLabel}</span>
+          <span class="tag ${payrollStatus === "locked" ? "locked" : hasPayrollSnapshot ? "completed" : "pending"}">${payrollLabel}</span>
+        </div>
+      `
+      : `
+        <div>
+          <span>当前老师</span>
+          <strong>请选择老师</strong>
+          <small>支持按学部、年级、姓名、工号或手机号筛选</small>
+        </div>
+        <p>选择老师后查看工作量状态、薪资快照和可执行动作。</p>
+      `;
+  }
+
+  if (nextAction) {
+    nextAction.textContent = settlementNextActionText({
+      teacherId,
+      payroll,
+      confirmationStatus,
+      loading,
+      error,
+    });
+  }
+
+  if (workflow) {
+    const generatedState = settlementStepState({
+      complete: hasPayrollSnapshot,
+      current: Boolean(teacherId) && !hasPayrollSnapshot && !loading,
+      blocked: !teacherId || loading || Boolean(error),
+    });
+    const approvalState = settlementStepState({
+      complete: confirmationStage >= 3,
+      current: hasPayrollSnapshot && confirmationStage > 0 && confirmationStage < 3,
+      blocked: !hasPayrollSnapshot || confirmationStage === 0 || loading || Boolean(error),
+    });
+    const reviewState = settlementStepState({
+      complete: ["reviewed", "locked"].includes(payrollStatus),
+      current: hasPayrollSnapshot && confirmationStage >= 3 && payrollStatus === "generated",
+      blocked: !hasPayrollSnapshot || confirmationStage < 3 || loading || Boolean(error),
+    });
+    const lockState = settlementStepState({
+      complete: payrollStatus === "locked",
+      current: payrollStatus === "reviewed",
+      blocked: payrollStatus !== "reviewed" || loading || Boolean(error),
+    });
+    workflow.innerHTML = [
+      settlementStepHtml(1, "生成薪资", hasPayrollSnapshot ? "已生成本月工资快照" : "汇总课时、考勤、津贴和个税", generatedState),
+      settlementStepHtml(2, "工作量审批", confirmationStage >= 3 ? "老师、教务、总校审批完成" : confirmationLabel, approvalState),
+      settlementStepHtml(3, "财务复核", ["reviewed", "locked"].includes(payrollStatus) ? "财务已复核工资明细" : "确认金额、扣减和补充项", reviewState),
+      settlementStepHtml(4, "锁定发放", payrollStatus === "locked" ? "工资已锁定并可发放" : "锁定后老师端只看总薪资", lockState),
+    ].join("");
+  }
+}
+
 function renderSettlement() {
   if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     renderBackendSettlement();
@@ -9096,6 +9254,15 @@ function renderSettlement() {
   document.querySelector("#batchGeneratePayroll").disabled = true;
   document.querySelector("#exportPayrollCsv").disabled = true;
   document.querySelector("#unlockTeacherPayroll").disabled = true;
+  renderSettlementWorkspaceState({
+    teacherId,
+    teacher: teacherById(teacherId),
+    payroll: {
+      generated: settled ? { status: "locked" } : { status: "generated" },
+      rows: salaryRows(teacherId),
+    },
+    confirmationStatus: settled ? "locked" : "",
+  });
   renderPayrollRulesPanel();
   renderSalaryProfilePanel(null);
   document.querySelector("#settlementSalaryTable").innerHTML = salaryRows(teacherId)
@@ -9131,6 +9298,7 @@ function renderBackendSettlement() {
     document.querySelector("#exportPayrollCsv").disabled = currentRole() !== "finance";
     document.querySelector("#unlockTeacherPayroll").disabled = true;
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
+    renderSettlementWorkspaceState({ teacherId: "", payroll: null });
     renderPayrollRulesPanel();
     renderSalaryProfilePanel(null);
     return;
@@ -9170,6 +9338,12 @@ function renderBackendSettlement() {
     exportButton.disabled = true;
     unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端读取该老师薪资明细...</div></td></tr>`;
+    renderSettlementWorkspaceState({
+      teacherId,
+      teacher: selectedFinanceTeacherRecord(teacherId),
+      payroll,
+      loading: true,
+    });
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9188,6 +9362,12 @@ function renderBackendSettlement() {
     exportButton.disabled = false;
     unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+    renderSettlementWorkspaceState({
+      teacherId,
+      teacher: selectedFinanceTeacherRecord(teacherId),
+      payroll: null,
+      error: financeTeacherDetailState.error,
+    });
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9206,6 +9386,12 @@ function renderBackendSettlement() {
     exportButton.disabled = false;
     unlockButton.disabled = true;
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">暂无该老师薪资明细，可先批量生成本月薪资。</div></td></tr>`;
+    renderSettlementWorkspaceState({
+      teacherId,
+      teacher: selectedFinanceTeacherRecord(teacherId),
+      payroll: null,
+      confirmationStatus: financeTeacherDetailState.workload?.confirmation?.status || "",
+    });
     renderSalaryProfilePanel(null);
     return;
   }
@@ -9214,7 +9400,7 @@ function renderBackendSettlement() {
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
-  const payrollStatus = payroll.generated?.status || "generated";
+  const payrollStatus = payroll.generated?.status || "preview";
   const confirmationStatus = financeTeacherDetailState.workload?.confirmation?.status || payroll.confirmation?.status || "unconfirmed";
   status.textContent = payroll.generated
     ? `${payrollStatusLabel(payrollStatus)} · 工作量${confirmationText(payroll.teacher?.id || state.selectedFinanceTeacherId)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
@@ -9227,6 +9413,13 @@ function renderBackendSettlement() {
   batchButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   exportButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   unlockButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "locked";
+  renderSettlementWorkspaceState({
+    teacherId,
+    teacher: payroll.teacher || selectedFinanceTeacherRecord(teacherId),
+    payroll,
+    confirmationStatus,
+    loading: financeTeacherDetailState.loading,
+  });
   table.innerHTML = (payroll.rows || [])
     .map(
       (row) => `
