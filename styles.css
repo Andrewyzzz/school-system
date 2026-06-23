@@ -3595,6 +3595,34 @@ td {
   margin-top: 0;
 }
 
+.payroll-history-toolbar {
+  grid-template-columns: minmax(260px, 1.4fr) 180px auto;
+  margin: 0 20px 16px;
+}
+
+.payroll-history-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.payroll-history-summary div:first-child strong {
+  color: var(--primary-strong);
+}
+
+.payroll-history-summary div:last-child strong {
+  color: var(--text);
+  font-size: 24px;
+}
+
+.payroll-history-note {
+  margin: 0 20px 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .personnel-list-toolbar {
   grid-template-columns: minmax(240px, 1fr) 140px 140px 140px 120px auto;
 }
@@ -4067,6 +4095,10 @@ td {
   background: #f59e0b;
 }
 
+.settlement-status-row.status-saved::before {
+  background: #0f766e;
+}
+
 .settlement-status-row.status-teacher_confirmed::before {
   background: #2563eb;
 }
@@ -4100,6 +4132,13 @@ td {
   background: #ecfdf5;
 }
 
+.settlement-status-row.status-saved,
+.settlement-status-count.status-saved {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(240, 253, 250, 0.72);
+}
+
+.settlement-status-row.status-saved .settlement-status-row-state,
 .settlement-status-row.status-teacher_confirmed .settlement-status-row-state,
 .settlement-status-row.status-reviewed .settlement-status-row-state,
 .settlement-status-row.status-locked .settlement-status-row-state {
@@ -4171,6 +4210,56 @@ td {
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.settlement-flow-heading {
+  align-items: center;
+}
+
+.settlement-month-progress {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settlement-progress-pill {
+  min-width: 88px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  display: grid;
+  gap: 2px;
+}
+
+.settlement-progress-pill strong {
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.settlement-progress-pill.status-saved {
+  border-color: rgba(15, 118, 110, 0.24);
+  background: rgba(240, 253, 250, 0.72);
+}
+
+.settlement-progress-pill.status-missing {
+  background: var(--surface-soft);
+}
+
+.settlement-progress-pill.status-published {
+  border-color: rgba(37, 99, 235, 0.2);
+  background: #eff6ff;
+}
+
+.settlement-progress-pill.status-locked {
+  border-color: rgba(5, 150, 105, 0.24);
+  background: #ecfdf5;
 }
 
 .settlement-band-heading h3 {
@@ -4248,32 +4337,37 @@ td {
 
 .settlement-actions {
   display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1.5fr;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(420px, 1.4fr);
   gap: 12px;
   margin-top: 14px;
 }
 
 .settlement-action-group {
   min-width: 0;
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
   gap: 8px;
-  flex-wrap: wrap;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
 }
 
+.settlement-action-group.finance-only-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .settlement-action-group > span {
-  width: 100%;
+  grid-column: 1 / -1;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
 }
 
 .settlement-action-group button {
-  flex: 1 1 120px;
+  width: 100%;
+  min-height: 40px;
 }
 
 .settlement-action-group .primary-button:disabled {
@@ -4860,6 +4954,21 @@ td {
 
   .compact-field {
     max-width: none;
+  }
+
+  .settlement-flow-heading {
+    display: grid;
+  }
+
+  .settlement-month-progress {
+    justify-content: stretch;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settlement-action-group,
+  .settlement-action-group.finance-only-actions {
+    grid-template-columns: 1fr;
   }
 }
 

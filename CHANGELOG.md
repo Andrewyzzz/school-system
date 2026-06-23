@@ -2,15 +2,110 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-23 - 薪资结算流程置顶
+
+- 类型：前端 / 体验优化
+- 影响范围：财务端薪资结算工作台
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
+- 验证：
+  - `git diff --check`
+  - `node tests/phase1-production.test.js`
+- 内容：
+  - “本月结算流程”从老师筛选工作台下方继续上移到页面标题后方。
+  - 财务进入“薪资结算”后，先看到月度结算流程和保存进度，再选择具体老师处理工资单。
+
+## 2026-06-23 - 薪资结算流程移到顶部并显示保存进度
+
+- 类型：前端 / 后端汇总 / 体验优化
+- 影响范围：财务端薪资结算工作台 / 教师列表接口
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check tests/phase1-production.test.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node tests/phase1-production.test.js`
+  - `git diff --check`
+  - 本地接口验证 `GET /api/teachers?month=2026-06&page=1&pageSize=20` 返回 `meta.payrollStatusCounts`，当前数据为已完成 1、已发布 998、已保存 1。
+- 内容：
+  - “本月结算流程”从工资档案与明细中间移到薪资结算页顶部，作为月度总览。
+  - 流程标题右侧新增进度数字：已保存、未保存、已发布、已完成。
+  - 教师列表接口新增 `meta.payrollStatusCounts`，按当前筛选范围统计全部老师状态，而不是只统计当前页 20 位老师。
+  - 移动端下进度数字改为两列展示，避免顶部拥挤。
+
+## 2026-06-23 - 薪资结算改为先保存再统一发布
+
+- 类型：功能 / 流程调整 / 前后端
+- 影响范围：财务端薪资结算 / 老师端工资确认 / 后端工资状态
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node tests/phase1-production.test.js`
+  - `git diff --check`
+  - 内存副本验证：单个老师保存后状态为 `saved`，发布后状态为 `generated`，未写入真实数据库。
+- 内容：
+  - 单个老师工资单改为先点击“保存该老师工资”，状态进入“已保存”财务草稿。
+  - “已保存”状态不会发布到老师端，老师端仍显示财务尚未发布本月工资明细。
+  - 原“生成本月工资”改为“发布本月工资明细”，发布前增加确认弹窗。
+  - 发布本月工资时，已保存的工资单转为“等待老师确认”，未保存的老师按当前规则生成并发布。
+  - 工资状态列表新增“已保存”分组，区分财务草稿和已发布待确认。
+  - 结算流程步骤改为“保存草稿、发布确认、财务处理、锁定发放”。
+- 注意事项：
+  - 如果保存草稿后又修改了该老师工资档案或本月奖扣，需要重新点击“保存该老师工资”刷新草稿，再统一发布。
+
+## 2026-06-23 - 优化薪资结算流程按钮布局
+
+- 类型：前端 / 体验优化
+- 影响范围：财务端薪资结算工作台
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
+- 验证：
+  - `git diff --check`
+- 内容：
+  - 结算流程下方操作区从左侧小块布局改为两段式铺满布局。
+  - “生成与导出”按钮等宽排列，“财务结算”三个按钮等宽排列，减少右侧大面积留白。
+  - 移动端下按钮自动改为单列，避免窄屏拥挤。
+
+## 2026-06-23 - 财务端新增历史工资记录
+
+- 类型：功能 / 后端接口 / 前端
+- 影响范围：财务端工资记录 / 工资明细导出 / 后端工资快照
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node tests/phase1-production.test.js`
+  - `git diff --check`
+  - 本地健康检查 `http://127.0.0.1:4184/api/health`
+  - 财务账号验证 `GET /api/payroll/history?termId=TERM-2026-PHASE1&month=2026-06` 返回 999 份工资快照，其中已锁定 1 份、已发实发 9171 元。
+  - 财务账号验证 `GET /api/payroll/export?termId=TERM-2026-PHASE1&month=2026-06` 返回 999 行导出数据，CSV 表头包含“学期”列。
+- 内容：
+  - 财务端和行政端新增“工资记录”栏目，独立于“薪资结算工作台”。
+  - 支持按学期、月份查询历史工资快照。
+  - 汇总展示当月已锁定发放的实发工资、已发应发、代扣个税和工资单状态数量。
+  - 明细表展示老师、学部年级、科目、结算状态、应发、个税、实发和锁定时间。
+  - 新增后端 `GET /api/payroll/history` 接口，按同一口径聚合工资快照。
+  - 工资明细 CSV 导出支持按 `termId` 过滤，并新增“学期”列。
+- 注意事项：
+  - “当月已发实发”只统计状态为“已锁定”的工资单，未确认、异议中、待锁定的工资单不会计入已发总额。
+
 ## 2026-06-23 - 财务端工资档案按学期维护
 
 - 类型：功能 / 体验优化 / 后端计算
 - 影响范围：财务端薪资结算 / 教师工资档案 / 本月特殊奖扣
-- 提交：未提交
-- 部署：未部署，仅本地已重启验证
+- 提交：本次提交
+- 部署：本次提交后部署到生产站
 - 验证：
   - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
   - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/payroll.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node tests/phase1-production.test.js`
   - `git diff --check`
   - 本地健康检查 `http://127.0.0.1:4184/api/health`
 - 内容：

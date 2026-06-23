@@ -1973,8 +1973,17 @@ export function queryTeachers(db, query = {}) {
       .includes(search);
   });
 
-  const start = (page - 1) * pageSize;
-  const items = filtered.slice(start, start + pageSize).map((teacher) => {
+	  const start = (page - 1) * pageSize;
+	  const payrollStatusCounts = filtered.reduce(
+	    (counts, teacher) => {
+	      const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
+	      const key = payrollDetail?.status || "missing";
+	      counts[key] = (counts[key] || 0) + 1;
+	      return counts;
+	    },
+	    {},
+	  );
+	  const items = filtered.slice(start, start + pageSize).map((teacher) => {
     const summary = teacherLessonSummary(db, teacher.id, month);
     const payroll = teacherPayrollPreview(db, teacher.id, month);
     const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
@@ -2008,11 +2017,12 @@ export function queryTeachers(db, query = {}) {
     meta: {
       page,
       pageSize,
-      total: filtered.length,
-      totalPages: Math.max(Math.ceil(filtered.length / pageSize), 1),
-    },
-  };
-}
+	      total: filtered.length,
+	      totalPages: Math.max(Math.ceil(filtered.length / pageSize), 1),
+	      payrollStatusCounts,
+	    },
+	  };
+	}
 
 export function teacherLessonSummary(db, teacherId, month = "2026-06") {
   const lessons = db.lessonInstances.filter(
@@ -2198,6 +2208,10 @@ function assertMonthTermEditable(db, month = "2026-06", actionName = "修改月�
   ensureEditableTerm(termForMonth(db, month), actionName);
 }
 
+function publishedPayrollStatus(status = "") {
+  return ["generated", "teacher_confirmed", "disputed", "reviewed", "locked"].includes(status);
+}
+
 function buildPayrollRows(db, payroll, workload) {
   if (!payroll || !workload) return [];
   return [
@@ -2231,9 +2245,13 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
           id: generated.id,
           termId: generated.termId || "",
           termName: generated.termName || "",
-          status: generated.status,
-          generatedAt: generated.generatedAt,
-          generatedByName: generated.generatedByName,
+	          status: generated.status,
+	          generatedAt: generated.generatedAt,
+	          generatedByName: generated.generatedByName,
+	          savedAt: generated.savedAt || "",
+	          savedByName: generated.savedByName || "",
+	          publishedAt: generated.publishedAt || "",
+	          publishedByName: generated.publishedByName || "",
 	          reviewedAt: generated.reviewedAt || "",
 	          reviewedByName: generated.reviewedByName || "",
 	          teacherConfirmedAt: generated.teacherConfirmedAt || "",
@@ -2257,8 +2275,9 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
   };
 }
 
-export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
-  assertMonthTermEditable(db, month, "生成薪资");
+export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null, options = {}) {
+  const targetStatus = options.status === "generated" ? "generated" : "saved";
+  assertMonthTermEditable(db, month, targetStatus === "generated" ? "发布薪资" : "保存薪资");
   const detail = teacherPayrollDetail(db, teacherId, month);
   if (!detail) {
     const error = new Error("教师不存在");
@@ -2282,10 +2301,16 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     month,
     termId: term.id,
     termName: term.name,
-	    status: "generated",
+	    status: targetStatus,
 	    generatedAt: now,
 	    generatedByAccountId: actorAccount?.id || "",
 	    generatedByName: actorAccount?.name || "",
+	    savedAt: now,
+	    savedByAccountId: actorAccount?.id || "",
+	    savedByName: actorAccount?.name || "",
+	    publishedAt: targetStatus === "generated" ? now : "",
+	    publishedByAccountId: targetStatus === "generated" ? actorAccount?.id || "" : "",
+	    publishedByName: targetStatus === "generated" ? actorAccount?.name || "" : "",
 	    reviewedAt: "",
 	    reviewedByAccountId: "",
 	    reviewedByName: "",
@@ -2335,7 +2360,7 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
 
   db.meta.updatedAt = now;
   appendAuditLog(db, {
-    action: "payroll_generate",
+    action: targetStatus === "generated" ? "payroll_publish_teacher" : "payroll_save",
     actorAccountId: actorAccount?.id || "",
     actorName: actorAccount?.name || "",
     teacherId,
@@ -2346,7 +2371,37 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     netPay: detail.netPay,
   });
 	  return teacherPayrollDetail(db, teacherId, month);
-	}
+		}
+
+export function publishTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "发布薪资");
+  let target = findTeacherPayrollDetail(db, teacherId, month);
+  if (!target) {
+    return generateTeacherPayrollDetail(db, teacherId, month, actorAccount, { status: "generated" });
+  }
+  if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
+  if (["teacher_confirmed", "disputed", "reviewed"].includes(target.status)) return teacherPayrollDetail(db, teacherId, month);
+
+  const now = new Date().toISOString();
+  target.status = "generated";
+  target.publishedAt = now;
+  target.publishedByAccountId = actorAccount?.id || "";
+  target.publishedByName = actorAccount?.name || "";
+  target.updatedAt = now;
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_publish_teacher",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+    termId: target.termId || termForMonth(db, month).id,
+    termName: target.termName || termForMonth(db, month).name,
+    grossPay: target.summarySnapshot?.grossPay || 0,
+    netPay: target.summarySnapshot?.netPay || 0,
+  });
+  return teacherPayrollDetail(db, teacherId, month);
+}
 
 export function confirmTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
   assertMonthTermEditable(db, month, "确认工资明细");
@@ -2582,7 +2637,7 @@ export function generatePayrollBatch(db, options = {}, actorAccount = null) {
 
   teacherIds.forEach((teacherId) => {
     try {
-      const detail = generateTeacherPayrollDetail(db, teacherId, month, actorAccount);
+      const detail = publishTeacherPayrollDetail(db, teacherId, month, actorAccount);
       results.push({
         teacherId,
         teacherName: detail.teacher.name,
@@ -2625,30 +2680,13 @@ function csvCell(value) {
 
 export function exportPayrollDetails(db, options = {}) {
   const month = String(options.month || "2026-06");
+  const termId = String(options.termId || "").trim();
   const stageId = String(options.stageId || "").trim();
   const grade = Number.parseInt(options.grade || "", 10);
   const search = String(options.search || "").trim().toLowerCase();
-  const details = ensurePayrollDetails(db).filter((detail) => {
-    if (detail.month !== month) return false;
-    const teacher = findTeacher(db, detail.teacherId);
-    if (!teacher) return !stageId && !Number.isFinite(grade) && !search;
-    if (stageId && teacher.stageId !== stageId) return false;
-    if (Number.isFinite(grade) && !teacherGradeValues(db, teacher).includes(grade)) return false;
-    if (!search) return true;
-    return [
-      teacher.id,
-      teacher.employeeNo,
-      teacher.name,
-      teacher.stageName,
-      gradeCoverageText(db, teacher),
-      teacher.primarySubjectName,
-      teacher.phone,
-    ]
-      .join(" ")
-      .toLowerCase()
-      .includes(search);
-  });
+  const details = payrollDetailsByFilter(db, { month, termId, stageId, grade, search });
   const headers = [
+    "学期",
     "月份",
     "工号",
     "姓名",
@@ -2684,6 +2722,7 @@ export function exportPayrollDetails(db, options = {}) {
         .map((row) => `${row.name}:${row.amount}`)
         .join("；");
     return [
+      detail.termName || payrollDetailTerm(db, detail)?.name || "",
       month,
       teacher?.employeeNo || detail.teacherId,
       teacher?.name || detail.teacherId,
@@ -2713,9 +2752,120 @@ export function exportPayrollDetails(db, options = {}) {
 
   return {
     month,
-    filename: `teacher-payroll-${month}${stageId ? `-${stageId}` : ""}${Number.isFinite(grade) ? `-g${grade}` : ""}.csv`,
+    termId,
+    filename: `teacher-payroll-${month}${termId ? `-${termId}` : ""}${stageId ? `-${stageId}` : ""}${Number.isFinite(grade) ? `-g${grade}` : ""}.csv`,
     total: rows.length,
     content: [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n"),
+  };
+}
+
+function payrollDetailTerm(db, detail) {
+  if (detail?.termId) {
+    return listTerms(db).find((term) => term.id === detail.termId) || { id: detail.termId, name: detail.termName || "" };
+  }
+  return termForMonth(db, detail?.month || "2026-06");
+}
+
+function payrollDetailsByFilter(db, options = {}) {
+  const month = String(options.month || "2026-06");
+  const termId = String(options.termId || "").trim();
+  const stageId = String(options.stageId || "").trim();
+  const grade = Number.isFinite(options.grade)
+    ? options.grade
+    : Number.parseInt(options.grade || "", 10);
+  const search = String(options.search || "").trim().toLowerCase();
+  const status = String(options.status || "").trim();
+  return ensurePayrollDetails(db).filter((detail) => {
+    if (detail.month !== month) return false;
+    if (termId && payrollDetailTerm(db, detail)?.id !== termId) return false;
+    if (status && detail.status !== status) return false;
+    const teacher = findTeacher(db, detail.teacherId);
+    if (!teacher) return !stageId && !Number.isFinite(grade) && !search;
+    if (stageId && teacher.stageId !== stageId) return false;
+    if (Number.isFinite(grade) && !teacherGradeValues(db, teacher).includes(grade)) return false;
+    if (!search) return true;
+    return [
+      teacher.id,
+      teacher.employeeNo,
+      teacher.name,
+      teacher.stageName,
+      gradeCoverageText(db, teacher),
+      teacher.primarySubjectName,
+      teacher.phone,
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(search);
+  });
+}
+
+function payrollHistoryItem(db, detail) {
+  const teacher = findTeacher(db, detail.teacherId);
+  const summary = detail.summarySnapshot || {};
+  return {
+    id: detail.id,
+    teacherId: detail.teacherId,
+    employeeNo: teacher?.employeeNo || detail.teacherId,
+    teacherName: teacher?.name || detail.teacherId,
+    stageId: teacher?.stageId || "",
+    stageName: teacher?.stageName || teacher?.department || "",
+    gradeText: teacher ? gradeCoverageText(db, teacher) : "",
+    subjectName: teacher?.primarySubjectName || teacher?.subject || "",
+    status: detail.status || "generated",
+    generatedAt: detail.generatedAt || "",
+    teacherConfirmedAt: detail.teacherConfirmedAt || "",
+    reviewedAt: detail.reviewedAt || "",
+    lockedAt: detail.lockedAt || "",
+    grossPay: summary.grossPay || 0,
+    tax: summary.tax || 0,
+    netPay: summary.netPay || 0,
+    payableUnits: summary.payableUnits || 0,
+    pendingCount: summary.pendingCount || 0,
+    exceptionCount: summary.exceptionCount || 0,
+  };
+}
+
+export function queryPayrollHistory(db, options = {}) {
+  const month = String(options.month || "2026-06");
+  const termId = String(options.termId || termForMonth(db, month).id).trim();
+  const details = payrollDetailsByFilter(db, { ...options, month, termId }).sort((a, b) => {
+    const teacherA = findTeacher(db, a.teacherId);
+    const teacherB = findTeacher(db, b.teacherId);
+    return `${teacherA?.stageId || ""}-${teacherA?.employeeNo || a.teacherId}`.localeCompare(
+      `${teacherB?.stageId || ""}-${teacherB?.employeeNo || b.teacherId}`,
+      "zh-CN",
+    );
+  });
+  const items = details.map((detail) => payrollHistoryItem(db, detail));
+  const statusCounts = items.reduce(
+    (counts, item) => {
+      counts[item.status] = (counts[item.status] || 0) + 1;
+      return counts;
+    },
+    {},
+  );
+  const lockedItems = items.filter((item) => item.status === "locked");
+  const sumBy = (rows, key) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+  const term = termId ? listTerms(db).find((item) => item.id === termId) || { id: termId, name: "" } : termForMonth(db, month);
+  return {
+    term: {
+      id: term?.id || termId,
+      name: term?.name || "",
+    },
+    month,
+    summary: {
+      totalCount: items.length,
+      lockedCount: lockedItems.length,
+      generatedCount: items.length - lockedItems.length,
+      paidGrossPay: sumBy(lockedItems, "grossPay"),
+      paidTax: sumBy(lockedItems, "tax"),
+      paidNetPay: sumBy(lockedItems, "netPay"),
+      grossPay: sumBy(items, "grossPay"),
+      tax: sumBy(items, "tax"),
+      netPay: sumBy(items, "netPay"),
+      statusCounts,
+    },
+    items,
   };
 }
 

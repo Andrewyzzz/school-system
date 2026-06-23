@@ -129,6 +129,10 @@
             <span aria-hidden="true">¥</span>
             薪资结算
           </button>
+          <button class="nav-item" data-view="payrollHistory" data-role="finance,admin" type="button">
+            <span aria-hidden="true">▥</span>
+            工资记录
+          </button>
           <button class="nav-item" data-view="payrollConfig" data-role="finance,admin" type="button">
             <span aria-hidden="true">⚙</span>
             薪资配置
@@ -1510,6 +1514,39 @@
               </div>
               <span class="status-pill" id="settlementStatus">未结算</span>
             </div>
+	            <section class="settlement-flow-band" aria-labelledby="settlementFlowTitle">
+	              <div class="settlement-band-heading settlement-flow-heading">
+	                <div>
+	                  <h3 id="settlementFlowTitle">本月结算流程</h3>
+	                  <p id="settlementNextAction">先保存单个老师工资草稿，再统一发布本月工资明细。</p>
+	                </div>
+	                <div class="settlement-month-progress" id="settlementMonthProgress" aria-label="本月工资保存进度"></div>
+	              </div>
+	              <div class="settlement-workflow-steps" id="settlementWorkflowSteps"></div>
+	              <div class="settlement-actions">
+	                <div class="settlement-action-group">
+	                  <span>本月发布与导出</span>
+	                  <button class="ghost-button" id="batchGeneratePayroll" type="button">
+	                    发布本月工资明细
+	                  </button>
+	                  <button class="ghost-button" id="exportPayrollCsv" type="button">
+	                    导出工资明细
+	                  </button>
+	                </div>
+	                <div class="settlement-action-group finance-only-actions">
+	                  <span>财务结算</span>
+	                  <button class="ghost-button" id="reviewTeacherPayroll" type="button">
+	                    异议已处理/确认无误
+	                  </button>
+	                  <button class="primary-button" id="settleTeacherPayroll" type="button">
+	                    锁定该老师工资
+	                  </button>
+	                  <button class="ghost-button" id="unlockTeacherPayroll" type="button">
+	                    解锁重算
+	                  </button>
+	                </div>
+	              </div>
+	            </section>
             <div class="settlement-filter-band" aria-label="薪资结算老师筛选">
               <div class="settlement-filter-heading">
                 <div>
@@ -1535,10 +1572,10 @@
                   <select class="lesson-select" id="settlementTeacherSelect"></select>
                 </label>
                 <button class="ghost-button" id="settlementTeacherSearchButton" type="button">查询</button>
-              </div>
-              <section class="settlement-status-board" id="settlementStatusBoard" aria-label="老师工资结算状态"></section>
-            </div>
-            <div class="settlement-teacher-card" id="settlementTeacherCard">
+	              </div>
+	              <section class="settlement-status-board" id="settlementStatusBoard" aria-label="老师工资结算状态"></section>
+	            </div>
+	            <div class="settlement-teacher-card" id="settlementTeacherCard">
               <div>
                 <span>当前老师</span>
                 <strong>请选择老师</strong>
@@ -1664,45 +1701,16 @@
               </section>
               <input id="salaryManualItemsJson" type="hidden" value="[]" />
             </section>
-            <section class="settlement-flow-band" aria-labelledby="settlementFlowTitle">
+	            <section class="settlement-detail-panel" aria-labelledby="settlementDetailTitle">
               <div class="settlement-band-heading">
-                <div>
-                  <h3 id="settlementFlowTitle">结算流程</h3>
-                  <p id="settlementNextAction">先生成本月工资明细，再等待老师确认或提出异议。</p>
-                </div>
-              </div>
-              <div class="settlement-workflow-steps" id="settlementWorkflowSteps"></div>
-              <div class="settlement-actions">
-                <div class="settlement-action-group">
-                  <span>生成与导出</span>
-                  <button class="ghost-button" id="batchGeneratePayroll" type="button">
-                    生成本月工资
-                  </button>
-                  <button class="ghost-button" id="exportPayrollCsv" type="button">
-                    导出工资明细
-                  </button>
-                </div>
-                <div class="settlement-action-group finance-only-actions">
-                  <span>财务结算</span>
-                  <button class="ghost-button" id="reviewTeacherPayroll" type="button">
-                    异议已处理/确认无误
-                  </button>
-                  <button class="primary-button" id="settleTeacherPayroll" type="button">
-                    锁定该老师工资
-                  </button>
-                  <button class="ghost-button" id="unlockTeacherPayroll" type="button">
-                    解锁重算
-                  </button>
-                </div>
-              </div>
-            </section>
-            <section class="settlement-detail-panel" aria-labelledby="settlementDetailTitle">
-              <div class="settlement-band-heading">
-                <div>
-                  <h3 id="settlementDetailTitle">工资明细</h3>
-                  <p>仅展示该老师本月当前薪资快照，未锁定前可重新生成。</p>
-                </div>
-              </div>
+	                <div>
+	                  <h3 id="settlementDetailTitle">工资明细</h3>
+	                  <p>检查该老师本月工资构成，确认无误后先保存为财务草稿。</p>
+	                </div>
+	                <div class="settlement-band-actions">
+	                  <button class="primary-button" id="saveTeacherPayrollDraft" type="button">保存该老师工资</button>
+	                </div>
+	              </div>
               <div class="table-wrap">
                 <table>
                   <thead>
@@ -1716,6 +1724,66 @@
                 </table>
               </div>
             </section>
+          </section>
+        </section>
+
+        <section class="view" id="payrollHistoryView" aria-labelledby="payrollHistoryTitle">
+          <section class="panel table-panel payroll-history-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="payrollHistoryTitle">历史工资记录</h2>
+                <p>按学期和月份查看已发工资汇总，并导出当月老师工资明细 CSV。</p>
+              </div>
+              <button class="ghost-button" id="exportPayrollHistoryCsv" type="button">导出明细 CSV</button>
+            </div>
+            <div class="finance-list-toolbar payroll-history-toolbar" aria-label="历史工资筛选">
+              <label class="field-label" for="payrollHistoryTermSelect">
+                学期
+                <select class="lesson-select" id="payrollHistoryTermSelect"></select>
+              </label>
+              <label class="field-label" for="payrollHistoryMonthSelect">
+                月份
+                <select class="lesson-select" id="payrollHistoryMonthSelect"></select>
+              </label>
+              <button class="ghost-button" id="queryPayrollHistory" type="button">查询</button>
+            </div>
+            <div class="salary-total payroll-history-summary">
+              <div>
+                <span>当月已发实发</span>
+                <strong id="payrollHistoryPaidNet">¥0</strong>
+              </div>
+              <div>
+                <span>已发应发</span>
+                <strong id="payrollHistoryPaidGross">¥0</strong>
+              </div>
+              <div>
+                <span>已代扣个税</span>
+                <strong id="payrollHistoryPaidTax">¥0</strong>
+              </div>
+              <div>
+                <span>工资单状态</span>
+                <strong id="payrollHistoryCount">0 / 0</strong>
+              </div>
+            </div>
+            <div class="payroll-history-note" id="payrollHistoryNote">选择学期和月份后查看工资记录。</div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>工号</th>
+                    <th>老师</th>
+                    <th>学部/年级</th>
+                    <th>科目</th>
+                    <th>状态</th>
+                    <th>应发</th>
+                    <th>个税</th>
+                    <th>实发</th>
+                    <th>锁定时间</th>
+                  </tr>
+                </thead>
+                <tbody id="payrollHistoryTable"></tbody>
+              </table>
+            </div>
           </section>
         </section>
 

@@ -54,6 +54,7 @@ import {
   markNotificationRead,
   publicAccount,
   queryNotifications,
+  queryPayrollHistory,
   queryPersonnel,
   queryTeacherAttendanceRecords,
   queryTeacherAssignments,
@@ -224,6 +225,14 @@ function teacherPayrollForConfirmation(payroll) {
           lockedAt: payroll.generated.lockedAt,
         }
       : null,
+	  };
+	}
+
+function teacherVisiblePayroll(payroll) {
+  if (!payroll?.generated || payroll.generated.status !== "saved") return payroll;
+  return {
+    ...payroll,
+    generated: null,
   };
 }
 
@@ -970,17 +979,18 @@ async function handleApi(req, res, db, url) {
           await saveDatabase(db);
         }
         const month = url.searchParams.get("month") || "2026-06";
-        const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
-        const wantsConfirmationDetail = url.searchParams.get("detail") === "confirmation";
-        sendJson(
-          res,
-          200,
-          auth.account.role === "teacher"
-            ? wantsConfirmationDetail
-              ? teacherPayrollForConfirmation(payroll)
-              : teacherPayrollSummaryOnly(payroll)
-            : payroll,
-        );
+	        const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
+	        const visiblePayroll = auth.account.role === "teacher" ? teacherVisiblePayroll(payroll) : payroll;
+	        const wantsConfirmationDetail = url.searchParams.get("detail") === "confirmation";
+	        sendJson(
+	          res,
+	          200,
+	          auth.account.role === "teacher"
+	            ? wantsConfirmationDetail
+	              ? teacherPayrollForConfirmation(visiblePayroll)
+	              : teacherPayrollSummaryOnly(visiblePayroll)
+	            : visiblePayroll,
+	        );
         return;
       }
 
@@ -1079,6 +1089,13 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, exportPayrollDetails(db, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/payroll/history") {
+      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      if (!auth) return;
+      sendJson(res, 200, queryPayrollHistory(db, Object.fromEntries(url.searchParams)));
       return;
     }
 

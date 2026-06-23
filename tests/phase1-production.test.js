@@ -11,9 +11,11 @@ import {
   exportPayrollDetails,
   findActiveSession,
   generateTeacherPayrollDetail,
+  confirmTeacherPayrollDetail,
   lockTeacherPayrollDetail,
   markNotificationRead,
   publicAccount,
+  publishTeacherPayrollDetail,
   queryTerms,
   queryNotifications,
   reviewTeacherPayrollDetail,
@@ -714,7 +716,7 @@ assert.equal(markNotificationRead(db, notice.id, teacherAccount).read, true);
 prepareCompletedMonth(db, teacher.id);
 assert.throws(
   () => reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance),
-  /老师确认、教务审批和总校审批/,
+  /请先由财务生成本月工资明细/,
 );
 
 let workload = confirmMonthlyWorkload(db, teacher.id, "2026-06", teacherAccount);
@@ -727,7 +729,17 @@ workload = approveMonthlyWorkload(db, teacher.id, "2026-06", "school", admin);
 assert.equal(workload.confirmation.status, "school_approved");
 
 let payroll = generateTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
+assert.equal(payroll.generated.status, "saved");
+assert.equal(payroll.generated.publishedAt, "");
+
+assert.throws(
+  () => reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance),
+  /请先由老师确认工资明细或提出异议/,
+);
+
+payroll = publishTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "generated");
+assert.ok(payroll.generated.publishedAt);
 assert.equal(payroll.salarySchemeVersion, "fuyuan-dedicated-teacher-2026-v1");
 assert.ok(payroll.rows.some((row) => row.name === "考核工资"), "expected assessment salary row");
 assert.ok(payroll.rows.some((row) => row.name === "校龄工资"), "expected seniority salary row");
@@ -738,6 +750,9 @@ assert.ok(
   "lesson salary should use actual completed lessons",
 );
 assert.ok(payroll.lines.every((line) => line.basis), "expected every lesson line to explain basis");
+
+payroll = confirmTeacherPayrollDetail(db, teacher.id, "2026-06", teacherAccount);
+assert.equal(payroll.generated.status, "teacher_confirmed");
 
 payroll = reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "reviewed");
@@ -778,9 +793,15 @@ const profileUpdate = updateTeacherSalaryProfile(
 assert.equal(profileUpdate.invalidatedPayrollCount, 1);
 
 payroll = generateTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
+assert.equal(payroll.generated.status, "saved");
+
+payroll = publishTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "generated");
 assert.ok(payroll.rows.some((row) => row.name === "班主任津贴"), "expected updated salary profile to affect payroll");
 assert.ok(payroll.rows.some((row) => row.name === "测试补充项"), "expected manual salary item to affect payroll");
+
+payroll = confirmTeacherPayrollDetail(db, teacher.id, "2026-06", teacherAccount);
+assert.equal(payroll.generated.status, "teacher_confirmed");
 
 payroll = reviewTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "reviewed");
