@@ -3481,6 +3481,11 @@ td {
   background: var(--primary-soft);
 }
 
+.confirm-step.current {
+  border-color: rgba(238, 17, 35, 0.32);
+  background: #fff7f7;
+}
+
 .workload-list {
   display: grid;
   gap: 10px;
@@ -3498,6 +3503,31 @@ td {
 .workload-item strong {
   font-size: 18px;
   white-space: nowrap;
+}
+
+.teacher-payroll-confirm-list {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+}
+
+.teacher-payroll-confirm-list h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.payroll-line-item {
+  background: #fff;
+}
+
+.dispute-field {
+  margin-top: 14px;
+}
+
+.dispute-note {
+  text-align: left;
 }
 
 .salary-total {
@@ -3860,7 +3890,7 @@ td {
 
 .settlement-filter-band,
 .settlement-teacher-card,
-.settlement-calculation-panel,
+.settlement-profile-panel,
 .settlement-flow-band,
 .settlement-detail-panel,
 .settlement-config-details {
@@ -3873,6 +3903,29 @@ td {
 .settlement-filter-band {
   padding: 16px;
   background: var(--surface-soft);
+  display: grid;
+  gap: 14px;
+}
+
+.settlement-filter-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.settlement-filter-heading div {
+  display: grid;
+  gap: 4px;
+}
+
+.settlement-filter-heading strong {
+  font-size: 16px;
+}
+
+.settlement-filter-heading span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .settlement-filter-band .finance-list-toolbar {
@@ -3883,6 +3936,175 @@ td {
 
 .settlement-filter-band .field-label {
   margin-bottom: 0;
+}
+
+.settlement-status-board {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  background: transparent;
+}
+
+.settlement-status-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.settlement-status-heading div {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.settlement-status-heading strong {
+  font-size: 16px;
+}
+
+.settlement-status-heading span,
+.settlement-status-heading small,
+.settlement-status-row small,
+.settlement-status-row em {
+  color: var(--muted);
+}
+
+.settlement-status-counts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+}
+
+.settlement-status-count {
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.settlement-status-count strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.settlement-status-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+}
+
+.settlement-status-row {
+  min-height: 54px;
+  padding: 9px 12px 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: 108px minmax(92px, 0.8fr) minmax(180px, 1.4fr) minmax(180px, 1.2fr);
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+}
+
+.settlement-status-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  background: #94a3b8;
+}
+
+.settlement-status-row-state {
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.settlement-status-row strong {
+  font-size: 16px;
+  line-height: 1.2;
+  color: var(--ink);
+}
+
+.settlement-status-row small,
+.settlement-status-row em {
+  line-height: 1.45;
+  font-style: normal;
+}
+
+.settlement-status-row.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(0, 32, 104, 0.08), var(--shadow);
+}
+
+.settlement-status-row.status-missing::before {
+  background: #94a3b8;
+}
+
+.settlement-status-row.status-generated::before {
+  background: #f59e0b;
+}
+
+.settlement-status-row.status-teacher_confirmed::before {
+  background: #2563eb;
+}
+
+.settlement-status-row.status-disputed::before {
+  background: var(--danger);
+}
+
+.settlement-status-row.status-reviewed::before {
+  background: #7c3aed;
+}
+
+.settlement-status-row.status-locked::before {
+  background: #059669;
+}
+
+.settlement-status-row.status-disputed,
+.settlement-status-count.status-disputed {
+  border-color: rgba(190, 18, 60, 0.24);
+  background: var(--rose-soft);
+}
+
+.settlement-status-row.status-disputed .settlement-status-row-state {
+  color: var(--danger);
+  background: #fff;
+}
+
+.settlement-status-row.status-locked,
+.settlement-status-count.status-locked {
+  border-color: rgba(5, 150, 105, 0.24);
+  background: #ecfdf5;
+}
+
+.settlement-status-row.status-teacher_confirmed .settlement-status-row-state,
+.settlement-status-row.status-reviewed .settlement-status-row-state,
+.settlement-status-row.status-locked .settlement-status-row-state {
+  color: var(--primary-strong);
+  background: #fff;
 }
 
 .settlement-teacher-card {
@@ -3930,7 +4152,7 @@ td {
 }
 
 .settlement-flow-band,
-.settlement-calculation-panel,
+.settlement-profile-panel,
 .settlement-detail-panel {
   padding: 16px;
 }
@@ -3941,6 +4163,14 @@ td {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 14px;
+}
+
+.settlement-band-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .settlement-band-heading h3 {
@@ -4051,86 +4281,6 @@ td {
   background: var(--surface-soft);
   border-color: var(--line);
   box-shadow: none;
-}
-
-.settlement-calculation-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.settlement-calc-item {
-  min-height: 150px;
-  padding: 14px;
-  display: grid;
-  align-content: space-between;
-  gap: 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-soft);
-}
-
-.settlement-calc-item div:first-child {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.settlement-calc-item span {
-  color: var(--muted);
-  font-weight: 800;
-}
-
-.settlement-calc-item strong {
-  color: var(--primary-strong);
-  font-size: 22px;
-  white-space: nowrap;
-}
-
-.settlement-calc-item p,
-.settlement-calc-item small,
-.settlement-calc-item em {
-  margin: 0;
-  color: var(--muted);
-  line-height: 1.55;
-}
-
-.settlement-calc-item small {
-  color: var(--ink);
-}
-
-.lesson-calc-item {
-  grid-column: span 2;
-  background: #fff;
-}
-
-.settlement-lesson-samples {
-  display: grid;
-  gap: 6px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.settlement-lesson-samples li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--surface-soft);
-}
-
-.settlement-lesson-samples li span {
-  min-width: 0;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-
-.settlement-lesson-samples li strong {
-  font-size: 15px;
 }
 
 .settlement-detail-panel .table-wrap {
@@ -4254,20 +4404,17 @@ td {
   line-height: 1.55;
 }
 
-.payroll-scheme-grid,
-.manual-item-form {
+.payroll-scheme-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
-.payroll-scheme-grid .field-label,
-.manual-item-form .field-label {
+.payroll-scheme-grid .field-label {
   margin-bottom: 0;
 }
 
-.payroll-scheme-grid input,
-.manual-item-form input {
+.payroll-scheme-grid input {
   min-height: 42px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -4289,11 +4436,35 @@ td {
 }
 
 .manual-item-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 150px 150px minmax(180px, 1fr) 150px;
+  gap: 10px;
   align-items: end;
 }
 
-.manual-item-form button {
+.manual-item-form .field-label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.manual-item-form input,
+.manual-item-form select {
+  width: 100%;
+  height: 42px;
   min-height: 42px;
+  box-sizing: border-box;
+  margin-bottom: 0;
+  border-radius: 8px;
+  line-height: 40px;
+}
+
+.manual-item-form button {
+  width: 100%;
+  min-height: 42px;
+  align-self: end;
+  white-space: nowrap;
 }
 
 .manual-item-list {
@@ -4332,6 +4503,25 @@ td {
   color: var(--action);
 }
 
+.settlement-profile-panel.is-readonly input:disabled,
+.settlement-profile-panel.is-readonly select:disabled,
+.settlement-profile-panel.is-readonly textarea:disabled {
+  color: var(--ink);
+  background: #f8fafb;
+  opacity: 1;
+}
+
+.settlement-summary-row td {
+  border-top: 1px solid var(--line);
+  background: var(--surface-soft);
+  font-weight: 800;
+}
+
+.settlement-summary-row.final-total td {
+  color: var(--primary-strong);
+  background: rgba(0, 32, 104, 0.06);
+}
+
 .mini-button.danger {
   color: var(--action);
   border-color: rgba(188, 0, 12, 0.22);
@@ -4345,6 +4535,26 @@ td {
   cursor: pointer;
   color: var(--primary);
   font-weight: 800;
+}
+
+.advanced-json-details p,
+.advanced-json-details small {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.advanced-json-details p {
+  margin: 8px 0 12px;
+}
+
+.advanced-json-details small {
+  display: block;
+  font-weight: 500;
+}
+
+.payroll-tax-grid {
+  margin-top: 12px;
+  max-width: 560px;
 }
 
 .full-field {
@@ -4378,16 +4588,134 @@ td {
 .checkbox-grid.salary-role-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px 12px;
-  margin-top: 12px;
+  gap: 10px;
+  margin-top: 14px;
 }
 
 .salary-role-grid label {
-  display: inline-flex;
+  position: relative;
+  display: block;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.salary-role-grid input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.salary-role-grid span {
+  min-height: 40px;
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   color: var(--muted);
+  background: #fff;
+  font-weight: 750;
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.salary-role-grid span::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface-soft);
+}
+
+.salary-role-grid input:checked + span {
+  border-color: rgba(188, 0, 12, 0.32);
+  color: var(--action);
+  background: rgba(188, 0, 12, 0.06);
+}
+
+.salary-role-grid input:checked + span::before {
+  content: "✓";
+  display: grid;
+  place-items: center;
+  border-color: var(--action);
+  color: #fff;
+  background: var(--action);
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.salary-role-grid input:focus-visible + span {
+  outline: 3px solid rgba(188, 0, 12, 0.18);
+  outline-offset: 2px;
+}
+
+.salary-role-grid input:disabled + span {
+  cursor: default;
+  opacity: 0.78;
+}
+
+.homeroom-student-field {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(188, 0, 12, 0.18);
+  border-radius: 8px;
+  background: rgba(188, 0, 12, 0.04);
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+}
+
+.homeroom-student-field[hidden] {
+  display: none;
+}
+
+.homeroom-student-field .field-label {
+  margin-bottom: 0;
+}
+
+.homeroom-student-field p {
+  margin: 0 0 7px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.special-employment-details {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.special-employment-details summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--primary);
+  font-weight: 800;
+  list-style-position: inside;
+}
+
+.special-employment-grid {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+  padding: 0 14px 14px;
+}
+
+.special-employment-grid .field-label {
+  margin-bottom: 0;
+}
+
+.special-employment-grid p {
+  margin: 0 0 7px;
+  color: var(--muted);
+  line-height: 1.55;
 }
 
 .warning-item {
@@ -4474,6 +4802,10 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .settlement-status-row {
+    grid-template-columns: 104px minmax(88px, 0.7fr) minmax(160px, 1.3fr) minmax(150px, 1fr);
+  }
+
   .schedule-readiness-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -4522,6 +4854,10 @@ td {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .special-employment-grid {
+    grid-template-columns: 1fr;
+  }
+
   .compact-field {
     max-width: none;
   }
@@ -4567,7 +4903,6 @@ td {
   .salary-total,
   .settlement-workflow-steps,
   .settlement-actions,
-  .settlement-calculation-grid,
   .payroll-scheme-grid,
   .manual-item-form,
   .payroll-rule-grid,
@@ -5425,7 +5760,7 @@ td {
 
   .settlement-filter-band,
   .settlement-teacher-card,
-  .settlement-calculation-panel,
+  .settlement-profile-panel,
   .settlement-flow-band,
   .settlement-detail-panel,
   .payroll-config-layout,
@@ -5442,16 +5777,33 @@ td {
     justify-content: flex-start;
   }
 
+  .settlement-status-row {
+    grid-template-columns: 1fr auto;
+    gap: 6px 10px;
+    padding: 10px 12px 10px 14px;
+  }
+
+  .settlement-status-row-state {
+    grid-column: 1;
+  }
+
+  .settlement-status-row strong {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .settlement-status-row small,
+  .settlement-status-row em {
+    grid-column: 1 / -1;
+  }
+
+  .settlement-status-heading {
+    align-items: flex-start;
+    display: grid;
+  }
+
   .settlement-step {
     min-height: auto;
-  }
-
-  .lesson-calc-item {
-    grid-column: auto;
-  }
-
-  .settlement-lesson-samples li {
-    display: grid;
   }
 
   .manual-item-row {

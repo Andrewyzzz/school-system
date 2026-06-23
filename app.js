@@ -801,6 +801,8 @@ let financeTeacherDetailState = {
   payroll: null,
   payrollGenerated: false,
 };
+let salaryProfileEditMode = false;
+let salaryProfilePanelCurrentProfile = null;
 let teacherImportState = {
   csvText: "",
   preview: null,
@@ -959,10 +961,10 @@ const statusLabel = {
 };
 
 const confirmSteps = [
-  { label: "第 1 步", title: "系统生成月度工作量" },
-  { label: "第 2 步", title: "老师确认课时与补贴" },
-  { label: "第 3 步", title: "学部教务审批" },
-  { label: "第 4 步", title: "总校审批锁定" },
+  { label: "第 1 步", title: "财务生成工资明细" },
+  { label: "第 2 步", title: "老师确认或提出异议" },
+  { label: "第 3 步", title: "财务处理异议" },
+  { label: "第 4 步", title: "锁定发放" },
 ];
 
 function clone(value) {
@@ -1132,6 +1134,7 @@ function resetTeacherPayrollState() {
 }
 
 function resetFinanceTeacherDetailState() {
+  salaryProfileEditMode = false;
   financeTeacherDetailState = {
     teacherId: "",
     month: "2026-06",
@@ -2537,6 +2540,67 @@ function salaryRows(teacherId) {
   ];
 }
 
+function normalizeSettlementRows(rows = []) {
+  return rows.map((row) =>
+    Array.isArray(row)
+      ? { name: row[0], basis: row[1], amount: row[2] || 0, category: "preview" }
+      : { ...row, amount: Number(row.amount || 0) },
+  );
+}
+
+function settlementTotalsFromRows(rows = [], fallback = {}) {
+  const normalizedRows = normalizeSettlementRows(rows);
+  if (!normalizedRows.length) {
+    return {
+      gross: Number(fallback.gross || 0),
+      tax: Number(fallback.tax || 0),
+      net: Number(fallback.net || 0),
+    };
+  }
+  const taxRows = normalizedRows.filter((row) => row.name === "个税代扣");
+  const gross = normalizedRows
+    .filter((row) => row.name !== "个税代扣")
+    .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const tax = Math.abs(taxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
+  const net = normalizedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  return { gross, tax, net };
+}
+
+function settlementSalaryRowsHtml(rows = [], fallback = {}) {
+  const normalizedRows = normalizeSettlementRows(rows);
+  if (!normalizedRows.length) return "";
+  const totals = settlementTotalsFromRows(normalizedRows, fallback);
+  const lineRows = normalizedRows
+    .map(
+      (row) => `
+        <tr>
+          <td class="row-title" data-label="薪资项目">${row.name}</td>
+          <td class="muted" data-label="计算口径">${humanizePayrollBasis(row.basis)}</td>
+          <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  return `
+    ${lineRows}
+    <tr class="settlement-summary-row">
+      <td class="row-title" data-label="薪资项目">应发合计</td>
+      <td class="muted" data-label="计算口径">明细中除个税代扣外的项目合计，包含特殊奖扣</td>
+      <td data-label="金额">${formatCurrency(totals.gross)}</td>
+    </tr>
+    <tr class="settlement-summary-row">
+      <td class="row-title" data-label="薪资项目">代扣个税</td>
+      <td class="muted" data-label="计算口径">按当前个税规则从应发合计中试算</td>
+      <td data-label="金额">-${formatCurrency(totals.tax)}</td>
+    </tr>
+    <tr class="settlement-summary-row final-total">
+      <td class="row-title" data-label="薪资项目">实发合计</td>
+      <td class="muted" data-label="计算口径">应发合计 - 代扣个税</td>
+      <td data-label="金额">${formatCurrency(totals.net)}</td>
+    </tr>
+  `;
+}
+
 function teacherLessonStats(teacherId) {
   const lessons = teacherLessons(teacherId);
   return {
@@ -2653,11 +2717,108 @@ function financeTeacherSelectOptions(selectedId = "") {
     .map(
       (teacher) => `
         <option value="${teacher.id}" ${teacher.id === selectedId ? "selected" : ""}>
-          ${teacher.name} · ${backendTeacherDepartment(teacher)} · ${financeTeacherPage.grade ? financeGradeLabel(financeTeacherPage.grade) : teacher.gradeText || teacher.grade || "年级未设置"} · ${backendTeacherSubject(teacher)}
+          ${teacher.name} · ${backendTeacherDepartment(teacher)} · ${financeTeacherPage.grade ? financeGradeLabel(financeTeacherPage.grade) : teacher.gradeText || teacher.grade || "年级未设置"} · ${backendTeacherSubject(teacher)} · ${settlementTeacherStatusLabel(teacher)}
         </option>
       `,
     )
     .join("");
+}
+
+const settlementStatusGroups = [
+  { key: "missing", label: "未生成工资", hint: "财务还没有生成本月工资明细" },
+  { key: "generated", label: "等待确认", hint: "已生成，等待老师确认或提出异议" },
+  { key: "teacher_confirmed", label: "老师已确认", hint: "老师已确认工资明细，等待财务处理" },
+  { key: "disputed", label: "有异议", hint: "老师已提交异议，财务需要处理" },
+  { key: "reviewed", label: "待锁定", hint: "财务已处理，等待锁定发放" },
+  { key: "locked", label: "已完成", hint: "工资已锁定发放" },
+];
+
+function settlementTeacherStatusKey(teacher = {}) {
+  return teacher.payrollDetail?.status || (teacher.payroll?.status && teacher.payroll.status !== "preview" ? teacher.payroll.status : "missing");
+}
+
+function settlementTeacherStatusLabel(teacher = {}) {
+  const key = settlementTeacherStatusKey(teacher);
+  return settlementStatusGroups.find((group) => group.key === key)?.label || payrollStatusLabel(key);
+}
+
+function renderSettlementStatusBoard() {
+  const board = document.querySelector("#settlementStatusBoard");
+  if (!board) return;
+
+  if (financeTeacherPage.loading && !financeTeacherPage.items.length) {
+    board.innerHTML = `<div class="empty-state compact">正在加载老师结算状态...</div>`;
+    return;
+  }
+
+  if (financeTeacherPage.error) {
+    board.innerHTML = `<div class="empty-state compact">${escapeHtml(financeTeacherPage.error)}</div>`;
+    return;
+  }
+
+  const teachers = financeFilteredTeacherItems();
+  if (!teachers.length) {
+    board.innerHTML = `<div class="empty-state compact">当前筛选下暂无老师，换个学部、年级或搜索条件试试。</div>`;
+    return;
+  }
+
+  const groups = settlementStatusGroups.map((group) => ({
+    ...group,
+    teachers: teachers.filter((teacher) => settlementTeacherStatusKey(teacher) === group.key),
+  }));
+  const orderedTeachers = groups.flatMap((group) => group.teachers.map((teacher) => ({ teacher, group })));
+  const totalText = financeTeacherPage.meta?.total
+    ? `当前显示 ${teachers.length} 位 / 筛选结果 ${financeTeacherPage.meta.total} 位`
+    : `当前筛选 ${teachers.length} 位老师`;
+
+  board.innerHTML = `
+    <div class="settlement-status-heading">
+      <div>
+        <strong>老师工资状态</strong>
+        <span>${escapeHtml(totalText)}</span>
+      </div>
+      <small>点击任意老师行，直接切换到对应工资单</small>
+    </div>
+    <div class="settlement-status-counts" aria-label="工资状态人数">
+      ${groups
+        .map(
+          (group) => `
+            <span class="settlement-status-count status-${group.key}">
+              ${escapeHtml(group.label)}
+              <strong>${group.teachers.length}</strong>
+            </span>
+          `,
+        )
+        .join("")}
+    </div>
+    <div class="settlement-status-list" aria-label="当前筛选老师工资状态列表">
+      ${orderedTeachers
+        .map(({ teacher, group }) => {
+          const teacherMeta = [
+            backendTeacherDepartment(teacher),
+            financeTeacherPage.grade ? financeGradeLabel(financeTeacherPage.grade) : teacher.gradeText || teacher.grade || "年级未设置",
+            backendTeacherSubject(teacher),
+            teacher.id,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          return `
+            <button
+              class="settlement-status-row status-${group.key} ${teacher.id === state.selectedFinanceTeacherId ? "active" : ""}"
+              data-settlement-status-teacher="${escapeHtml(teacher.id)}"
+              title="${escapeHtml(group.hint)}"
+              type="button"
+            >
+              <span class="settlement-status-row-state">${escapeHtml(group.label)}</span>
+              <strong>${escapeHtml(teacher.name)}</strong>
+              <small>${escapeHtml(teacherMeta)}</small>
+              <em>${escapeHtml(group.hint)}</em>
+            </button>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
 }
 
 function renderFinanceTeacherFilters(context = "overview") {
@@ -2679,12 +2840,6 @@ function renderFinanceTeacherFilters(context = "overview") {
       grade: "#settlementGradeFilter",
       search: "#settlementTeacherSearch",
       teacher: "#settlementTeacherSelect",
-    },
-    payrollConfig: {
-      stage: "#payrollConfigStageFilter",
-      grade: "#payrollConfigGradeFilter",
-      search: "#payrollConfigTeacherSearch",
-      teacher: "#payrollConfigTeacherSelect",
     },
   }[context];
   if (!map) return;
@@ -2719,11 +2874,6 @@ function financeReadFilterInputs(context = "overview") {
       stage: "#settlementStageFilter",
       grade: "#settlementGradeFilter",
       search: "#settlementTeacherSearch",
-    },
-    payrollConfig: {
-      stage: "#payrollConfigStageFilter",
-      grade: "#payrollConfigGradeFilter",
-      search: "#payrollConfigTeacherSearch",
     },
   }[context];
   if (!map) return {};
@@ -2881,21 +3031,26 @@ function ensureBackendAttendanceRecords(teacherId, month = "2026-06") {
   }
 }
 
-async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month = "2026-06") {
+async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month = "2026-06", options = {}) {
   if (!backendMode() || !teacherId) return;
+  const detail = Boolean(options.detail);
   teacherPayrollState = {
     ...teacherPayrollState,
     teacherId,
     month,
+    detail,
     loading: true,
     error: "",
   };
 
   try {
-    const data = await apiRequest(`/api/teachers/${teacherId}/payroll?month=${month}`);
+    const params = new URLSearchParams({ month });
+    if (detail) params.set("detail", "confirmation");
+    const data = await apiRequest(`/api/teachers/${teacherId}/payroll?${params.toString()}`);
     teacherPayrollState = {
       teacherId,
       month,
+      detail,
       loading: false,
       loaded: true,
       error: "",
@@ -2906,6 +3061,7 @@ async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month =
       ...teacherPayrollState,
       teacherId,
       month,
+      detail,
       loading: false,
       loaded: true,
       error: error.message || "总薪资加载失败",
@@ -2916,13 +3072,15 @@ async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month =
   if (["dashboard", "confirm", "teacherPayroll"].includes(state.activeView)) render();
 }
 
-function ensureBackendTeacherPayroll(teacherId, month = "2026-06") {
+function ensureBackendTeacherPayroll(teacherId, month = "2026-06", options = {}) {
+  const detail = Boolean(options.detail);
   const needsPayroll =
     teacherPayrollState.teacherId !== teacherId ||
     teacherPayrollState.month !== month ||
-    !teacherPayrollState.loaded;
+    !teacherPayrollState.loaded ||
+    (detail && !teacherPayrollState.detail);
   if (!teacherPayrollState.loading && needsPayroll) {
-    loadBackendTeacherPayroll(teacherId, month);
+    loadBackendTeacherPayroll(teacherId, month, { detail });
   }
 }
 
@@ -3017,24 +3175,13 @@ async function saveBackendPayrollRules() {
 }
 
 function salaryProfileFromInputs() {
-  let manualItems = [];
-  const manualItemsInput = document.querySelector("#salaryManualItemsJson");
-  if (manualItemsInput?.value?.trim()) {
-    try {
-      manualItems = JSON.parse(manualItemsInput.value);
-      if (!Array.isArray(manualItems)) throw new Error("补充项必须是数组");
-    } catch (error) {
-      throw new Error(`财务补充项 JSON 格式错误：${error.message}`);
-    }
-  }
-
   return {
     qualificationGrade: document.querySelector("#salaryQualificationGrade")?.value || "thirdOrBachelor",
     schoolYears: Number(document.querySelector("#salarySchoolYears")?.value || 0),
     assessmentBand: document.querySelector("#salaryAssessmentBand")?.value || "high",
     housingTier: document.querySelector("#salaryHousingTier")?.value || "teacher",
     probationRate: Number(document.querySelector("#salaryProbationRate")?.value || 1),
-    attendanceDeduction: Number(document.querySelector("#salaryAttendanceDeduction")?.value || 0),
+    attendanceDeduction: 0,
     roles: {
       homeroom: Boolean(document.querySelector("#salaryRoleHomeroom")?.checked),
       homeroomStudentCount: Number(document.querySelector("#salaryHomeroomStudentCount")?.value || 0),
@@ -3045,9 +3192,29 @@ function salaryProfileFromInputs() {
       graduatingClass: Boolean(document.querySelector("#salaryRoleGraduatingClass")?.checked),
       eliteClass: Boolean(document.querySelector("#salaryRoleEliteClass")?.checked),
       qingbeiClass: Boolean(document.querySelector("#salaryRoleQingbeiClass")?.checked),
+      busDuty: Boolean(document.querySelector("#salaryRoleBusDuty")?.checked),
     },
-    manualItems,
   };
+}
+
+function handleTeacherSalaryProfileAction() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
+    showToast("请使用后端财务账号维护教师工资档案");
+    return;
+  }
+  if (!salaryProfileEditMode) {
+    salaryProfileEditMode = true;
+    showToast("已进入编辑模式，本学期档案调整后会影响未锁定工资");
+    render();
+    return;
+  }
+  saveBackendTeacherSalaryProfile();
+}
+
+function cancelTeacherSalaryProfileEdit() {
+  salaryProfileEditMode = false;
+  render();
 }
 
 async function saveBackendTeacherSalaryProfile() {
@@ -3064,7 +3231,7 @@ async function saveBackendTeacherSalaryProfile() {
     return;
   }
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
-  renderPayrollConfig();
+  render();
   try {
     await apiRequest(`/api/teachers/${teacherId}/salary-profile`, {
       method: "PATCH",
@@ -3073,12 +3240,47 @@ async function saveBackendTeacherSalaryProfile() {
     resetFinanceTeacherDetailState();
     financeTeacherPage.loaded = false;
     await loadFinanceTeacherDetail(teacherId, { generatePayroll: false });
+    salaryProfileEditMode = false;
     showToast("教师工资档案已保存，未锁定薪资需重新生成");
   } catch (error) {
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
       loading: false,
       error: error.message || "工资档案保存失败",
+    };
+    showToast(financeTeacherDetailState.error);
+  }
+  render();
+}
+
+async function saveBackendTeacherMonthlyAdjustments() {
+  const teacherId = state.selectedFinanceTeacherId;
+  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
+    showToast("请使用后端财务账号维护本月奖扣");
+    return;
+  }
+  let manualItems;
+  try {
+    manualItems = salaryManualItemsFromInput();
+  } catch (error) {
+    showToast(error.message || "本月奖扣填写有误");
+    return;
+  }
+  financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
+  render();
+  try {
+    await apiRequest(`/api/teachers/${teacherId}/salary-profile`, {
+      method: "PATCH",
+      body: { salaryProfile: { manualItems } },
+    });
+    financeTeacherPage.loaded = false;
+    await loadFinanceTeacherDetail(teacherId, { generatePayroll: false });
+    showToast("本月特殊奖扣已保存，未锁定薪资需重新生成");
+  } catch (error) {
+    financeTeacherDetailState = {
+      ...financeTeacherDetailState,
+      loading: false,
+      error: error.message || "本月奖扣保存失败",
     };
     showToast(financeTeacherDetailState.error);
   }
@@ -3133,9 +3335,9 @@ async function reviewBackendPayroll() {
       payrollGenerated: true,
     };
     financeTeacherPage.loaded = false;
-    showToast("财务复核已通过，可以锁定该老师工资");
+    showToast("工资异议已处理/确认无误，可以锁定该老师工资");
   } catch (error) {
-    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "财务复核失败" };
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "财务处理失败" };
     showToast(financeTeacherDetailState.error);
   }
   render();
@@ -3216,44 +3418,111 @@ function backendWorkloadStage(data) {
   return 0;
 }
 
+function payrollFlowStage(status = "") {
+  if (status === "locked") return 3;
+  if (status === "reviewed") return 2;
+  if (status === "teacher_confirmed" || status === "disputed") return 1;
+  return 0;
+}
+
 async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2026-06") {
   if (!backendMode() || currentRole() !== "teacher" || !teacherId) return;
-  teacherWorkloadState = {
-    ...teacherWorkloadState,
+  teacherPayrollState = {
+    ...teacherPayrollState,
     teacherId,
     month,
+    detail: true,
     loading: true,
     error: "",
   };
   render();
 
   try {
-    const data = await apiRequest(`/api/teachers/${teacherId}/workload/confirm`, {
+    const data = await apiRequest(`/api/teachers/${teacherId}/payroll/teacher-confirm`, {
       method: "POST",
       body: { month },
     });
-    teacherWorkloadState = {
+    teacherPayrollState = {
       teacherId,
       month,
+      detail: true,
       loading: false,
       loaded: true,
       error: "",
       data,
     };
-    state.confirmationStages[teacherId] = backendWorkloadStage(data);
+    state.confirmationStages[teacherId] = payrollFlowStage(data.generated?.status);
     resetTeacherPayrollState();
-    const pendingCount = data.summary?.pendingCount || 0;
-    showToast(pendingCount > 0 ? "已确认，未完成考勤项目暂不计入工资" : "本月工作量已确认");
-  } catch (error) {
-    teacherWorkloadState = {
-      ...teacherWorkloadState,
+    teacherPayrollState = {
       teacherId,
       month,
+      detail: true,
       loading: false,
       loaded: true,
-      error: error.message || "月度工作量确认失败",
+      error: "",
+      data,
     };
-    showToast(error.message || "月度工作量确认失败");
+    showToast("本月工资明细已确认");
+  } catch (error) {
+    teacherPayrollState = {
+      ...teacherPayrollState,
+      teacherId,
+      month,
+      detail: true,
+      loading: false,
+      loaded: true,
+      error: error.message || "工资明细确认失败",
+    };
+    showToast(error.message || "工资明细确认失败");
+  }
+
+  render();
+}
+
+async function disputeBackendPayroll(teacherId = currentTeacherId(), month = "2026-06") {
+  if (!backendMode() || currentRole() !== "teacher" || !teacherId) return;
+  const reason = document.querySelector("#payrollDisputeReason")?.value.trim() || "";
+  if (!reason) {
+    showToast("请先填写异议说明");
+    return;
+  }
+  teacherPayrollState = {
+    ...teacherPayrollState,
+    teacherId,
+    month,
+    detail: true,
+    loading: true,
+    error: "",
+  };
+  render();
+
+  try {
+    const data = await apiRequest(`/api/teachers/${teacherId}/payroll/dispute`, {
+      method: "POST",
+      body: { month, reason },
+    });
+    teacherPayrollState = {
+      teacherId,
+      month,
+      detail: true,
+      loading: false,
+      loaded: true,
+      error: "",
+      data,
+    };
+    state.confirmationStages[teacherId] = payrollFlowStage(data.generated?.status);
+    showToast("工资异议已提交，等待财务处理");
+  } catch (error) {
+    teacherPayrollState = {
+      ...teacherPayrollState,
+      teacherId,
+      month,
+      detail: true,
+      loading: false,
+      loaded: true,
+      error: error.message || "工资异议提交失败",
+    };
+    showToast(error.message || "工资异议提交失败");
   }
 
   render();
@@ -3343,7 +3612,7 @@ async function loadFinanceTeacherPage(overrides = {}) {
     };
   }
 
-  if (["finance", "financeRecords", "settlement", "payrollConfig"].includes(state.activeView)) {
+  if (["finance", "financeRecords", "settlement"].includes(state.activeView)) {
     render();
   }
 }
@@ -3435,7 +3704,7 @@ async function loadFinanceTeacherDetail(
     };
   }
 
-  if (["financeRecords", "settlement", "payrollConfig"].includes(state.activeView)) {
+  if (["financeRecords", "settlement"].includes(state.activeView)) {
     render();
   }
 }
@@ -5709,10 +5978,10 @@ function buildWarnings(teacherId = null) {
 
 function confirmationText(teacherId) {
   const stage = state.confirmationStages[teacherId] || 0;
-  if (stage === 0) return "老师待确认";
+  if (stage === 0) return "工资待确认";
   if (stage === 1) return "老师已确认";
-  if (stage === 2) return "教务已审批";
-  return "总校已审批";
+  if (stage === 2) return "财务处理中";
+  return "已锁定";
 }
 
 function settlementText(teacherId) {
@@ -5730,13 +5999,16 @@ function settlementTag(teacherId) {
 
 function payrollStatusLabel(status = "preview") {
   if (status === "locked") return "已锁定";
-  if (status === "reviewed") return "已复核";
+  if (status === "reviewed") return "财务已处理";
+  if (status === "disputed") return "老师有异议";
+  if (status === "teacher_confirmed") return "老师已确认";
   if (status === "generated") return "已生成";
   return "试算";
 }
 
 function payrollStatusTag(status = "preview") {
-  const className = status === "locked" ? "locked" : status === "reviewed" ? "completed" : "pending";
+  const className =
+    status === "locked" ? "locked" : status === "reviewed" || status === "teacher_confirmed" ? "completed" : status === "disputed" ? "exception" : "pending";
   return `<span class="tag ${className}">${payrollStatusLabel(status)}</span>`;
 }
 
@@ -8668,6 +8940,7 @@ function renderConfirmation() {
     (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
   ).length;
 
+  const localSalaryRows = salaryRows(teacherId);
   document.querySelector("#workloadList").innerHTML = [
     ["正常课时", `${salary.regularUnits} 节`, "签入签出完成后计入月度工作量"],
     ["早晚自习", `${salary.selfStudyUnits} 节`, "签入签出完成后计入月度工作量"],
@@ -8687,10 +8960,28 @@ function renderConfirmation() {
         </div>
       `,
     )
-    .join("");
+    .join("") +
+    `
+      <div class="teacher-payroll-confirm-list">
+        <h3>工资明细</h3>
+        ${localSalaryRows
+          .map(
+            (row) => `
+              <div class="workload-item payroll-line-item">
+                <div>
+                  <span>${escapeHtml(row.name)}</span>
+                  <p class="muted">${escapeHtml(row.basis)}</p>
+                </div>
+                <strong>${formatCurrency(row.amount)}</strong>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
 
   document.querySelector("#confirmWorkload").disabled = stage > 0;
-  document.querySelector("#simulateApproval").disabled = stage === 0 || stage === 3;
+  document.querySelector("#submitPayrollDispute").disabled = stage > 0;
 }
 
 function renderBackendConfirmation() {
@@ -8703,39 +8994,53 @@ function renderBackendConfirmation() {
   ) {
     loadBackendWorkload(teacherId, month);
   }
+  ensureBackendTeacherPayroll(teacherId, month, { detail: true });
   const data =
     teacherWorkloadState.teacherId === teacherId && teacherWorkloadState.month === month
       ? teacherWorkloadState.data
       : null;
-  const stage = backendWorkloadStage(data);
+  const payroll =
+    teacherPayrollState.teacherId === teacherId && teacherPayrollState.month === month && teacherPayrollState.detail
+      ? teacherPayrollState.data
+      : null;
+  const payrollStatus = payroll?.generated?.status || "missing";
+  const stage = payrollFlowStage(payrollStatus);
 
   document.querySelector("#confirmSteps").innerHTML = confirmSteps
     .map((step, index) => {
-      const completed = index <= stage;
+      const completed = index === 0 ? Boolean(payroll?.generated) : index <= stage;
+      const current =
+        (index === 0 && !payroll?.generated) ||
+        (index === 1 && payrollStatus === "generated") ||
+        (index === 2 && ["teacher_confirmed", "disputed"].includes(payrollStatus)) ||
+        (index === 3 && payrollStatus === "reviewed");
       return `
-        <article class="confirm-step ${completed ? "active" : ""}">
+        <article class="confirm-step ${completed ? "active" : current ? "current" : ""}">
           <span>${step.label}</span>
           <strong>${step.title}</strong>
-          <small>${completed ? "已完成" : "待处理"}</small>
+          <small>${completed ? "已完成" : current ? "当前步骤" : "待处理"}</small>
         </article>
       `;
     })
     .join("");
 
   const list = document.querySelector("#workloadList");
-  if (teacherWorkloadState.loading && !data) {
-    list.innerHTML = `<div class="empty-state">正在读取后端月度工作内容...</div>`;
-  } else if (teacherWorkloadState.error) {
-    list.innerHTML = `<div class="empty-state">${teacherWorkloadState.error}</div>`;
-  } else if (!data) {
-    list.innerHTML = `<div class="empty-state">暂无后端月度工作内容</div>`;
+  if ((teacherWorkloadState.loading && !data) || (teacherPayrollState.loading && !payroll)) {
+    list.innerHTML = `<div class="empty-state">正在读取本月工资确认单...</div>`;
+  } else if (teacherWorkloadState.error || teacherPayrollState.error) {
+    list.innerHTML = `<div class="empty-state">${teacherWorkloadState.error || teacherPayrollState.error}</div>`;
+  } else if (!payroll?.generated) {
+    list.innerHTML = `<div class="empty-state">财务尚未生成本月工资明细。生成后这里会展示完整工资确认单。</div>`;
   } else {
     const categories = data.categories || [];
     const summary = data.summary || {};
-    list.innerHTML = [
+    const rows = normalizeSettlementRows(payroll.rows || []);
+    const disputeReason = payroll.generated?.disputeReason || "";
+    list.innerHTML =
+      [
       ...categories.map((category) => [category.label, `${category.units} 节`, "签入签出完成后计入月度工作量"]),
       ["待处理考勤", `${summary.pendingCount || 0} 节`, "未完成签入和签出，暂不计入工资"],
-      ["异常记录", `${summary.exceptionCount || 0} 条`, "待教务复核后处理"],
+      ["异常记录", `${summary.exceptionCount || 0} 条`, "异常课次不会进入本次工资，需财务处理后重算"],
       ["可计薪课时", `${summary.payableUnits || 0} 节`, "已完成签入签出的课时数量"],
     ]
       .map(
@@ -8749,24 +9054,54 @@ function renderBackendConfirmation() {
           </div>
         `,
       )
-      .join("");
+      .join("") +
+      `
+        <div class="teacher-payroll-confirm-list">
+          <h3>工资明细</h3>
+          ${rows
+            .map(
+              (row) => `
+                <div class="workload-item payroll-line-item">
+                  <div>
+                    <span>${escapeHtml(row.name)}</span>
+                    <p class="muted">${escapeHtml(row.basis)}</p>
+                  </div>
+                  <strong>${formatCurrency(row.amount)}</strong>
+                </div>
+              `,
+            )
+            .join("")}
+        </div>
+        ${
+          disputeReason
+            ? `<div class="empty-state dispute-note"><strong>已提交异议：</strong>${escapeHtml(disputeReason)}</div>`
+            : ""
+        }
+      `;
   }
 
-  document.querySelector("#confirmWorkload").disabled = stage > 0 || teacherWorkloadState.loading || Boolean(teacherWorkloadState.error);
-  document.querySelector("#simulateApproval").disabled = true;
+  setTeacherPayrollSupport(teacherId, payroll);
+  document.querySelector("#confirmWorkload").disabled =
+    payrollStatus !== "generated" || teacherPayrollState.loading || teacherWorkloadState.loading || Boolean(teacherPayrollState.error);
+  document.querySelector("#submitPayrollDispute").disabled =
+    payrollStatus !== "generated" || teacherPayrollState.loading || teacherWorkloadState.loading || Boolean(teacherPayrollState.error);
 }
 
-function setTeacherPayrollSupport(teacherId) {
+function setTeacherPayrollSupport(teacherId, payroll = null) {
   const lessons = teacherLessons(teacherId);
   const payableUnits = lessons
     .filter((lesson) => lesson.status === "completed")
     .reduce((sum, lesson) => sum + (lesson.units || 0), 0);
   const pendingCount = lessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
-  const stage = state.confirmationStages[teacherId] || 0;
+  const payrollStatus = payroll?.generated?.status || "";
+  const stage = payrollStatus ? payrollFlowStage(payrollStatus) : state.confirmationStages[teacherId] || 0;
+  const supportPayableUnits = payroll?.workloadSummary?.payableUnits ?? payableUnits;
+  const supportPendingCount = payroll?.workloadSummary?.pendingCount ?? pendingCount;
+  const statusText = payrollStatus ? payrollStatusLabel(payrollStatus) : confirmationText(teacherId);
   const supportValues = [
-    ["#teacherPayrollPayableUnits", `${payableUnits} 节`],
-    ["#teacherPayrollPendingUnits", `${pendingCount} 节`],
-    ["#teacherPayrollConfirmState", confirmationText(teacherId)],
+    ["#teacherPayrollPayableUnits", `${supportPayableUnits} 节`],
+    ["#teacherPayrollPendingUnits", `${supportPendingCount} 节`],
+    ["#teacherPayrollConfirmState", statusText],
   ];
 
   supportValues.forEach(([selector, value]) => {
@@ -8835,25 +9170,26 @@ function renderTeacherPayroll() {
       return;
     }
 
-    const payrollStatus = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
-    setTeacherPayrollWidgets({
-      amountText: formatCurrency(payroll?.netPay || 0),
-      statusText: payrollStatus,
-      statusClass: payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done",
-      noteText: "明细仅财务端可见",
-      summaryText: "老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。",
-    });
+	    const payrollStatus = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
+	    setTeacherPayrollSupport(teacherId, payroll);
+	    setTeacherPayrollWidgets({
+	      amountText: formatCurrency(payroll?.netPay || 0),
+	      statusText: payrollStatus,
+	      statusClass: payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done",
+	      noteText: "结算期到月度确认查看明细",
+	      summaryText: "老师端平时只展示月度汇总；财务生成工资后，请到“月度确认”查看完整工资明细并确认或提出异议。",
+	    });
     return;
   }
 
   const salary = calculateSalary(teacherId);
-  setTeacherPayrollWidgets({
-    amountText: formatCurrency(salary.net),
-    statusText: settlementText(teacherId),
-    statusClass: "status-pill",
-    noteText: "明细仅财务端可见",
-    summaryText: "老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。",
-  });
+	  setTeacherPayrollWidgets({
+	    amountText: formatCurrency(salary.net),
+	    statusText: settlementText(teacherId),
+	    statusClass: "status-pill",
+	    noteText: "结算期到月度确认查看明细",
+	    summaryText: "老师端平时只展示月度汇总；结算期打开“月度确认”核对工资明细。",
+	  });
 }
 
 function renderFinanceDashboard() {
@@ -9113,18 +9449,22 @@ function selectedFinanceTeacherRecord(teacherId = state.selectedFinanceTeacherId
   );
 }
 
+function settlementSalaryProfileSource(teacherId = state.selectedFinanceTeacherId, payroll = null) {
+  const teacher = payroll?.teacher || selectedFinanceTeacherRecord(teacherId);
+  if (!teacher && !payroll?.salaryProfile) return null;
+  return {
+    teacher,
+    salaryProfile: payroll?.salaryProfile || teacher?.salaryProfile || {},
+  };
+}
+
 function backendConfirmationLabel(status = "", teacherId = "") {
-  if (status === "locked") return "工作量已锁定";
-  if (status === "school_approved") return "总校已审批";
-  if (status === "academic_approved") return "教务已审批";
-  if (status === "teacher_confirmed") return "老师已确认";
-  return teacherId ? confirmationText(teacherId) : "老师待确认";
+  if (status) return payrollStatusLabel(status);
+  return teacherId ? "工资待生成" : "未选择老师";
 }
 
 function confirmationStageValue(status = "", teacherId = "") {
-  if (status === "locked" || status === "school_approved") return 3;
-  if (status === "academic_approved") return 2;
-  if (status === "teacher_confirmed") return 1;
+  if (status) return payrollFlowStage(status);
   return teacherId ? state.confirmationStages[teacherId] || 0 : 0;
 }
 
@@ -9149,21 +9489,20 @@ function settlementNextActionText({ teacherId = "", payroll = null, confirmation
   if (!teacherId) return "先选择一位老师，再查看本月工资快照和可执行动作。";
   if (loading) return "正在读取这位老师的工作量和薪资快照。";
   if (error) return error;
-  const confirmationStage = confirmationStageValue(confirmationStatus, teacherId);
   const hasPayrollSnapshot = Boolean(payroll?.generated || (!backendMode() && payroll?.rows?.length));
   const hasPayrollPreview = Boolean(payroll?.rows?.length || payroll);
   const payrollStatus = payroll?.generated?.status || (hasPayrollPreview ? "preview" : "missing");
   if (!hasPayrollSnapshot) {
     return hasPayrollPreview
       ? "当前仅为后端试算明细，财务可生成本月薪资快照后进入正式流程。"
-      : "还没有本月薪资快照，财务可先生成本月薪资。";
+      : "还没有本月工资明细，财务可先生成本月工资。";
   }
-  if (confirmationStage < 1) return "等待老师确认本月工作量，未确认前不能完成最终结算。";
-  if (confirmationStage < 3) return "工作量已进入审批链路，需教务和总校审批完成后再复核工资。";
-  if (payrollStatus === "generated") return "工作量已完成审批，财务可以复核这位老师的工资。";
-  if (payrollStatus === "reviewed") return "财务已复核，可以锁定工资并进入发放口径。";
-  if (payrollStatus === "locked") return "这位老师本月工资已锁定，老师端只展示最终总薪资。";
-  return "薪资已试算，请按流程生成、复核并锁定。";
+  if (payrollStatus === "generated") return "工资明细已生成，等待老师确认或提出异议。";
+  if (payrollStatus === "teacher_confirmed") return "老师已确认工资明细，财务可标记确认无误后锁定发放。";
+  if (payrollStatus === "disputed") return "老师已提出异议，财务处理后可重新生成或标记异议已处理。";
+  if (payrollStatus === "reviewed") return "财务已处理完成，可以锁定工资并进入发放口径。";
+  if (payrollStatus === "locked") return "这位老师本月工资已锁定，老师端保留总薪资和确认记录。";
+  return "薪资已试算，请按流程生成、老师确认、财务处理并锁定。";
 }
 
 function renderSettlementWorkspaceState({
@@ -9179,11 +9518,11 @@ function renderSettlementWorkspaceState({
   const nextAction = document.querySelector("#settlementNextAction");
   const listTeacher = selectedFinanceTeacherRecord(teacherId);
   const selectedTeacher = teacher || listTeacher;
-  const confirmationLabel = backendConfirmationLabel(confirmationStatus, teacherId);
-  const confirmationStage = confirmationStageValue(confirmationStatus, teacherId);
   const hasPayrollSnapshot = Boolean(payroll?.generated || (!backendMode() && payroll?.rows?.length));
   const hasPayrollPreview = Boolean(payroll?.rows?.length || payroll);
   const payrollStatus = payroll?.generated?.status || (hasPayrollPreview ? "preview" : "missing");
+  const confirmationLabel = backendConfirmationLabel(payrollStatus === "missing" || payrollStatus === "preview" ? "" : payrollStatus, teacherId);
+  const confirmationStage = confirmationStageValue(payrollStatus === "missing" || payrollStatus === "preview" ? "" : payrollStatus, teacherId);
   const payrollLabel = hasPayrollSnapshot ? payrollStatusLabel(payrollStatus) : hasPayrollPreview ? "试算" : "未生成";
   const teacherDepartment = backendTeacherDepartment(selectedTeacher || listTeacher || {});
   const teacherGradeText =
@@ -9207,10 +9546,10 @@ function renderSettlementWorkspaceState({
           <strong>${selectedTeacher?.name || teacherName(teacherId)}</strong>
           <small>${teacherMeta}</small>
         </div>
-        <div class="settlement-teacher-state">
-          <span class="tag ${confirmationStage >= 3 ? "completed" : confirmationStage > 0 ? "pending" : "exception"}">${confirmationLabel}</span>
-          <span class="tag ${payrollStatus === "locked" ? "locked" : hasPayrollSnapshot ? "completed" : "pending"}">${payrollLabel}</span>
-        </div>
+	        <div class="settlement-teacher-state">
+	          <span class="tag ${payrollStatus === "disputed" ? "exception" : confirmationStage > 0 ? "completed" : "pending"}">${confirmationLabel}</span>
+	          <span class="tag ${payrollStatus === "locked" ? "locked" : hasPayrollSnapshot ? "completed" : "pending"}">${payrollLabel}</span>
+	        </div>
       `
       : `
         <div>
@@ -9233,32 +9572,32 @@ function renderSettlementWorkspaceState({
   }
 
   if (workflow) {
-    const generatedState = settlementStepState({
-      complete: hasPayrollSnapshot,
-      current: Boolean(teacherId) && !hasPayrollSnapshot && !loading,
-      blocked: !teacherId || loading || Boolean(error),
-    });
-    const approvalState = settlementStepState({
-      complete: confirmationStage >= 3,
-      current: hasPayrollSnapshot && confirmationStage > 0 && confirmationStage < 3,
-      blocked: !hasPayrollSnapshot || confirmationStage === 0 || loading || Boolean(error),
-    });
-    const reviewState = settlementStepState({
-      complete: ["reviewed", "locked"].includes(payrollStatus),
-      current: hasPayrollSnapshot && confirmationStage >= 3 && payrollStatus === "generated",
-      blocked: !hasPayrollSnapshot || confirmationStage < 3 || loading || Boolean(error),
-    });
+	    const generatedState = settlementStepState({
+	      complete: hasPayrollSnapshot,
+	      current: Boolean(teacherId) && !hasPayrollSnapshot && !loading,
+	      blocked: !teacherId || loading || Boolean(error),
+	    });
+	    const approvalState = settlementStepState({
+	      complete: ["teacher_confirmed", "disputed", "reviewed", "locked"].includes(payrollStatus),
+	      current: hasPayrollSnapshot && payrollStatus === "generated",
+	      blocked: !hasPayrollSnapshot || loading || Boolean(error),
+	    });
+	    const reviewState = settlementStepState({
+	      complete: ["reviewed", "locked"].includes(payrollStatus),
+	      current: ["teacher_confirmed", "disputed"].includes(payrollStatus),
+	      blocked: !hasPayrollSnapshot || payrollStatus === "generated" || loading || Boolean(error),
+	    });
     const lockState = settlementStepState({
       complete: payrollStatus === "locked",
       current: payrollStatus === "reviewed",
       blocked: payrollStatus !== "reviewed" || loading || Boolean(error),
     });
-    workflow.innerHTML = [
-      settlementStepHtml(1, "生成薪资", hasPayrollSnapshot ? "已生成本月工资快照" : "汇总课时、考勤、津贴和个税", generatedState),
-      settlementStepHtml(2, "工作量审批", confirmationStage >= 3 ? "老师、教务、总校审批完成" : confirmationLabel, approvalState),
-      settlementStepHtml(3, "财务复核", ["reviewed", "locked"].includes(payrollStatus) ? "财务已复核工资明细" : "确认金额、扣减和补充项", reviewState),
-      settlementStepHtml(4, "锁定发放", payrollStatus === "locked" ? "工资已锁定并可发放" : "锁定后老师端只看总薪资", lockState),
-    ].join("");
+	    workflow.innerHTML = [
+	      settlementStepHtml(1, "生成工资", hasPayrollSnapshot ? "已生成本月工资明细" : "汇总工作量、津贴、奖扣和个税", generatedState),
+	      settlementStepHtml(2, "老师确认", ["teacher_confirmed", "reviewed", "locked"].includes(payrollStatus) ? "老师已确认工资明细" : payrollStatus === "disputed" ? "老师已提出异议" : "等待老师确认或提出异议", approvalState),
+	      settlementStepHtml(3, "财务处理", ["reviewed", "locked"].includes(payrollStatus) ? "财务已处理完成" : "处理老师异议或确认无误", reviewState),
+	      settlementStepHtml(4, "锁定发放", payrollStatus === "locked" ? "工资已锁定并可发放" : "锁定后老师端只看总薪资", lockState),
+	    ].join("");
   }
 }
 
@@ -9299,6 +9638,7 @@ const salaryRoleLabels = {
   graduatingClass: "毕业班",
   eliteClass: "特优班",
   qingbeiClass: "清北班",
+  busDuty: "跟车老师",
   firstGrade: "一年级",
   doubleChinese: "双班语文",
   standardizedExam: "统考科目",
@@ -9354,6 +9694,7 @@ const stageAllowanceGroups = [
       graduatingClass: "毕业班",
       eliteClass: "特优班",
       qingbeiClass: "清北班",
+      busDuty: "跟车老师",
     },
   },
   {
@@ -9366,6 +9707,7 @@ const stageAllowanceGroups = [
       lessonPrepLeader: "备课组长",
       homeroomPerStudent: "班主任每生",
       graduatingClass: "毕业班",
+      busDuty: "跟车老师",
     },
   },
   {
@@ -9385,6 +9727,55 @@ const stageAllowanceGroups = [
       graduatingClass: "毕业班",
       standardizedExam: "统考科目",
       olympiadHomeroom: "奥数班主任",
+      busDuty: "跟车老师",
+    },
+  },
+];
+
+const stageLessonRuleGroups = [
+  {
+    title: "高中部课时与自习补贴",
+    description: "高中正课、早晚自习、补课、周末课和代课的计薪标准。",
+    fields: {
+      "stageLessonRules.high.regularBaseRate": "正课基础/节",
+      "stageLessonRules.high.regularExcessRate": "超课时/节",
+      "stageLessonRules.high.morning": "早自习/节",
+      "stageLessonRules.high.evening": "晚自习/节",
+      "stageLessonRules.high.makeupByGrade.10": "高一补课/节",
+      "stageLessonRules.high.makeupByGrade.11": "高二补课/节",
+      "stageLessonRules.high.makeupByGrade.12": "高三补课/节",
+      "stageLessonRules.high.weekendByGrade.10": "高一周末/节",
+      "stageLessonRules.high.weekendByGrade.11": "高二周末/节",
+      "stageLessonRules.high.weekendByGrade.12": "高三周末/节",
+      "stageLessonRules.high.substitute": "代课/节",
+    },
+  },
+  {
+    title: "初中部课时与自习补贴",
+    description: "初中正课、晚自习、活动课、补课、周末课和代课的计薪标准。",
+    fields: {
+      "stageLessonRules.middle.regularBaseRate": "正课基础/节",
+      "stageLessonRules.middle.evening": "晚自习/节",
+      "stageLessonRules.middle.activity": "活动课/节",
+      "stageLessonRules.middle.makeupByGrade.7": "初一补课/节",
+      "stageLessonRules.middle.makeupByGrade.8": "初二补课/节",
+      "stageLessonRules.middle.makeupByGrade.9": "初三补课/节",
+      "stageLessonRules.middle.weekendByGrade.7": "初一周末/节",
+      "stageLessonRules.middle.weekendByGrade.8": "初二周末/节",
+      "stageLessonRules.middle.weekendByGrade.9": "初三周末/节",
+      "stageLessonRules.middle.substitute": "代课/节",
+    },
+  },
+  {
+    title: "小学部课时与自习补贴",
+    description: "小学正课、晚自习、非正课、补课、周末课和代课的计薪标准。",
+    fields: {
+      "stageLessonRules.primary.regularBaseRate": "正课基础/节",
+      "stageLessonRules.primary.evening": "晚自习/节",
+      "stageLessonRules.primary.nonRegular": "非正课/节",
+      "stageLessonRules.primary.makeup": "补课/节",
+      "stageLessonRules.primary.weekend": "周末课/节",
+      "stageLessonRules.primary.substitute": "代课/节",
     },
   },
 ];
@@ -9453,9 +9844,26 @@ function renderPayrollSchemeEditor(rules = {}) {
       `;
     })
     .join("");
+  const lessonRuleGroups = stageLessonRuleGroups
+    .map((group) => {
+      const fields = Object.entries(group.fields)
+        .map(([pathValue, label]) => schemeNumberInput(pathValue, label, getNestedValue(scheme, pathValue, 0)))
+        .join("");
+      return `
+        <section class="payroll-scheme-card">
+          <div>
+            <h4>${escapeHtml(group.title)}</h4>
+            <p>${escapeHtml(group.description)}</p>
+          </div>
+          <div class="payroll-scheme-grid">${fields}</div>
+        </section>
+      `;
+    })
+    .join("");
   editor.innerHTML = `
-    <div class="payroll-scheme-note">这些金额是全校规则；老师个人命中哪个档位，在下方“当前老师工资档案”里设置。</div>
+    <div class="payroll-scheme-note">这些金额是全校统一规则，不需要先选择老师；老师个人命中哪个档位，在“薪资结算工作台”的教师工资档案里设置。</div>
     ${fixedGroups}
+    ${lessonRuleGroups}
     ${allowanceGroups}
   `;
 }
@@ -9466,14 +9874,6 @@ function applyPayrollSchemeEditorInputs(teacherSalaryScheme = {}) {
     setNestedNumber(next, input.dataset.schemePath, input.value);
   });
   return next;
-}
-
-function payrollRowByName(payroll, name) {
-  return (payroll?.rows || []).find((row) => row.name === name) || null;
-}
-
-function salaryLabel(labels, value, fallback = "未设置") {
-  return labels[value] || value || fallback;
 }
 
 function escapeRegExp(value) {
@@ -9494,161 +9894,30 @@ function humanizePayrollBasis(basis = "") {
     }, String(basis || ""));
 }
 
-function activeSalaryRoleLabels(profile = {}) {
-  const roles = profile.roles || {};
-  return Object.entries(salaryRoleLabels)
-    .filter(([key]) => roles[key] === true)
-    .map(([, label]) => label);
-}
-
-function lessonLineSummary(payroll = {}) {
-  const lines = Array.isArray(payroll.lines) ? payroll.lines : [];
-  const payableLines = lines.filter((line) => line.payable);
-  const units = payableLines.reduce((sum, line) => sum + Number(line.units || 0), 0);
-  const amount = payableLines.reduce((sum, line) => sum + Number(line.amount || 0), 0);
-  return {
-    lines,
-    payableLines,
-    units,
-    amount,
-  };
-}
-
-function settlementCalculationItemHtml(title, amount, meta, formula, className = "") {
-  return `
-    <article class="settlement-calc-item ${className}">
-      <div>
-        <span>${escapeHtml(title)}</span>
-        <strong>${formatCurrency(amount || 0)}</strong>
-      </div>
-      <p>${escapeHtml(meta)}</p>
-      <small>${escapeHtml(formula)}</small>
-    </article>
-  `;
-}
-
-function renderSettlementCalculationPanel(payroll = null, { loading = false, error = "" } = {}) {
-  const grid = document.querySelector("#settlementCalculationGrid");
-  if (!grid) return;
-
-  if (loading) {
-    grid.innerHTML = `<div class="empty-state">正在读取工资档案和计算依据...</div>`;
-    return;
-  }
-
-  if (error) {
-    grid.innerHTML = `<div class="empty-state">${escapeHtml(error)}</div>`;
-    return;
-  }
-
-  if (!payroll) {
-    grid.innerHTML = `<div class="empty-state">选择老师并生成或读取工资后，这里会展示每一项工资的档位、规则和金额。</div>`;
-    return;
-  }
-
-  const profile = payroll.salaryProfile || payroll.teacher?.salaryProfile || {};
-  const rows = payroll.rows || [];
-  if (!rows.length) {
-    grid.innerHTML = `<div class="empty-state">当前薪资暂无可展开的计算明细。</div>`;
-    return;
-  }
-
-  const baseRow = payrollRowByName(payroll, "基本工资");
-  const assessmentRow = payrollRowByName(payroll, "考核工资");
-  const seniorityRow = payrollRowByName(payroll, "校龄工资");
-  const housingRow = payrollRowByName(payroll, "住房补贴");
-  const lessonRow = payrollRowByName(payroll, "课时工资");
-  const roleRows = rows.filter((row) => row.category === "allowance" && !["住房补贴", "课时工资"].includes(row.name));
-  const manualRows = rows.filter((row) => ["supplement", "deduction"].includes(row.category) && row.name !== "个税代扣");
-  const activeRoles = activeSalaryRoleLabels(profile);
-  const lessonSummary = lessonLineSummary(payroll);
-  const probationRate = Number(profile.probationRate ?? 1);
-  const probationText = probationRate === 1 ? "全额" : `试用期比例 ${Math.round(probationRate * 100)}%`;
-  const lessonSamples = lessonSummary.payableLines
-    .slice(0, 4)
-    .map(
-      (line) => `
-        <li>
-          <span>${escapeHtml([line.date, line.time, line.className, line.ruleName].filter(Boolean).join(" · "))}</span>
-          <strong>${formatCurrency(line.amount || 0)}</strong>
-        </li>
-      `,
-    )
-    .join("");
-
-  grid.innerHTML = `
-    ${settlementCalculationItemHtml(
-      "基本工资",
-      baseRow?.amount || 0,
-      `职称/学历档：${salaryLabel(salaryQualificationLabels, profile.qualificationGrade)}`,
-      `${salaryLabel(salaryQualificationLabels, profile.qualificationGrade)}档命中 ${formatCurrency(baseRow?.amount || 0)}；${probationText}`,
-    )}
-    ${settlementCalculationItemHtml(
-      "考核工资",
-      assessmentRow?.amount || 0,
-      `考核档：${salaryLabel(salaryAssessmentLabels, profile.assessmentBand)}`,
-      `按老师所属学段/岗位考核档取值：${formatCurrency(assessmentRow?.amount || 0)}`,
-    )}
-    ${settlementCalculationItemHtml(
-      "校龄工资",
-      seniorityRow?.amount || 0,
-      `校龄：${profile.schoolYears ?? 0} 年`,
-      seniorityRow?.basis || "按校龄阶梯取值，6年及以上封顶",
-    )}
-    ${settlementCalculationItemHtml(
-      "住房补贴",
-      housingRow?.amount || 0,
-      `住房档：${salaryLabel(salaryHousingLabels, profile.housingTier)}`,
-      `按住房补贴档取值：${formatCurrency(housingRow?.amount || 0)}`,
-    )}
-    ${settlementCalculationItemHtml(
-      "岗位/补充项",
-      roleRows.reduce((sum, row) => sum + Number(row.amount || 0), 0) +
-        manualRows.reduce((sum, row) => sum + Number(row.amount || 0), 0),
-      activeRoles.length ? `已启用：${activeRoles.join("、")}` : "未启用额外岗位津贴",
-      [...roleRows, ...manualRows].length
-        ? [...roleRows, ...manualRows].map((row) => `${row.name} ${formatCurrency(row.amount || 0)}`).join("；")
-        : "无岗位津贴、补充项或人工扣减",
-    )}
-    <article class="settlement-calc-item lesson-calc-item">
-      <div>
-        <span>课时工资</span>
-        <strong>${formatCurrency(lessonRow?.amount || 0)}</strong>
-      </div>
-      <p>已完成 ${lessonSummary.payableLines.length} 节，可计 ${lessonSummary.units} 课时单位</p>
-      <small>只统计签入+签出完成且未异常的课次；未完成、异常、被拦截的课次金额为 0。</small>
-      ${
-        lessonSamples
-          ? `<ul class="settlement-lesson-samples">${lessonSamples}</ul>`
-          : `<em>本月暂无完成课次，因此课时工资为 0。</em>`
-      }
-    </article>
-  `;
-}
-
 function renderSettlement() {
   if (backendMode() && ["finance", "admin"].includes(currentRole())) {
     renderBackendSettlement();
     return;
   }
 
-  const select = document.querySelector("#settlementTeacherSelect");
-  renderFinanceTeacherFilters("settlement");
-  const teacherId = state.selectedFinanceTeacherId;
+	  const select = document.querySelector("#settlementTeacherSelect");
+	  renderFinanceTeacherFilters("settlement");
+	  renderSettlementStatusBoard();
+	  const teacherId = state.selectedFinanceTeacherId;
   const salary = calculateSalary(teacherId);
+  const localRows = salaryRows(teacherId);
+  const totals = settlementTotalsFromRows(localRows, { gross: salary.gross, tax: salary.tax, net: salary.net });
   const settlement = state.settlements[teacherId];
   const settled = settlement?.status === "settled";
   const status = document.querySelector("#settlementStatus");
 
-  document.querySelector("#settlementGrossSalary").textContent = formatCurrency(salary.gross);
-  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(salary.tax);
-  document.querySelector("#settlementNetSalary").textContent = formatCurrency(salary.net);
+  document.querySelector("#settlementGrossSalary").textContent = formatCurrency(totals.gross);
+  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(totals.tax);
+  document.querySelector("#settlementNetSalary").textContent = formatCurrency(totals.net);
   status.textContent = settled ? `已结算 ${settlement.settledAt}` : "未结算";
   status.className = settled ? "status-pill locked" : "status-pill";
   document.querySelector("#settleTeacherPayroll").disabled = settled;
   document.querySelector("#reviewTeacherPayroll").disabled = true;
-  document.querySelector("#approveAcademicWorkload").disabled = true;
-  document.querySelector("#approveSchoolWorkload").disabled = true;
   document.querySelector("#batchGeneratePayroll").disabled = true;
   document.querySelector("#exportPayrollCsv").disabled = true;
   document.querySelector("#unlockTeacherPayroll").disabled = true;
@@ -9657,33 +9926,24 @@ function renderSettlement() {
     teacher: teacherById(teacherId),
     payroll: {
       generated: settled ? { status: "locked" } : { status: "generated" },
-      rows: salaryRows(teacherId),
+      rows: normalizeSettlementRows(localRows),
     },
     confirmationStatus: settled ? "locked" : "",
   });
-  renderSettlementCalculationPanel({
-    rows: salaryRows(teacherId).map(([name, basis, amount]) => ({ name, basis, amount, category: "preview" })),
+  renderSalaryProfilePanel({
+    teacher: teacherById(teacherId),
     salaryProfile: teacherById(teacherId)?.salaryProfile || {},
   });
-  document.querySelector("#settlementSalaryTable").innerHTML = salaryRows(teacherId)
-    .map(
-      ([name, basis, amount]) => `
-        <tr>
-          <td class="row-title" data-label="薪资项目">${name}</td>
-          <td class="muted" data-label="计算口径">${humanizePayrollBasis(basis)}</td>
-          <td data-label="金额">${formatCurrency(amount)}</td>
-        </tr>
-      `,
-    )
-    .join("");
+  document.querySelector("#settlementSalaryTable").innerHTML = settlementSalaryRowsHtml(localRows, totals);
 }
 
 function renderBackendSettlement() {
-  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
-    loadFinanceTeacherPage();
-  }
-  renderFinanceTeacherFilters("settlement");
-  const teacherId = state.selectedFinanceTeacherId;
+	  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
+	    loadFinanceTeacherPage();
+	  }
+	  renderFinanceTeacherFilters("settlement");
+	  renderSettlementStatusBoard();
+	  const teacherId = state.selectedFinanceTeacherId;
   if (!teacherId) {
     document.querySelector("#settlementGrossSalary").textContent = "¥0";
     document.querySelector("#settlementTaxSalary").textContent = "¥0";
@@ -9692,14 +9952,12 @@ function renderBackendSettlement() {
     document.querySelector("#settlementStatus").className = "status-pill warning";
     document.querySelector("#settleTeacherPayroll").disabled = true;
     document.querySelector("#reviewTeacherPayroll").disabled = true;
-    document.querySelector("#approveAcademicWorkload").disabled = true;
-    document.querySelector("#approveSchoolWorkload").disabled = true;
     document.querySelector("#batchGeneratePayroll").disabled = currentRole() !== "finance";
     document.querySelector("#exportPayrollCsv").disabled = currentRole() !== "finance";
     document.querySelector("#unlockTeacherPayroll").disabled = true;
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
     renderSettlementWorkspaceState({ teacherId: "", payroll: null });
-    renderSettlementCalculationPanel(null);
+    renderSalaryProfilePanel(null);
     return;
   }
   ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
@@ -9712,8 +9970,6 @@ function renderBackendSettlement() {
   const status = document.querySelector("#settlementStatus");
   const button = document.querySelector("#settleTeacherPayroll");
   const reviewButton = document.querySelector("#reviewTeacherPayroll");
-  const academicButton = document.querySelector("#approveAcademicWorkload");
-  const schoolButton = document.querySelector("#approveSchoolWorkload");
   const batchButton = document.querySelector("#batchGeneratePayroll");
   const exportButton = document.querySelector("#exportPayrollCsv");
   const unlockButton = document.querySelector("#unlockTeacherPayroll");
@@ -9727,8 +9983,6 @@ function renderBackendSettlement() {
     status.className = "status-pill";
     button.disabled = true;
     reviewButton.disabled = true;
-    academicButton.disabled = true;
-    schoolButton.disabled = true;
     batchButton.disabled = true;
     exportButton.disabled = true;
     unlockButton.disabled = true;
@@ -9739,7 +9993,7 @@ function renderBackendSettlement() {
       payroll,
       loading: true,
     });
-    renderSettlementCalculationPanel(null, { loading: true });
+    renderSalaryProfilePanel(null);
     return;
   }
 
@@ -9751,8 +10005,6 @@ function renderBackendSettlement() {
     status.className = "status-pill warning";
     button.disabled = true;
     reviewButton.disabled = true;
-    academicButton.disabled = true;
-    schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
     unlockButton.disabled = true;
@@ -9763,7 +10015,7 @@ function renderBackendSettlement() {
       payroll: null,
       error: financeTeacherDetailState.error,
     });
-    renderSettlementCalculationPanel(null, { error: financeTeacherDetailState.error });
+    renderSalaryProfilePanel(settlementSalaryProfileSource(teacherId, null));
     return;
   }
 
@@ -9775,8 +10027,6 @@ function renderBackendSettlement() {
     status.className = "status-pill";
     button.disabled = true;
     reviewButton.disabled = true;
-    academicButton.disabled = true;
-    schoolButton.disabled = true;
     batchButton.disabled = false;
     exportButton.disabled = false;
     unlockButton.disabled = true;
@@ -9787,23 +10037,26 @@ function renderBackendSettlement() {
       payroll: null,
       confirmationStatus: financeTeacherDetailState.workload?.confirmation?.status || "",
     });
-    renderSettlementCalculationPanel(null);
+    renderSalaryProfilePanel(settlementSalaryProfileSource(teacherId, null));
     return;
   }
 
-  document.querySelector("#settlementGrossSalary").textContent = formatCurrency(payroll.grossPay || 0);
-  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(payroll.tax || 0);
-  document.querySelector("#settlementNetSalary").textContent = formatCurrency(payroll.netPay || 0);
+  const totals = settlementTotalsFromRows(payroll.rows || [], {
+    gross: payroll.grossPay || 0,
+    tax: payroll.tax || 0,
+    net: payroll.netPay || 0,
+  });
+  document.querySelector("#settlementGrossSalary").textContent = formatCurrency(totals.gross);
+  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(totals.tax);
+  document.querySelector("#settlementNetSalary").textContent = formatCurrency(totals.net);
   const payrollStatus = payroll.generated?.status || "preview";
-  const confirmationStatus = financeTeacherDetailState.workload?.confirmation?.status || payroll.confirmation?.status || "unconfirmed";
   status.textContent = payroll.generated
-    ? `${payrollStatusLabel(payrollStatus)} · 工作量${confirmationText(payroll.teacher?.id || state.selectedFinanceTeacherId)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
+    ? `${payrollStatusLabel(payrollStatus)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.teacherConfirmedAt?.slice(0, 10) || payroll.generated.disputedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
     : "后端试算";
   status.className = payrollStatus === "locked" ? "status-pill locked" : "status-pill done";
-  academicButton.disabled = financeTeacherDetailState.loading || currentRole() !== "admin" || confirmationStatus !== "teacher_confirmed";
-  schoolButton.disabled = financeTeacherDetailState.loading || currentRole() !== "admin" || confirmationStatus !== "academic_approved";
-  reviewButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "generated" || confirmationStatus !== "school_approved";
-  button.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "reviewed" || confirmationStatus !== "school_approved";
+  reviewButton.disabled =
+    financeTeacherDetailState.loading || currentRole() !== "finance" || !["teacher_confirmed", "disputed"].includes(payrollStatus);
+  button.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "reviewed";
   batchButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   exportButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
   unlockButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "locked";
@@ -9811,52 +10064,19 @@ function renderBackendSettlement() {
     teacherId,
     teacher: payroll.teacher || selectedFinanceTeacherRecord(teacherId),
     payroll,
-    confirmationStatus,
+    confirmationStatus: payrollStatus,
     loading: financeTeacherDetailState.loading,
   });
-  renderSettlementCalculationPanel(payroll);
-  table.innerHTML = (payroll.rows || [])
-    .map(
-      (row) => `
-        <tr>
-          <td class="row-title" data-label="薪资项目">${row.name}</td>
-          <td class="muted" data-label="计算口径">${humanizePayrollBasis(row.basis)}</td>
-          <td data-label="金额">${formatCurrency(row.amount || 0)}</td>
-        </tr>
-      `,
-    )
-    .join("");
+  renderSalaryProfilePanel(settlementSalaryProfileSource(teacherId, payroll));
+  table.innerHTML = settlementSalaryRowsHtml(payroll.rows || [], totals);
 }
 
 function renderPayrollConfig() {
   if (!["finance", "admin"].includes(currentRole())) return;
-  if (backendMode() && !financeTeacherPage.loaded && !financeTeacherPage.loading) {
-    loadFinanceTeacherPage();
-  }
-  renderFinanceTeacherFilters("payrollConfig");
   if (!payrollRuleState.loaded && !payrollRuleState.loading) {
     loadPayrollRules();
   }
   renderPayrollRulesPanel();
-
-  const teacherId = state.selectedFinanceTeacherId;
-  if (!teacherId) {
-    renderSalaryProfilePanel(null);
-    return;
-  }
-  if (backendMode()) {
-    ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
-    const payroll =
-      financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.loaded
-        ? financeTeacherDetailState.payroll
-        : null;
-    renderSalaryProfilePanel(payroll);
-    return;
-  }
-  renderSalaryProfilePanel({
-    teacher: teacherById(teacherId),
-    salaryProfile: teacherById(teacherId)?.salaryProfile || {},
-  });
 }
 
 function renderPayrollRulesPanel() {
@@ -9908,13 +10128,122 @@ function setCheckboxValue(selector, value) {
   if (input) input.checked = Boolean(value);
 }
 
+function salaryManualCategoryLabel(category) {
+  if (category === "attendanceDeduction") return "考勤扣减";
+  return category === "deduction" ? "其他扣减" : "奖励/补发";
+}
+
+function salaryManualItemIsDeduction(item = {}) {
+  return ["deduction", "attendanceDeduction"].includes(item.category) || Number(item.amount || 0) < 0;
+}
+
+function salaryProfileEditContextAllowsInput() {
+  return Boolean(
+    salaryProfileEditMode &&
+      backendMode() &&
+      currentRole() === "finance" &&
+      state.selectedFinanceTeacherId &&
+      !financeTeacherDetailState.loading,
+  );
+}
+
+function monthlyAdjustmentContextAllowsInput(profile = null) {
+  const hasProfile = Boolean(profile && typeof profile === "object");
+  return Boolean(
+    backendMode() &&
+      currentRole() === "finance" &&
+      state.selectedFinanceTeacherId &&
+      hasProfile &&
+      !financeTeacherDetailState.loading,
+  );
+}
+
+function canEditSalaryProfile(profile = null) {
+  return Boolean(salaryProfileEditContextAllowsInput() && profile);
+}
+
+function syncHomeroomStudentField(profile = null) {
+  const isHomeroom = Boolean(document.querySelector("#salaryRoleHomeroom")?.checked);
+  const field = document.querySelector("#homeroomStudentField");
+  const input = document.querySelector("#salaryHomeroomStudentCount");
+  const canEdit = profile ? canEditSalaryProfile(profile) : salaryProfileEditContextAllowsInput();
+  if (field) field.hidden = !isHomeroom;
+  if (input) {
+    input.disabled = !canEdit || !isHomeroom;
+    if (!isHomeroom) input.value = "0";
+  }
+}
+
+function syncSalaryProfileEditState(profile) {
+  const panel = document.querySelector(".settlement-profile-panel");
+  const saveButton = document.querySelector("#saveTeacherSalaryProfile");
+  const cancelButton = document.querySelector("#cancelTeacherSalaryProfileEdit");
+  const editable = canEditSalaryProfile(profile);
+  const hasProfile = Boolean(profile);
+
+  if (panel) {
+    panel.classList.toggle("is-editing", editable);
+    panel.classList.toggle("is-readonly", !editable);
+  }
+  if (saveButton) {
+    saveButton.disabled = !backendMode() || currentRole() !== "finance" || !hasProfile || financeTeacherDetailState.loading;
+    saveButton.textContent = financeTeacherDetailState.loading
+      ? "保存中"
+      : salaryProfileEditMode && hasProfile
+        ? "保存学期档案"
+        : "编辑档案";
+  }
+  if (cancelButton) {
+    cancelButton.hidden = !editable;
+    cancelButton.disabled = financeTeacherDetailState.loading;
+  }
+
+  [
+    "#salaryQualificationGrade",
+    "#salarySchoolYears",
+    "#salaryAssessmentBand",
+    "#salaryHousingTier",
+    "#salaryProbationRate",
+  ].forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (element) element.disabled = !editable;
+  });
+
+  [
+    "#salaryRoleHomeroom",
+    "#salaryRoleGradeHead",
+    "#salaryRoleDeputyGradeHead",
+    "#salaryRoleTeachingResearchLeader",
+    "#salaryRoleLessonPrepLeader",
+    "#salaryRoleGraduatingClass",
+    "#salaryRoleEliteClass",
+    "#salaryRoleQingbeiClass",
+    "#salaryRoleBusDuty",
+  ].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (input) input.disabled = !editable;
+  });
+
+  const canEditMonthlyAdjustment = monthlyAdjustmentContextAllowsInput(profile);
+  [
+    "#salaryManualItemsJson",
+    "#salaryManualItemName",
+    "#salaryManualItemCategory",
+    "#salaryManualItemAmount",
+    "#salaryManualItemBasis",
+    "#addSalaryManualItem",
+    "#saveSalaryManualItems",
+  ].forEach((selector) => {
+    const element = document.querySelector(selector);
+    if (element) element.disabled = !canEditMonthlyAdjustment;
+  });
+
+  syncHomeroomStudentField(profile);
+}
+
 function renderSalaryProfilePanel(payroll) {
   const profile = payroll?.teacher?.salaryProfile || payroll?.salaryProfile || null;
-  const saveButton = document.querySelector("#saveTeacherSalaryProfile");
-  if (saveButton) {
-    saveButton.disabled = !backendMode() || currentRole() !== "finance" || !profile || financeTeacherDetailState.loading;
-    saveButton.textContent = financeTeacherDetailState.loading ? "保存中" : "保存档案";
-  }
+  salaryProfilePanelCurrentProfile = profile;
 
   if (!profile) {
     [
@@ -9924,7 +10253,6 @@ function renderSalaryProfilePanel(payroll) {
       "#salaryHousingTier",
       "#salaryProbationRate",
       "#salaryHomeroomStudentCount",
-      "#salaryAttendanceDeduction",
       "#salaryManualItemsJson",
     ].forEach((selector) => setInputValue(selector, selector === "#salaryManualItemsJson" ? "[]" : ""));
     [
@@ -9936,8 +10264,10 @@ function renderSalaryProfilePanel(payroll) {
       "#salaryRoleGraduatingClass",
       "#salaryRoleEliteClass",
       "#salaryRoleQingbeiClass",
+      "#salaryRoleBusDuty",
     ].forEach((selector) => setCheckboxValue(selector, false));
     renderSalaryManualItemsEditor([]);
+    syncSalaryProfileEditState(null);
     return;
   }
 
@@ -9947,7 +10277,6 @@ function renderSalaryProfilePanel(payroll) {
   setInputValue("#salaryHousingTier", profile.housingTier || "teacher");
   setInputValue("#salaryProbationRate", profile.probationRate ?? 1);
   setInputValue("#salaryHomeroomStudentCount", profile.roles?.homeroomStudentCount || 0);
-  setInputValue("#salaryAttendanceDeduction", profile.attendanceDeduction || 0);
   setInputValue("#salaryManualItemsJson", JSON.stringify(profile.manualItems || [], null, 2));
   setCheckboxValue("#salaryRoleHomeroom", profile.roles?.homeroom);
   setCheckboxValue("#salaryRoleGradeHead", profile.roles?.gradeHead);
@@ -9957,7 +10286,9 @@ function renderSalaryProfilePanel(payroll) {
   setCheckboxValue("#salaryRoleGraduatingClass", profile.roles?.graduatingClass);
   setCheckboxValue("#salaryRoleEliteClass", profile.roles?.eliteClass);
   setCheckboxValue("#salaryRoleQingbeiClass", profile.roles?.qingbeiClass);
+  setCheckboxValue("#salaryRoleBusDuty", profile.roles?.busDuty);
   renderSalaryManualItemsEditor(profile.manualItems || []);
+  syncSalaryProfileEditState(profile);
 }
 
 function currentSalaryManualItemsFromInput() {
@@ -9971,15 +10302,40 @@ function currentSalaryManualItemsFromInput() {
   }
 }
 
-function setSalaryManualItems(items = []) {
-  const normalizedItems = items
-    .map((item) => ({
-      name: String(item.name || "").trim(),
-      amount: Number(item.amount || 0),
-      basis: String(item.basis || "").trim(),
-      category: item.category === "deduction" ? "deduction" : "supplement",
-    }))
+function normalizeSalaryManualItems(items = []) {
+  if (!Array.isArray(items)) return [];
+  return items
+    .map((item) => {
+      const category = item.category === "attendanceDeduction"
+        ? "attendanceDeduction"
+        : item.category === "deduction" || Number(item.amount || 0) < 0
+          ? "deduction"
+          : "supplement";
+      const isDeduction = ["deduction", "attendanceDeduction"].includes(category);
+      return {
+        name: String(item.name || "").trim(),
+        amount: isDeduction ? -Math.abs(Number(item.amount || 0)) : Math.abs(Number(item.amount || 0)),
+        basis: String(item.basis || "").trim(),
+        category,
+      };
+    })
     .filter((item) => item.name && item.amount);
+}
+
+function salaryManualItemsFromInput() {
+  const input = document.querySelector("#salaryManualItemsJson");
+  if (!input?.value?.trim()) return [];
+  try {
+    const parsed = JSON.parse(input.value);
+    if (!Array.isArray(parsed)) throw new Error("本月奖扣必须是数组");
+    return normalizeSalaryManualItems(parsed);
+  } catch (error) {
+    throw new Error(`本月奖扣数据异常：${error.message}`);
+  }
+}
+
+function setSalaryManualItems(items = []) {
+  const normalizedItems = normalizeSalaryManualItems(items);
   const input = document.querySelector("#salaryManualItemsJson");
   if (input) input.value = JSON.stringify(normalizedItems, null, 2);
   renderSalaryManualItemsEditor(normalizedItems);
@@ -9994,18 +10350,21 @@ function renderSalaryManualItemsEditor(items = currentSalaryManualItemsFromInput
   }
   list.innerHTML = items
     .map(
-      (item, index) => `
+      (item, index) => {
+        const isDeduction = salaryManualItemIsDeduction(item);
+        return `
         <article class="manual-item-row">
           <div>
             <strong>${escapeHtml(item.name)}</strong>
-            <span>${item.category === "deduction" ? "扣减" : "奖励/补发"} · ${escapeHtml(item.basis || "未填写说明")}</span>
+            <span>${salaryManualCategoryLabel(item.category)} · ${escapeHtml(item.basis || "未填写说明")}</span>
           </div>
-          <strong class="${item.category === "deduction" ? "deduction" : "supplement"}">
-            ${item.category === "deduction" ? "-" : "+"}${formatCurrency(Math.abs(Number(item.amount || 0)))}
+          <strong class="${isDeduction ? "deduction" : "supplement"}">
+            ${isDeduction ? "-" : "+"}${formatCurrency(Math.abs(Number(item.amount || 0)))}
           </strong>
-          <button class="mini-button danger" data-remove-manual-item="${index}" type="button">删除</button>
+          <button class="mini-button danger" data-remove-manual-item="${index}" type="button" ${monthlyAdjustmentContextAllowsInput(salaryProfilePanelCurrentProfile) ? "" : "disabled"}>删除</button>
         </article>
-      `,
+      `;
+      },
     )
     .join("");
 }
@@ -10017,19 +10376,27 @@ function addSalaryManualItemFromInputs() {
   const basisInput = document.querySelector("#salaryManualItemBasis");
   const name = nameInput?.value.trim() || "";
   const amount = Number(amountInput?.value || 0);
-  const category = categoryInput?.value === "deduction" ? "deduction" : "supplement";
+  const category = categoryInput?.value === "attendanceDeduction"
+    ? "attendanceDeduction"
+    : categoryInput?.value === "deduction"
+      ? "deduction"
+      : "supplement";
   const basis = basisInput?.value.trim() || "";
+  if (!monthlyAdjustmentContextAllowsInput(salaryProfilePanelCurrentProfile)) {
+    showToast("当前无法维护本月特殊奖扣，请先选择老师并等待薪资信息加载完成");
+    return;
+  }
   if (!name || amount <= 0) {
     showToast("请填写奖扣名称和大于 0 的金额");
     return;
   }
-  const signedAmount = category === "deduction" ? -Math.abs(amount) : Math.abs(amount);
+  const signedAmount = category === "supplement" ? Math.abs(amount) : -Math.abs(amount);
   setSalaryManualItems([
     ...currentSalaryManualItemsFromInput(),
     {
       name,
       amount: signedAmount,
-      basis: basis || "财务特殊奖扣项",
+      basis: basis || (category === "attendanceDeduction" ? "本月考勤扣减" : "财务特殊奖扣项"),
       category,
     },
   ]);
@@ -10039,6 +10406,10 @@ function addSalaryManualItemFromInputs() {
 }
 
 function removeSalaryManualItem(index) {
+  if (!monthlyAdjustmentContextAllowsInput(salaryProfilePanelCurrentProfile)) {
+    showToast("当前无法删除本月特殊奖扣，请先选择老师并等待薪资信息加载完成");
+    return;
+  }
   const items = currentSalaryManualItemsFromInput();
   items.splice(index, 1);
   setSalaryManualItems(items);
@@ -11388,19 +11759,15 @@ document.querySelector("#confirmWorkload").addEventListener("click", async () =>
   render();
 });
 
-document.querySelector("#simulateApproval").addEventListener("click", () => {
-  if (backendMode()) {
-    showToast("后端模式下需由教务和总校角色审批，当前老师端不能直接审批");
+document.querySelector("#submitPayrollDispute").addEventListener("click", async () => {
+  if (backendMode() && currentRole() === "teacher") {
+    await disputeBackendPayroll();
     return;
   }
 
   const teacherId = currentTeacherId();
-  if ((state.confirmationStages[teacherId] || 0) === 0) {
-    showToast("请先由老师确认本月工作量");
-    return;
-  }
-  state.confirmationStages[teacherId] = 3;
-  showToast("教务和总校审批完成，已交财务结算");
+  state.confirmationStages[teacherId] = 1;
+  showToast("工资异议已提交，等待财务处理");
   render();
 });
 
@@ -11439,9 +11806,6 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
     if (state.activeView === "settlement" && state.selectedFinanceTeacherId) {
       await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     }
-    if (state.activeView === "payrollConfig" && state.selectedFinanceTeacherId) {
-      await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
-    }
     return;
   }
 
@@ -11456,7 +11820,6 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeStageFilter", "overview"],
   ["#financeRecordsStageFilter", "records"],
   ["#settlementStageFilter", "settlement"],
-  ["#payrollConfigStageFilter", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("change", () => {
     applyFinanceTeacherFilters(context, { resetGrade: true });
@@ -11467,7 +11830,6 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeGradeFilter", "overview"],
   ["#financeRecordsGradeFilter", "records"],
   ["#settlementGradeFilter", "settlement"],
-  ["#payrollConfigGradeFilter", "payrollConfig"],
   ["#financeTeacherPageSize", "overview"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("change", () => {
@@ -11479,7 +11841,6 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeTeacherSearchButton", "overview"],
   ["#financeRecordsSearchButton", "records"],
   ["#settlementTeacherSearchButton", "settlement"],
-  ["#payrollConfigTeacherSearchButton", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("click", () => {
     applyFinanceTeacherFilters(context);
@@ -11490,7 +11851,6 @@ async function applyFinanceTeacherFilters(context = "overview", options = {}) {
   ["#financeTeacherSearch", "overview"],
   ["#financeRecordsSearch", "records"],
   ["#settlementTeacherSearch", "settlement"],
-  ["#payrollConfigTeacherSearch", "payrollConfig"],
 ].forEach(([selector, context]) => {
   document.querySelector(selector).addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -11750,14 +12110,21 @@ document.querySelector("#settlementTeacherSelect").addEventListener("change", as
   renderSettlement();
 });
 
-document.querySelector("#payrollConfigTeacherSelect").addEventListener("change", async (event) => {
-  state.selectedFinanceTeacherId = event.target.value;
+document.addEventListener("click", async (event) => {
+  const statusTeacherButton = event.target.closest("[data-settlement-status-teacher]");
+  if (!statusTeacherButton) return;
+  const teacherId = statusTeacherButton.dataset.settlementStatusTeacher;
+  if (!teacherId || teacherId === state.selectedFinanceTeacherId) return;
+  state.selectedFinanceTeacherId = teacherId;
   resetFinanceTeacherDetailState();
+  resetAttendanceRecordState();
+  const select = document.querySelector("#settlementTeacherSelect");
+  if (select) select.value = teacherId;
   if (backendMode() && ["finance", "admin"].includes(currentRole())) {
-    await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
+    await loadFinanceTeacherDetail(teacherId, { generatePayroll: false });
     return;
   }
-  renderPayrollConfig();
+  renderSettlement();
 });
 
 document.querySelector("#settleTeacherPayroll").addEventListener("click", async () => {
@@ -11775,13 +12142,16 @@ document.querySelector("#settleTeacherPayroll").addEventListener("click", async 
 });
 
 document.querySelector("#reviewTeacherPayroll").addEventListener("click", reviewBackendPayroll);
-document.querySelector("#approveAcademicWorkload").addEventListener("click", () => approveBackendWorkload("academic"));
-document.querySelector("#approveSchoolWorkload").addEventListener("click", () => approveBackendWorkload("school"));
+document.querySelector("#approveAcademicWorkload")?.addEventListener("click", () => approveBackendWorkload("academic"));
+document.querySelector("#approveSchoolWorkload")?.addEventListener("click", () => approveBackendWorkload("school"));
 document.querySelector("#batchGeneratePayroll").addEventListener("click", batchGenerateBackendPayroll);
 document.querySelector("#exportPayrollCsv").addEventListener("click", exportBackendPayrollCsv);
 document.querySelector("#savePayrollRules").addEventListener("click", saveBackendPayrollRules);
 document.querySelector("#unlockTeacherPayroll").addEventListener("click", unlockBackendPayroll);
-document.querySelector("#saveTeacherSalaryProfile").addEventListener("click", saveBackendTeacherSalaryProfile);
+document.querySelector("#saveTeacherSalaryProfile").addEventListener("click", handleTeacherSalaryProfileAction);
+document.querySelector("#cancelTeacherSalaryProfileEdit")?.addEventListener("click", cancelTeacherSalaryProfileEdit);
+document.querySelector("#saveSalaryManualItems")?.addEventListener("click", saveBackendTeacherMonthlyAdjustments);
+document.querySelector("#salaryRoleHomeroom").addEventListener("change", syncHomeroomStudentField);
 
 document.querySelector("#submitManualQr").addEventListener("click", async () => {
   const text = document.querySelector("#manualQrText").value.trim();

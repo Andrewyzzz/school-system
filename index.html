@@ -1251,15 +1251,15 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <h2 id="confirmTitle">月度工作量确认</h2>
-                  <p>老师先确认课时，之后进入教务和总校审批，审批完成后工资锁定。</p>
+                  <h2 id="confirmTitle">月度工资确认</h2>
+                  <p>财务生成工资明细后，老师核对课时、补贴、奖扣、个税和实发金额；有问题可直接提出异议。</p>
                 </div>
               </div>
               <div class="teacher-pay-strip">
                 <div>
                   <span>本月总薪资</span>
                   <strong id="confirmPayrollNet">¥0</strong>
-                  <small id="confirmPayrollNote">明细仅财务端可见</small>
+                  <small id="confirmPayrollNote">结算期展示工资明细</small>
                 </div>
                 <span class="status-pill" id="confirmPayrollStatus">读取中</span>
               </div>
@@ -1267,19 +1267,23 @@
               <div class="action-row">
                 <button class="primary-button" id="confirmWorkload" type="button">
                   <span aria-hidden="true">✓</span>
-                  确认本月工作量
+                  确认工资明细
                 </button>
-                <button class="ghost-button" id="simulateApproval" type="button">
-                  两级审批试运行
+                <button class="ghost-button" id="submitPayrollDispute" type="button">
+                  提出异议
                 </button>
               </div>
+              <label class="field-label dispute-field" for="payrollDisputeReason">
+                异议说明
+                <textarea id="payrollDisputeReason" class="config-textarea small" placeholder="如发现课时、补贴、奖扣或档案金额有误，请写清楚具体项目和原因"></textarea>
+              </label>
             </section>
 
             <section class="panel workload-panel">
               <div class="panel-heading">
                 <div>
-                  <h2>本月可计薪工作量</h2>
-                  <p>未完成签入和签出的项目不会进入最终工资。</p>
+                  <h2>工资确认单</h2>
+                  <p>这里展示本月工资明细和计薪工作量；未完成签入签出的课次不会进入工资。</p>
                 </div>
               </div>
               <div class="workload-list" id="workloadList"></div>
@@ -1292,7 +1296,7 @@
             <div class="panel-heading">
               <div>
                 <h2 id="teacherPayrollTitle">我的总薪资</h2>
-                <p>这里只展示本人月度总薪资，详细核算由财务端留存。</p>
+                <p>平时只展示本人月度总薪资；结算期请到“月度确认”核对工资明细。</p>
               </div>
               <span class="status-pill" id="teacherPayrollStatus">读取中</span>
             </div>
@@ -1300,7 +1304,7 @@
               <div>
                 <span>本月总薪资</span>
                 <strong id="teacherPayrollNet">¥0</strong>
-                <small>月度确认和审批完成后锁定</small>
+                <small>工资确认并锁定后生效</small>
               </div>
             </div>
             <div class="salary-support-grid" id="teacherPayrollSupportGrid">
@@ -1317,11 +1321,11 @@
               <article>
                 <span>确认状态</span>
                 <strong id="teacherPayrollConfirmState">待确认</strong>
-                <small>月度工作量流程</small>
+                <small>工资确认流程</small>
               </article>
             </div>
             <div class="empty-state" id="teacherPayrollSummaryNote">
-              老师端只展示月度汇总，不展示逐课时核算和薪资项目拆分。需要核对工作量时，请到“月度确认”和“考勤记录”查看课时数量与签到状态。
+              老师端平时只展示月度汇总；财务生成工资后，请到“月度确认”查看完整工资明细并确认或提出异议。
             </div>
             <div class="action-row salary-summary-actions">
               <button class="primary-button" data-view-jump="confirm" type="button">查看月度确认</button>
@@ -1502,11 +1506,17 @@
             <div class="panel-heading">
               <div>
                 <h2 id="settlementTitle">薪资结算工作台</h2>
-                <p>按老师生成、复核、锁定本月工资快照；锁定后再向老师端展示最终总薪资。</p>
+                  <p>财务根据工作量生成工资明细，老师确认或提出异议后，财务处理并锁定发放。</p>
               </div>
               <span class="status-pill" id="settlementStatus">未结算</span>
             </div>
             <div class="settlement-filter-band" aria-label="薪资结算老师筛选">
+              <div class="settlement-filter-heading">
+                <div>
+                  <strong>选择老师</strong>
+                  <span>按学部、年级和姓名定位老师，并查看工资单当前状态。</span>
+                </div>
+              </div>
               <div class="finance-list-toolbar compact-teacher-picker">
                 <label class="field-label" for="settlementStageFilter">
                   学部
@@ -1526,6 +1536,7 @@
                 </label>
                 <button class="ghost-button" id="settlementTeacherSearchButton" type="button">查询</button>
               </div>
+              <section class="settlement-status-board" id="settlementStatusBoard" aria-label="老师工资结算状态"></section>
             </div>
             <div class="settlement-teacher-card" id="settlementTeacherCard">
               <div>
@@ -1536,7 +1547,7 @@
             </div>
             <div class="salary-total">
               <div>
-                <span>应发工资</span>
+                <span>应发合计</span>
                 <strong id="settlementGrossSalary">¥0</strong>
               </div>
               <div>
@@ -1548,48 +1559,133 @@
                 <strong id="settlementNetSalary">¥0</strong>
               </div>
             </div>
-            <section class="settlement-calculation-panel" aria-labelledby="settlementCalculationTitle">
+            <section class="settlement-profile-panel" aria-labelledby="salaryProfileTitle">
               <div class="settlement-band-heading">
                 <div>
-                  <h3 id="settlementCalculationTitle">工资计算说明</h3>
-                  <p>展示该老师当前工资档案、命中的档位规则和本月课时计薪依据。</p>
+                  <h3 id="salaryProfileTitle">本学期工资档案</h3>
+                  <p>维护本学期稳定生效的职级、考核档、住房档和岗位角色；默认只读，确需调整时由财务点击编辑。</p>
+                </div>
+                <div class="settlement-band-actions">
+                  <button class="ghost-button" id="cancelTeacherSalaryProfileEdit" type="button" hidden>取消</button>
+                  <button class="ghost-button" id="saveTeacherSalaryProfile" type="button">编辑档案</button>
                 </div>
               </div>
-              <div class="settlement-calculation-grid" id="settlementCalculationGrid">
-                <div class="empty-state">选择老师后查看每一项工资的计算依据。</div>
+              <div class="payroll-rule-grid salary-profile-grid">
+                <label class="field-label">职称/学历档
+                  <select id="salaryQualificationGrade" class="lesson-select">
+                    <option value="seniorProfessor">正高</option>
+                    <option value="seniorTeacher">高级</option>
+                    <option value="firstOrDoctor">一级/博士</option>
+                    <option value="secondOrMaster">二级/硕士</option>
+                    <option value="thirdOrBachelor">三级/本科</option>
+                    <option value="ungradedOrJuniorCollege">未评级/大专</option>
+                  </select>
+                </label>
+                <label class="field-label">校龄<input id="salarySchoolYears" type="number" min="0" /></label>
+                <label class="field-label">考核档
+                  <select id="salaryAssessmentBand" class="lesson-select">
+                    <option value="high">高中专任</option>
+                    <option value="middle">初中专任</option>
+                    <option value="primaryCoreHigh">小学高段核心</option>
+                    <option value="primaryCoreLow">小学低段核心</option>
+                    <option value="primarySpecial">小学艺体信息心理</option>
+                  </select>
+                </label>
+                <label class="field-label">住房档
+                  <select id="salaryHousingTier" class="lesson-select">
+                    <option value="chief">首席</option>
+                    <option value="backboneOrGradeHead">骨干/年级主任</option>
+                    <option value="teacher">普通教师</option>
+                  </select>
+                </label>
               </div>
+              <div class="checkbox-grid salary-role-grid" aria-label="教师岗位津贴">
+                <label><input id="salaryRoleHomeroom" type="checkbox" /><span>班主任</span></label>
+                <label><input id="salaryRoleGradeHead" type="checkbox" /><span>年级主任</span></label>
+                <label><input id="salaryRoleDeputyGradeHead" type="checkbox" /><span>年级副主任</span></label>
+                <label><input id="salaryRoleTeachingResearchLeader" type="checkbox" /><span>教研组长</span></label>
+                <label><input id="salaryRoleLessonPrepLeader" type="checkbox" /><span>备课组长</span></label>
+                <label><input id="salaryRoleGraduatingClass" type="checkbox" /><span>毕业班</span></label>
+                <label><input id="salaryRoleEliteClass" type="checkbox" /><span>特优班</span></label>
+                <label><input id="salaryRoleQingbeiClass" type="checkbox" /><span>清北班</span></label>
+                <label><input id="salaryRoleBusDuty" type="checkbox" /><span>跟车老师</span></label>
+              </div>
+              <div class="homeroom-student-field" id="homeroomStudentField">
+                <label class="field-label" for="salaryHomeroomStudentCount">
+                  班主任学生数
+                  <input id="salaryHomeroomStudentCount" type="number" min="0" />
+                </label>
+                <p>仅勾选“班主任”后参与计算，用于按学生人数核算班主任津贴。</p>
+              </div>
+              <details class="special-employment-details">
+                <summary>特殊用工状态</summary>
+                <div class="special-employment-grid">
+                  <label class="field-label" for="salaryProbationRate">
+                    试用期比例
+                    <input id="salaryProbationRate" type="number" min="0" max="1" step="0.01" />
+                  </label>
+                  <p>默认 1.00 表示全额工资；只有试用期、停薪留职等特殊状态才需要调整，后续会接入人事档案自动带出。</p>
+                </div>
+              </details>
+              <section class="manual-item-editor" aria-labelledby="manualItemTitle">
+                <div class="settlement-band-heading">
+                  <div>
+                    <h4 id="manualItemTitle">本月特殊奖扣</h4>
+                    <p>只记录本月临时补发、特殊奖励、考勤扣减等例外项；常规工资和岗位津贴按上方学期档案与全校规则自动计算。</p>
+                  </div>
+                  <div class="settlement-band-actions">
+                    <button class="ghost-button" id="saveSalaryManualItems" type="button">保存本月奖扣</button>
+                  </div>
+                </div>
+                <div class="manual-item-form">
+                  <label class="field-label" for="salaryManualItemName">
+                    项目名称
+                    <input id="salaryManualItemName" type="text" placeholder="例如 校级公开课奖励" />
+                  </label>
+                  <label class="field-label" for="salaryManualItemCategory">
+                    类型
+                    <select class="lesson-select" id="salaryManualItemCategory">
+                      <option value="supplement">奖励/补发</option>
+                      <option value="attendanceDeduction">考勤扣减</option>
+                      <option value="deduction">其他扣减</option>
+                    </select>
+                  </label>
+                  <label class="field-label" for="salaryManualItemAmount">
+                    金额
+                    <input id="salaryManualItemAmount" type="number" min="0" step="1" placeholder="0" />
+                  </label>
+                  <label class="field-label" for="salaryManualItemBasis">
+                    说明
+                    <input id="salaryManualItemBasis" type="text" placeholder="审批单号、原因或备注" />
+                  </label>
+                  <button class="ghost-button" id="addSalaryManualItem" type="button">添加奖扣项</button>
+                </div>
+                <div class="manual-item-list" id="salaryManualItemsList"></div>
+              </section>
+              <input id="salaryManualItemsJson" type="hidden" value="[]" />
             </section>
             <section class="settlement-flow-band" aria-labelledby="settlementFlowTitle">
               <div class="settlement-band-heading">
                 <div>
                   <h3 id="settlementFlowTitle">结算流程</h3>
-                  <p id="settlementNextAction">先生成本月薪资，再等待工作量完成审批。</p>
+                  <p id="settlementNextAction">先生成本月工资明细，再等待老师确认或提出异议。</p>
                 </div>
               </div>
               <div class="settlement-workflow-steps" id="settlementWorkflowSteps"></div>
               <div class="settlement-actions">
                 <div class="settlement-action-group">
-                  <span>批量处理</span>
+                  <span>生成与导出</span>
                   <button class="ghost-button" id="batchGeneratePayroll" type="button">
-                    生成本月薪资
+                    生成本月工资
                   </button>
                   <button class="ghost-button" id="exportPayrollCsv" type="button">
                     导出工资明细
                   </button>
                 </div>
-                <div class="settlement-action-group admin-only-actions">
-                  <span>工作量审批</span>
-                  <button class="ghost-button" id="approveAcademicWorkload" type="button">
-                    教务审批通过
-                  </button>
-                  <button class="ghost-button" id="approveSchoolWorkload" type="button">
-                    总校审批通过
-                  </button>
-                </div>
                 <div class="settlement-action-group finance-only-actions">
                   <span>财务结算</span>
                   <button class="ghost-button" id="reviewTeacherPayroll" type="button">
-                    财务复核通过
+                    异议已处理/确认无误
                   </button>
                   <button class="primary-button" id="settleTeacherPayroll" type="button">
                     锁定该老师工资
@@ -1628,145 +1724,42 @@
             <div class="panel-heading">
               <div>
                 <h2 id="payrollConfigTitle">薪资配置</h2>
-                <p>维护全校薪资规则、老师工资档案和单个老师的特殊奖扣。薪资结算页只负责复核与锁定。</p>
-              </div>
-            </div>
-            <div class="settlement-filter-band" aria-label="工资档案老师筛选">
-              <div class="finance-list-toolbar compact-teacher-picker">
-                <label class="field-label" for="payrollConfigStageFilter">
-                  学部
-                  <select class="lesson-select" id="payrollConfigStageFilter"></select>
-                </label>
-                <label class="field-label" for="payrollConfigGradeFilter">
-                  年级
-                  <select class="lesson-select" id="payrollConfigGradeFilter"></select>
-                </label>
-                <label class="field-label" for="payrollConfigTeacherSearch">
-                  搜索老师
-                  <input id="payrollConfigTeacherSearch" type="search" placeholder="姓名、工号、学科、手机号" />
-                </label>
-                <label class="field-label" for="payrollConfigTeacherSelect">
-                  选择老师
-                  <select class="lesson-select" id="payrollConfigTeacherSelect"></select>
-                </label>
-                <button class="ghost-button" id="payrollConfigTeacherSearchButton" type="button">查询</button>
+                <p>维护全校统一的岗位、职级、津贴金额规则；老师个人档位和特殊奖扣在薪资结算工作台维护。</p>
               </div>
             </div>
             <div class="payroll-config-layout">
               <section class="payroll-rule-box" aria-labelledby="payrollRuleTitle">
                 <div class="panel-heading compact-heading">
                   <div>
-                    <h3 id="payrollRuleTitle">专任教师工资规则</h3>
-                    <p>维护不同档位和岗位对应的金额。保存后，未锁定的薪资会按新规则重新试算。</p>
+                    <h3 id="payrollRuleTitle">全校薪资规则</h3>
+                    <p>配置不同岗位、职级、考核档、校龄、住房和岗位津贴对应金额；这里不需要先选择老师。</p>
                   </div>
                   <button class="ghost-button" id="savePayrollRules" type="button">保存规则</button>
                 </div>
                 <div class="payroll-scheme-editor" id="payrollSchemeEditor"></div>
-                <div class="payroll-rule-grid">
-                  <label class="field-label">兼容基本工资<input id="ruleBaseSalary" type="number" min="0" /></label>
-                  <label class="field-label">兼容岗位工资<input id="rulePositionSalary" type="number" min="0" /></label>
-                  <label class="field-label">兼容正常课时<input id="ruleRegular" type="number" min="0" /></label>
-                  <label class="field-label">兼容早自习<input id="ruleMorning" type="number" min="0" /></label>
-                  <label class="field-label">兼容晚自习<input id="ruleEvening" type="number" min="0" /></label>
-                  <label class="field-label">兼容周末课<input id="ruleWeekend" type="number" min="0" /></label>
-                  <label class="field-label">兼容补课<input id="ruleMakeup" type="number" min="0" /></label>
+                <div class="payroll-rule-grid payroll-tax-grid">
                   <label class="field-label">个税起征点<input id="ruleTaxThreshold" type="number" min="0" /></label>
                   <label class="field-label">试算税率<input id="ruleTaxRate" type="number" min="0" step="0.01" /></label>
                 </div>
-                <details class="advanced-json-details">
-                  <summary>高级 JSON 配置</summary>
-                  <label class="field-label full-field" for="ruleTeacherSchemeJson">
-                    专任教师工资规则 JSON
-                    <textarea id="ruleTeacherSchemeJson" class="config-textarea" spellcheck="false"></textarea>
-                  </label>
+                <details class="advanced-json-details payroll-legacy-details">
+                  <summary>旧版兜底参数（一般不用）</summary>
+                  <p>这些字段只用于旧版试算或规则缺失时兜底，不是当前专任教师工资的主配置。</p>
+                  <div class="payroll-rule-grid">
+                    <label class="field-label">兜底基本工资<input id="ruleBaseSalary" type="number" min="0" /></label>
+                    <label class="field-label">兜底岗位工资<input id="rulePositionSalary" type="number" min="0" /></label>
+                    <label class="field-label">兜底正常课时<input id="ruleRegular" type="number" min="0" /></label>
+                    <label class="field-label">兜底早自习<input id="ruleMorning" type="number" min="0" /></label>
+                    <label class="field-label">兜底晚自习<input id="ruleEvening" type="number" min="0" /></label>
+                    <label class="field-label">兜底周末课<input id="ruleWeekend" type="number" min="0" /></label>
+                    <label class="field-label">兜底补课<input id="ruleMakeup" type="number" min="0" /></label>
+                  </div>
                 </details>
-              </section>
-              <section class="payroll-rule-box" aria-labelledby="salaryProfileTitle">
-                <div class="panel-heading compact-heading">
-                  <div>
-                    <h3 id="salaryProfileTitle">当前老师工资档案</h3>
-                    <p>修改后会让该老师未锁定的工资快照失效，财务需重新生成、复核、锁定。</p>
-                  </div>
-                  <button class="ghost-button" id="saveTeacherSalaryProfile" type="button">保存档案</button>
-                </div>
-                <div class="payroll-rule-grid salary-profile-grid">
-                  <label class="field-label">职称/学历档
-                    <select id="salaryQualificationGrade" class="lesson-select">
-                      <option value="seniorProfessor">正高</option>
-                      <option value="seniorTeacher">高级</option>
-                      <option value="firstOrDoctor">一级/博士</option>
-                      <option value="secondOrMaster">二级/硕士</option>
-                      <option value="thirdOrBachelor">三级/本科</option>
-                      <option value="ungradedOrJuniorCollege">未评级/大专</option>
-                    </select>
-                  </label>
-                  <label class="field-label">校龄<input id="salarySchoolYears" type="number" min="0" /></label>
-                  <label class="field-label">考核档
-                    <select id="salaryAssessmentBand" class="lesson-select">
-                      <option value="high">高中专任</option>
-                      <option value="middle">初中专任</option>
-                      <option value="primaryCoreHigh">小学高段核心</option>
-                      <option value="primaryCoreLow">小学低段核心</option>
-                      <option value="primarySpecial">小学艺体信息心理</option>
-                    </select>
-                  </label>
-                  <label class="field-label">住房档
-                    <select id="salaryHousingTier" class="lesson-select">
-                      <option value="chief">首席</option>
-                      <option value="backboneOrGradeHead">骨干/年级主任</option>
-                      <option value="teacher">普通教师</option>
-                    </select>
-                  </label>
-                  <label class="field-label">试用期比例<input id="salaryProbationRate" type="number" min="0" max="1" step="0.01" /></label>
-                  <label class="field-label">班主任学生数<input id="salaryHomeroomStudentCount" type="number" min="0" /></label>
-                  <label class="field-label">考勤人工扣减<input id="salaryAttendanceDeduction" type="number" min="0" /></label>
-                </div>
-                <div class="checkbox-grid salary-role-grid" aria-label="教师岗位津贴">
-                  <label><input id="salaryRoleHomeroom" type="checkbox" /> 班主任</label>
-                  <label><input id="salaryRoleGradeHead" type="checkbox" /> 年级主任</label>
-                  <label><input id="salaryRoleDeputyGradeHead" type="checkbox" /> 年级副主任</label>
-                  <label><input id="salaryRoleTeachingResearchLeader" type="checkbox" /> 教研组长</label>
-                  <label><input id="salaryRoleLessonPrepLeader" type="checkbox" /> 备课组长</label>
-                  <label><input id="salaryRoleGraduatingClass" type="checkbox" /> 毕业班</label>
-                  <label><input id="salaryRoleEliteClass" type="checkbox" /> 特优班</label>
-                  <label><input id="salaryRoleQingbeiClass" type="checkbox" /> 清北班</label>
-                </div>
-                <section class="manual-item-editor" aria-labelledby="manualItemTitle">
-                  <div class="settlement-band-heading">
-                    <div>
-                      <h4 id="manualItemTitle">特殊奖扣</h4>
-                      <p>只用于临时补发、特殊奖励、人工扣减等例外项；常规岗位津贴应在上方岗位角色和规则中维护。</p>
-                    </div>
-                  </div>
-                  <div class="manual-item-form">
-                    <label class="field-label" for="salaryManualItemName">
-                      项目名称
-                      <input id="salaryManualItemName" type="text" placeholder="例如 校级公开课奖励" />
-                    </label>
-                    <label class="field-label" for="salaryManualItemCategory">
-                      类型
-                      <select class="lesson-select" id="salaryManualItemCategory">
-                        <option value="supplement">奖励/补发</option>
-                        <option value="deduction">扣减</option>
-                      </select>
-                    </label>
-                    <label class="field-label" for="salaryManualItemAmount">
-                      金额
-                      <input id="salaryManualItemAmount" type="number" min="0" step="1" placeholder="0" />
-                    </label>
-                    <label class="field-label" for="salaryManualItemBasis">
-                      说明
-                      <input id="salaryManualItemBasis" type="text" placeholder="审批单号、原因或备注" />
-                    </label>
-                    <button class="ghost-button" id="addSalaryManualItem" type="button">添加奖扣项</button>
-                  </div>
-                  <div class="manual-item-list" id="salaryManualItemsList"></div>
-                </section>
                 <details class="advanced-json-details">
-                  <summary>高级补充项 JSON</summary>
-                  <label class="field-label full-field" for="salaryManualItemsJson">
-                    财务补充项 JSON
-                    <textarea id="salaryManualItemsJson" class="config-textarea small" spellcheck="false"></textarea>
+                  <summary>开发者高级配置（JSON）</summary>
+                  <label class="field-label full-field" for="ruleTeacherSchemeJson">
+                    专任教师工资规则原始 JSON
+                    <small>用于开发调试、批量迁移或一次性调整完整规则；日常配置请使用上方可视化表单。</small>
+                    <textarea id="ruleTeacherSchemeJson" class="config-textarea" spellcheck="false"></textarea>
                   </label>
                 </details>
               </section>

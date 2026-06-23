@@ -2179,15 +2179,19 @@ function invalidateOpenPayrollDetails(db, predicate = () => true) {
   return before - db.payrollDetails.length;
 }
 
-function assertWorkloadSchoolApproved(db, teacherId, month = "2026-06") {
-  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
-  if (!["school_approved", "locked"].includes(confirmation?.status)) {
-    const error = new Error("请先完成老师确认、教务审批和总校审批，再进行薪资复核或锁定");
+function assertPayrollTeacherHandled(target) {
+  if (!target) {
+    const error = new Error("请先由财务生成本月工资明细");
     error.statusCode = 409;
-    error.details = { confirmationStatus: confirmation?.status || "unconfirmed" };
     throw error;
   }
-  return confirmation;
+  if (!["teacher_confirmed", "disputed", "reviewed", "locked"].includes(target.status)) {
+    const error = new Error("请先由老师确认工资明细或提出异议");
+    error.statusCode = 409;
+    error.details = { payrollStatus: target.status || "generated" };
+    throw error;
+  }
+  return target;
 }
 
 function assertMonthTermEditable(db, month = "2026-06", actionName = "修改月度数据") {
@@ -2230,10 +2234,18 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
           status: generated.status,
           generatedAt: generated.generatedAt,
           generatedByName: generated.generatedByName,
-          reviewedAt: generated.reviewedAt || "",
-          reviewedByName: generated.reviewedByName || "",
-          lockedAt: generated.lockedAt || "",
-          lockedByName: generated.lockedByName || "",
+	          reviewedAt: generated.reviewedAt || "",
+	          reviewedByName: generated.reviewedByName || "",
+	          teacherConfirmedAt: generated.teacherConfirmedAt || "",
+	          teacherConfirmedByName: generated.teacherConfirmedByName || "",
+	          disputedAt: generated.disputedAt || "",
+	          disputedByName: generated.disputedByName || "",
+	          disputeReason: generated.disputeReason || "",
+	          disputeResolvedAt: generated.disputeResolvedAt || "",
+	          disputeResolvedByName: generated.disputeResolvedByName || "",
+	          disputeResolution: generated.disputeResolution || "",
+	          lockedAt: generated.lockedAt || "",
+	          lockedByName: generated.lockedByName || "",
           unlockedAt: generated.unlockedAt || "",
           unlockedByName: generated.unlockedByName || "",
           unlockReason: generated.unlockReason || "",
@@ -2270,11 +2282,28 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     month,
     termId: term.id,
     termName: term.name,
-    status: "generated",
-    generatedAt: now,
-    generatedByAccountId: actorAccount?.id || "",
-    generatedByName: actorAccount?.name || "",
-    summarySnapshot: {
+	    status: "generated",
+	    generatedAt: now,
+	    generatedByAccountId: actorAccount?.id || "",
+	    generatedByName: actorAccount?.name || "",
+	    reviewedAt: "",
+	    reviewedByAccountId: "",
+	    reviewedByName: "",
+	    teacherConfirmedAt: "",
+	    teacherConfirmedByAccountId: "",
+	    teacherConfirmedByName: "",
+	    disputedAt: "",
+	    disputedByAccountId: "",
+	    disputedByName: "",
+	    disputeReason: "",
+	    disputeResolvedAt: "",
+	    disputeResolvedByAccountId: "",
+	    disputeResolvedByName: "",
+	    disputeResolution: "",
+	    lockedAt: "",
+	    lockedByAccountId: "",
+	    lockedByName: "",
+	    summarySnapshot: {
       salarySchemeVersion: detail.salarySchemeVersion,
       baseSalary: detail.baseSalary,
       assessmentSalary: detail.assessmentSalary || 0,
@@ -2316,15 +2345,98 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     grossPay: detail.grossPay,
     netPay: detail.netPay,
   });
+	  return teacherPayrollDetail(db, teacherId, month);
+	}
+
+export function confirmTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
+  assertMonthTermEditable(db, month, "确认工资明细");
+  const target = findTeacherPayrollDetail(db, teacherId, month);
+  if (!target) {
+    const error = new Error("财务尚未生成本月工资明细，暂不能确认");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
+  if (!["generated", "teacher_confirmed"].includes(target.status)) {
+    const error = new Error(target.status === "disputed" ? "已提交异议，等待财务处理" : "当前工资单状态不能由老师确认");
+    error.statusCode = 409;
+    error.details = { payrollStatus: target.status };
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  target.status = "teacher_confirmed";
+  target.teacherConfirmedAt = now;
+  target.teacherConfirmedByAccountId = actorAccount?.id || "";
+  target.teacherConfirmedByName = actorAccount?.name || "";
+  target.disputedAt = "";
+  target.disputedByAccountId = "";
+  target.disputedByName = "";
+  target.disputeReason = "";
+  target.updatedAt = now;
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_teacher_confirm",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+  });
+  return teacherPayrollDetail(db, teacherId, month);
+}
+
+export function disputeTeacherPayrollDetail(db, teacherId, month = "2026-06", reason = "", actorAccount = null) {
+  assertMonthTermEditable(db, month, "提出工资异议");
+  const target = findTeacherPayrollDetail(db, teacherId, month);
+  if (!target) {
+    const error = new Error("财务尚未生成本月工资明细，暂不能提出异议");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (target.status === "locked") {
+    const error = new Error("工资已锁定，需财务解锁后才能提出异议");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (!["generated", "teacher_confirmed", "disputed"].includes(target.status)) {
+    const error = new Error("当前工资单状态不能提交异议");
+    error.statusCode = 409;
+    error.details = { payrollStatus: target.status };
+    throw error;
+  }
+  const cleanReason = String(reason || "").trim();
+  if (!cleanReason) {
+    const error = new Error("请填写异议说明");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  target.status = "disputed";
+  target.disputedAt = now;
+  target.disputedByAccountId = actorAccount?.id || "";
+  target.disputedByName = actorAccount?.name || "";
+  target.disputeReason = cleanReason;
+  target.disputeResolvedAt = "";
+  target.disputeResolvedByAccountId = "";
+  target.disputeResolvedByName = "";
+  target.disputeResolution = "";
+  target.updatedAt = now;
+  db.meta.updatedAt = now;
+  appendAuditLog(db, {
+    action: "payroll_teacher_dispute",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    teacherId,
+    month,
+    reason: cleanReason,
+  });
   return teacherPayrollDetail(db, teacherId, month);
 }
 
 export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
-  assertMonthTermEditable(db, month, "复核薪资");
-  assertWorkloadSchoolApproved(db, teacherId, month);
-  const existing = findTeacherPayrollDetail(db, teacherId, month);
-  const detail = existing || generateTeacherPayrollDetail(db, teacherId, month, actorAccount).generated;
-  const target = findTeacherPayrollDetail(db, teacherId, month) || detail;
+  assertMonthTermEditable(db, month, "处理工资异议");
+  const target = assertPayrollTeacherHandled(findTeacherPayrollDetail(db, teacherId, month));
   if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
 
   const now = new Date().toISOString();
@@ -2332,10 +2444,15 @@ export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", act
   target.reviewedAt = now;
   target.reviewedByAccountId = actorAccount?.id || "";
   target.reviewedByName = actorAccount?.name || "";
+  target.disputeResolvedAt = now;
+  target.disputeResolvedByAccountId = actorAccount?.id || "";
+  target.disputeResolvedByName = actorAccount?.name || "";
+  target.disputeResolution =
+    target.disputeReason && !target.disputeResolution ? "财务已处理老师异议并确认当前工资单" : target.disputeResolution || "";
   target.updatedAt = now;
   db.meta.updatedAt = now;
   appendAuditLog(db, {
-    action: "payroll_review",
+    action: target.disputeReason ? "payroll_dispute_resolve" : "payroll_review",
     actorAccountId: actorAccount?.id || "",
     actorName: actorAccount?.name || "",
     teacherId,
@@ -2346,15 +2463,15 @@ export function reviewTeacherPayrollDetail(db, teacherId, month = "2026-06", act
 
 export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null) {
   assertMonthTermEditable(db, month, "锁定薪资");
-  assertWorkloadSchoolApproved(db, teacherId, month);
   let target = findTeacherPayrollDetail(db, teacherId, month);
   if (!target) {
-    generateTeacherPayrollDetail(db, teacherId, month, actorAccount);
-    target = findTeacherPayrollDetail(db, teacherId, month);
+    const error = new Error("请先生成工资明细并完成老师确认/异议处理");
+    error.statusCode = 409;
+    throw error;
   }
   if (target.status === "locked") return teacherPayrollDetail(db, teacherId, month);
   if (target.status !== "reviewed") {
-    const error = new Error("请先完成财务复核，再锁定薪资");
+    const error = new Error("请先完成老师确认和财务处理，再锁定薪资");
     error.statusCode = 409;
     throw error;
   }
@@ -2376,8 +2493,8 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
   target.lockedByName = actorAccount?.name || "";
   target.updatedAt = now;
 
-  const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
-  if (confirmation) {
+	const confirmation = findMonthlyWorkloadConfirmation(db, teacherId, month);
+	if (confirmation) {
     confirmation.status = "locked";
     confirmation.stage = 3;
     confirmation.lockedAt = now;

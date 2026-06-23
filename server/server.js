@@ -41,6 +41,7 @@ import {
   createNotification,
   createSession,
   deleteAcademicTerm,
+  confirmTeacherPayrollDetail,
   ensureDatabase,
   exportPayrollDetails,
   findActiveSession,
@@ -48,6 +49,7 @@ import {
   findTeacher,
   generatePayrollBatch,
   generateTeacherPayrollDetail,
+  disputeTeacherPayrollDetail,
   lockTeacherPayrollDetail,
   markNotificationRead,
   publicAccount,
@@ -194,6 +196,32 @@ function teacherPayrollSummaryOnly(payroll) {
           academicApprovedAt: payroll.confirmation.academicApprovedAt,
           schoolApprovedAt: payroll.confirmation.schoolApprovedAt,
           lockedAt: payroll.confirmation.lockedAt,
+        }
+      : null,
+  };
+}
+
+function teacherPayrollForConfirmation(payroll) {
+  if (!payroll) return null;
+  return {
+    teacher: teacherIdentityOnly(payroll.teacher),
+    month: payroll.month,
+    grossPay: payroll.grossPay || 0,
+    tax: payroll.tax || 0,
+    netPay: payroll.netPay || 0,
+    rows: payroll.rows || [],
+    workloadSummary: payroll.workloadSummary || null,
+    generated: payroll.generated
+      ? {
+          id: payroll.generated.id,
+          status: payroll.generated.status,
+          generatedAt: payroll.generated.generatedAt,
+          reviewedAt: payroll.generated.reviewedAt,
+          teacherConfirmedAt: payroll.generated.teacherConfirmedAt,
+          disputedAt: payroll.generated.disputedAt,
+          disputeReason: payroll.generated.disputeReason,
+          disputeResolvedAt: payroll.generated.disputeResolvedAt,
+          lockedAt: payroll.generated.lockedAt,
         }
       : null,
   };
@@ -943,7 +971,16 @@ async function handleApi(req, res, db, url) {
         }
         const month = url.searchParams.get("month") || "2026-06";
         const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
-        sendJson(res, 200, auth.account.role === "teacher" ? teacherPayrollSummaryOnly(payroll) : payroll);
+        const wantsConfirmationDetail = url.searchParams.get("detail") === "confirmation";
+        sendJson(
+          res,
+          200,
+          auth.account.role === "teacher"
+            ? wantsConfirmationDetail
+              ? teacherPayrollForConfirmation(payroll)
+              : teacherPayrollSummaryOnly(payroll)
+            : payroll,
+        );
         return;
       }
 
@@ -970,6 +1007,33 @@ async function handleApi(req, res, db, url) {
         const result = reviewTeacherPayrollDetail(db, teacherId, month, auth.account);
         await saveDatabase(db);
         sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "teacher-confirm") {
+        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+          sendError(res, 403, "只能由老师本人确认工资明细");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const result = confirmTeacherPayrollDetail(db, teacherId, month, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, teacherPayrollForConfirmation(result));
+        return;
+      }
+
+      if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "dispute") {
+        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+          sendError(res, 403, "只能由老师本人提出工资异议");
+          return;
+        }
+        const body = await readJsonBody(req);
+        const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        const reason = String(body.reason || "").trim();
+        const result = disputeTeacherPayrollDetail(db, teacherId, month, reason, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, teacherPayrollForConfirmation(result));
         return;
       }
 

@@ -125,6 +125,7 @@ export const DEFAULT_PAYROLL_RULES = {
         graduatingClass: 1000,
         eliteClass: 1000,
         qingbeiClass: 2000,
+        busDuty: 0,
       },
       middle: {
         gradeHead: 4500,
@@ -133,6 +134,7 @@ export const DEFAULT_PAYROLL_RULES = {
         lessonPrepLeader: 800,
         homeroomPerStudent: 50,
         graduatingClass: 900,
+        busDuty: 0,
       },
       primary: {
         gradeHead: 2650,
@@ -148,6 +150,7 @@ export const DEFAULT_PAYROLL_RULES = {
         graduatingClass: 200,
         standardizedExam: 200,
         olympiadHomeroom: 800,
+        busDuty: 0,
       },
     },
   },
@@ -276,6 +279,7 @@ export function defaultTeacherSalaryProfile(teacher = {}, seedIndex = null) {
       graduatingClass,
       eliteClass: teacher.stageId === "high" && index % 40 === 0,
       qingbeiClass: teacher.stageId === "high" && index % 160 === 0,
+      busDuty: false,
       firstGrade: teacher.stageId === "primary" && index % 40 === 0,
       doubleChinese: teacher.stageId === "primary" && teacher.primarySubjectId === "chinese" && index % 50 === 0,
       standardizedExam: teacher.stageId === "primary" && index % 30 === 0,
@@ -481,6 +485,7 @@ function roleComponents(teacher, profile, scheme) {
   push(roles.graduatingClass, "毕业班津贴", cfg.graduatingClass, "毕业年级任课津贴");
   push(roles.eliteClass, "特优班津贴", cfg.eliteClass, "高中部特优班任课津贴");
   push(roles.qingbeiClass, "清北班津贴", cfg.qingbeiClass, "高中部清北班任课津贴");
+  push(roles.busDuty, "跟车老师津贴", cfg.busDuty, "按学段跟车老师岗位津贴标准");
   push(roles.firstGrade, "一年级津贴", cfg.firstGrade, "小学一年级岗位津贴");
   push(roles.doubleChinese, "双班语文津贴", cfg.doubleChinese, "小学双班语文津贴");
   push(roles.standardizedExam, "统考津贴", cfg.standardizedExam, "小学统考科目津贴");
@@ -492,12 +497,16 @@ function roleComponents(teacher, profile, scheme) {
 function manualComponents(profile) {
   const items = Array.isArray(profile.manualItems) ? profile.manualItems : [];
   const components = items
-    .map((item, index) => ({
-      name: item.name || `补充项 ${index + 1}`,
-      basis: item.basis || "财务补充项",
-      amount: roundMoney(item.amount),
-      category: item.category || (Number(item.amount) < 0 ? "deduction" : "supplement"),
-    }))
+    .map((item, index) => {
+      const rawCategory = item.category || (Number(item.amount) < 0 ? "deduction" : "supplement");
+      const isDeduction = ["deduction", "attendanceDeduction"].includes(rawCategory) || Number(item.amount) < 0;
+      return {
+        name: item.name || `补充项 ${index + 1}`,
+        basis: rawCategory === "attendanceDeduction" ? item.basis || "本月考勤扣减" : item.basis || "财务补充项",
+        amount: isDeduction ? -Math.abs(roundMoney(item.amount)) : Math.abs(roundMoney(item.amount)),
+        category: isDeduction ? "deduction" : "supplement",
+      };
+    })
     .filter((item) => item.amount);
 
   if (Number(profile.attendanceDeduction || 0) > 0) {

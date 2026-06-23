@@ -22,6 +22,7 @@ const OPTIONAL_COLUMNS = [
   "graduatingClass",
   "eliteClass",
   "qingbeiClass",
+  "busDuty",
   "attendanceDeduction",
   "manualItemsJson",
 ];
@@ -147,6 +148,7 @@ function salaryProfileFromRow(row, baseTeacher, errors) {
       graduatingClass: booleanValue(row.graduatingClass, defaults.roles.graduatingClass),
       eliteClass: booleanValue(row.eliteClass, defaults.roles.eliteClass),
       qingbeiClass: booleanValue(row.qingbeiClass, defaults.roles.qingbeiClass),
+      busDuty: booleanValue(row.busDuty, defaults.roles.busDuty),
     },
     manualItems: parseManualItemsJson(row.manualItemsJson, row, errors),
   };
