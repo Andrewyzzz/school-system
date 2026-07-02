@@ -153,6 +153,7 @@ function ensureSchedulingStore(db) {
   if (!Array.isArray(db.teacherScheduleRules)) db.teacherScheduleRules = [];
   if (!Array.isArray(db.scheduleChangeRequests)) db.scheduleChangeRequests = [];
   if (!Array.isArray(db.roomResourceOverrides)) db.roomResourceOverrides = [];
+  if (!Array.isArray(db.schedulePeriodTemplates)) db.schedulePeriodTemplates = [];
 }
 
 function pushScheduleNotification(db, options = {}, actorAccount = null) {
@@ -246,6 +247,130 @@ function scopedConfigId(prefix, termId, ...parts) {
     .replace(/^-+|-+$/g, "")
     .toUpperCase();
   return `${prefix}-${suffix}`;
+}
+
+function clockTime(value) {
+  const text = String(value || "").trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : "";
+}
+
+function timeToMinutes(value) {
+  const normalized = clockTime(value);
+  if (!normalized) return null;
+  const [hour, minute] = normalized.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function periodTypeLabel(type = "regular") {
+  if (type === "selfStudy") return "自习";
+  if (type === "activity") return "活动";
+  if (type === "evening") return "晚自习";
+  return "正课";
+}
+
+function periodDayPartFromTime(startTime = "") {
+  const minutes = timeToMinutes(startTime);
+  if (minutes === null) return "afternoon";
+  if (minutes < 12 * 60) return "morning";
+  return "afternoon";
+}
+
+function defaultSchedulePeriods() {
+  return PERIODS.map((period) => {
+    const [startTime, endTime] = String(period.time || "").split("-");
+    return {
+      ...period,
+      label: `第 ${period.period} 节`,
+      startTime,
+      endTime,
+      type: "regular",
+      typeName: periodTypeLabel("regular"),
+      dayPart: periodDayPartFromTime(startTime),
+      active: true,
+    };
+  });
+}
+
+function normalizeSchedulePeriods(periods = [], options = {}) {
+  const strict = Boolean(options.strict);
+  const source = Array.isArray(periods) && periods.length ? periods : defaultSchedulePeriods();
+  const normalized = [];
+
+  source.slice(0, 12).forEach((period, index) => {
+    const [fallbackStart = "", fallbackEnd = ""] = String(period.time || "").split("-");
+    const startTime = clockTime(period.startTime || fallbackStart);
+    const endTime = clockTime(period.endTime || fallbackEnd);
+    const startMinutes = timeToMinutes(startTime);
+    const endMinutes = timeToMinutes(endTime);
+    if (!startTime || !endTime || startMinutes === null || endMinutes === null || startMinutes >= endMinutes) {
+      if (strict) {
+        const error = new Error(`第 ${index + 1} 节时间无效，请确认开始和结束时间`);
+        error.statusCode = 400;
+        throw error;
+      }
+      return;
+    }
+    const type = ["regular", "selfStudy", "activity", "evening"].includes(period.type) ? period.type : "regular";
+    normalized.push({
+      period: Number.parseInt(period.period, 10) || index + 1,
+      label: String(period.label || "").trim(),
+      startTime,
+      endTime,
+      startMinutes,
+      endMinutes,
+      type,
+      typeName: periodTypeLabel(type),
+      active: period.active !== false,
+    });
+  });
+
+  normalized.sort((a, b) => Number(a.period || 0) - Number(b.period || 0) || a.startMinutes - b.startMinutes);
+  if (!normalized.length) {
+    if (strict) {
+      const error = new Error("请至少保留 1 个可排课节次");
+      error.statusCode = 400;
+      throw error;
+    }
+    return defaultSchedulePeriods();
+  }
+
+  for (let index = 1; index < normalized.length; index += 1) {
+    const previous = normalized[index - 1];
+    const current = normalized[index];
+    if (current.startMinutes < previous.endMinutes) {
+      if (strict) {
+        const error = new Error(`第 ${index + 1} 节与上一节时间重叠`);
+        error.statusCode = 400;
+        throw error;
+      }
+      return defaultSchedulePeriods();
+    }
+  }
+
+  return normalized.map((period, index) => {
+    const nextPeriod = index + 1;
+    return {
+      period: nextPeriod,
+      label: period.label || `第 ${nextPeriod} 节`,
+      startTime: period.startTime,
+      endTime: period.endTime,
+      time: `${period.startTime}-${period.endTime}`,
+      type: period.type,
+      typeName: period.typeName,
+      dayPart: periodDayPartFromTime(period.startTime),
+      active: period.active !== false,
+    };
+  });
+}
+
+function schedulingPeriods(db, division, grade, term) {
+  const template = termMergedRows(
+    db.schedulePeriodTemplates || [],
+    term,
+    (row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade),
+    (row) => `${row.stageId}:${row.grade}`,
+  ).find((row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade));
+  return normalizeSchedulePeriods(template?.periods || []);
 }
 
 function findScopedRoom(db, roomId, term) {
@@ -364,16 +489,16 @@ function normalizeDurationMinutes(value, fallback = DEFAULT_LESSON_DURATION_MINU
   return Math.min(Math.max(number, 20), 120);
 }
 
-function normalizeMaxPerClassPerDay(value, fallback = 0) {
+function normalizeMaxPerClassPerDay(value, fallback = 0, maxPeriodCount = PERIODS.length) {
   const number = Number.parseInt(value, 10);
   if (!Number.isFinite(number)) return fallback;
-  return Math.min(Math.max(number, 0), PERIODS.length);
+  return Math.min(Math.max(number, 0), maxPeriodCount);
 }
 
-function normalizeMinPerClassPerDay(value, fallback = 0) {
+function normalizeMinPerClassPerDay(value, fallback = 0, maxPeriodCount = PERIODS.length) {
   const number = Number.parseInt(value, 10);
   if (!Number.isFinite(number)) return fallback;
-  return Math.min(Math.max(number, 0), PERIODS.length);
+  return Math.min(Math.max(number, 0), maxPeriodCount);
 }
 
 function normalizeMinWeeklyDays(value, fallback = 0) {
@@ -382,10 +507,10 @@ function normalizeMinWeeklyDays(value, fallback = 0) {
   return Math.min(Math.max(number, 0), 5);
 }
 
-function normalizeMaxConsecutivePerClass(value, fallback = 0) {
+function normalizeMaxConsecutivePerClass(value, fallback = 0, maxPeriodCount = PERIODS.length) {
   const number = Number.parseInt(value, 10);
   if (!Number.isFinite(number)) return fallback;
-  return Math.min(Math.max(number, 0), PERIODS.length);
+  return Math.min(Math.max(number, 0), maxPeriodCount);
 }
 
 function normalizeAllowConsecutive(value, fallback = true) {
@@ -410,17 +535,18 @@ function normalizeRoomType(value, fallback = "homeroom") {
   return fallback === "homeroom" ? "homeroom" : normalizeRoomType(fallback, "homeroom");
 }
 
-function normalizeSubjectForbiddenPeriods(value) {
-  return normalizedConstraintNumbers(value, 1, PERIODS.length);
+function normalizeSubjectForbiddenPeriods(value, maxPeriodCount = PERIODS.length) {
+  return normalizedConstraintNumbers(value, 1, maxPeriodCount);
 }
 
-function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
+function courseRuleConstraintFields(rule = {}, fallbackRule = {}, maxPeriodCount = PERIODS.length) {
   const fallbackAllowConsecutive =
     fallbackRule.allowConsecutive !== undefined ? Boolean(fallbackRule.allowConsecutive) : true;
   const allowConsecutive = normalizeAllowConsecutive(rule.allowConsecutive ?? fallbackRule.allowConsecutive, fallbackAllowConsecutive);
   const minPerClassPerDay = normalizeMinPerClassPerDay(
     rule.minPerClassPerDay ?? fallbackRule.minPerClassPerDay,
     fallbackRule.minPerClassPerDay || 0,
+    maxPeriodCount,
   );
   const maxConsecutiveFallback =
     fallbackRule.maxConsecutivePerClass !== undefined
@@ -431,12 +557,14 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
   const maxConsecutivePerClass = normalizeMaxConsecutivePerClass(
     rule.maxConsecutivePerClass ?? fallbackRule.maxConsecutivePerClass,
     maxConsecutiveFallback,
+    maxPeriodCount,
   );
   return {
     minPerClassPerDay,
     maxPerClassPerDay: normalizeMaxPerClassPerDay(
       rule.maxPerClassPerDay ?? fallbackRule.maxPerClassPerDay,
       fallbackRule.maxPerClassPerDay || 0,
+      maxPeriodCount,
     ),
     minWeeklyDays:
       minPerClassPerDay > 0
@@ -447,7 +575,7 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
           ),
     maxConsecutivePerClass,
     allowConsecutive: maxConsecutivePerClass === 1 ? false : allowConsecutive,
-    forbiddenPeriods: normalizeSubjectForbiddenPeriods(rule.forbiddenPeriods ?? fallbackRule.forbiddenPeriods),
+    forbiddenPeriods: normalizeSubjectForbiddenPeriods(rule.forbiddenPeriods ?? fallbackRule.forbiddenPeriods, maxPeriodCount),
     preferredDayPart: normalizePreferredDayPart(
       rule.preferredDayPart ?? fallbackRule.preferredDayPart,
       fallbackRule.preferredDayPart || "any",
@@ -459,7 +587,7 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}) {
   };
 }
 
-function schedulingCourseRules(db, division, grade, term = currentTerm(db)) {
+function schedulingCourseRules(db, division, grade, term = currentTerm(db), maxPeriodCount = PERIODS.length) {
   const savedRules = new Map(
     termMergedRows(
       db.gradeCourseRules || [],
@@ -482,7 +610,7 @@ function schedulingCourseRules(db, division, grade, term = currentTerm(db)) {
       savedRule?.durationMinutes ?? defaultRule?.durationMinutes,
       DEFAULT_LESSON_DURATION_MINUTES,
     );
-    const constraintFields = courseRuleConstraintFields(savedRule || {}, defaultRule || {});
+    const constraintFields = courseRuleConstraintFields(savedRule || {}, defaultRule || {}, maxPeriodCount);
     return {
       id: `CR-${division.stageId}-${grade.grade}-${subject.id}`,
       termId: savedRule?.termId || term.id,
@@ -554,8 +682,8 @@ function publicScheduleChangeRequests(db, division, grade, term) {
     .slice(0, 20);
 }
 
-function schedulingSubjects(db, division, grade, term = currentTerm(db)) {
-  return schedulingCourseRules(db, division, grade, term)
+function schedulingSubjects(db, division, grade, term = currentTerm(db), courseRules = null) {
+  return (courseRules || schedulingCourseRules(db, division, grade, term))
     .filter((rule) => rule.enabled && rule.weeklyLessons > 0)
     .map((rule) => {
       const subject = subjectById(db, rule.subjectId);
@@ -786,8 +914,9 @@ export function buildSchedulingConfig(db, options = {}) {
   const term = currentTerm(db, options.termId);
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
-  const courseRules = schedulingCourseRules(db, division, grade, term);
-  const subjects = schedulingSubjects(db, division, grade, term);
+  const periods = schedulingPeriods(db, division, grade, term);
+  const courseRules = schedulingCourseRules(db, division, grade, term, periods.length);
+  const subjects = schedulingSubjects(db, division, grade, term, courseRules);
   const classes = schedulingClasses(db, division, grade, term);
   const classStructure = gradeClassStructure(classes);
   const constraints = publicScheduleConstraints(db, division, grade, term);
@@ -822,7 +951,7 @@ export function buildSchedulingConfig(db, options = {}) {
         sourceClassId: classes.find((schoolClass) => schoolClass.roomId === room.id)?.id || "",
         capacity: Number(room.capacity || 1),
       })),
-    periods: PERIODS.map((period) => ({ ...period })),
+    periods,
     courseRules,
     constraints,
     teacherRules,
@@ -1113,6 +1242,61 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   };
 }
 
+export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const stageId = String(options.stageId || "").trim();
+  const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
+  const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
+  const term = currentTerm(db, scopeConfig.termId);
+  assertEditableScheduleTerm(scopeConfig, "修改作息时间");
+  const periods = normalizeSchedulePeriods(options.periods || [], { strict: true });
+  const now = new Date().toISOString();
+
+  db.schedulePeriodTemplates = (db.schedulePeriodTemplates || []).filter(
+    (template) =>
+      !(
+        itemBelongsToTerm(template, term) &&
+        template.stageId === division.stageId &&
+        Number(template.grade) === Number(grade.grade)
+      ),
+  );
+  db.schedulePeriodTemplates.push({
+    id: scopedConfigId("SPT", term.id, division.stageId, grade.grade),
+    termId: term.id,
+    termName: term.name,
+    stageId: division.stageId,
+    stageName: division.name,
+    grade: grade.grade,
+    gradeName: grade.name,
+    periods,
+    updatedAt: now,
+    updatedByAccountId: actorAccount?.id || "",
+    updatedByName: actorAccount?.name || "",
+  });
+
+  clearScheduleDraftForScope(db, division, grade, term);
+  db.scheduleChangeRequests = (db.scheduleChangeRequests || []).filter(
+    (request) => !(request.termId === scopeConfig.termId && request.divisionId === division.id && request.gradeId === grade.id),
+  );
+  db.meta.updatedAt = now;
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "schedule_periods_update",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || "",
+    termId: term.id,
+    stageId: division.stageId,
+    grade: grade.grade,
+    periodCount: periods.length,
+    createdAt: now,
+  });
+
+  return {
+    config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+    draft: findScheduleDraft(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+  };
+}
+
 export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
@@ -1143,7 +1327,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
       enabled: Boolean(rule.enabled),
       weeklyLessons: normalizeWeeklyLessons(rule.weeklyLessons, 1),
       durationMinutes: normalizeDurationMinutes(rule.durationMinutes, DEFAULT_LESSON_DURATION_MINUTES),
-      ...courseRuleConstraintFields(rule, defaultRule),
+      ...courseRuleConstraintFields(rule, defaultRule, scopeConfig.periods?.length || PERIODS.length),
       updatedAt: new Date().toISOString(),
       updatedByAccountId: actorAccount?.id || "",
     });
@@ -1210,7 +1394,7 @@ function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAcc
     enabled: Boolean(options.enabled),
     weeklyLessons: normalizeWeeklyLessons(options.weeklyLessons, 1),
     durationMinutes: normalizeDurationMinutes(options.durationMinutes, DEFAULT_LESSON_DURATION_MINUTES),
-    ...courseRuleConstraintFields(options, defaultRule),
+    ...courseRuleConstraintFields(options, defaultRule, options.maxPeriodCount || PERIODS.length),
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
   };
@@ -1262,7 +1446,9 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
     db.subjects.push(subject);
   }
 
-  const existingRule = schedulingCourseRules(db, division, grade, term).find((rule) => rule.subjectId === subject.id);
+  const existingRule = schedulingCourseRules(db, division, grade, term, scopeConfig.periods?.length || PERIODS.length).find(
+    (rule) => rule.subjectId === subject.id,
+  );
   upsertCourseRule(
     db,
     division,
@@ -1281,6 +1467,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
       forbiddenPeriods: options.forbiddenPeriods ?? existingRule?.forbiddenPeriods ?? [],
       preferredDayPart: options.preferredDayPart ?? existingRule?.preferredDayPart ?? "any",
       requiredRoomType: options.requiredRoomType ?? existingRule?.requiredRoomType ?? SUBJECT_DEFAULT_ROOM_TYPES[subject.id] ?? "homeroom",
+      maxPeriodCount: scopeConfig.periods?.length || PERIODS.length,
     },
     actorAccount,
   );
@@ -1390,7 +1577,7 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
   }
 
   const dayIndexes = normalizedConstraintNumbers(options.dayIndexes, 0, 4);
-  const periods = normalizedConstraintNumbers(options.periods, 1, PERIODS.length);
+  const periods = normalizedConstraintNumbers(options.periods, 1, scopeConfig.periods?.length || PERIODS.length);
   if (!dayIndexes.length && !periods.length) {
     const error = new Error("请至少选择禁排星期或禁排节次");
     error.statusCode = 400;
@@ -1464,11 +1651,11 @@ export function deleteScheduleConstraint(db, options = {}, actorAccount = null) 
   return { config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }), deletedId: constraintId };
 }
 
-function normalizeUnavailableSlots(slots = []) {
+function normalizeUnavailableSlots(slots = [], maxPeriodCount = PERIODS.length) {
   const normalized = [];
   (Array.isArray(slots) ? slots : []).forEach((slot) => {
     const dayIndex = Number.parseInt(slot.dayIndex, 10);
-    const periods = normalizedConstraintNumbers(slot.periods, 1, PERIODS.length);
+    const periods = normalizedConstraintNumbers(slot.periods, 1, maxPeriodCount);
     if (!Number.isFinite(dayIndex) || dayIndex < 0 || dayIndex > 4 || !periods.length) return;
     normalized.push({
       dayIndex,
@@ -1479,15 +1666,15 @@ function normalizeUnavailableSlots(slots = []) {
   return normalized;
 }
 
-function normalizeTeacherScheduleRuleInput(options = {}) {
+function normalizeTeacherScheduleRuleInput(options = {}, maxPeriodCount = PERIODS.length) {
   return {
-    unavailableSlots: normalizeUnavailableSlots(options.unavailableSlots || []),
-    avoidPeriods: normalizedConstraintNumbers(options.avoidPeriods, 1, PERIODS.length),
-    preferPeriods: normalizedConstraintNumbers(options.preferPeriods, 1, PERIODS.length),
-    maxDailyLessons: Math.min(Math.max(Number.parseInt(options.maxDailyLessons || 4, 10), 1), PERIODS.length),
+    unavailableSlots: normalizeUnavailableSlots(options.unavailableSlots || [], maxPeriodCount),
+    avoidPeriods: normalizedConstraintNumbers(options.avoidPeriods, 1, maxPeriodCount),
+    preferPeriods: normalizedConstraintNumbers(options.preferPeriods, 1, maxPeriodCount),
+    maxDailyLessons: Math.min(Math.max(Number.parseInt(options.maxDailyLessons || 4, 10), 1), maxPeriodCount),
     maxConsecutiveLessons: Math.min(
       Math.max(Number.parseInt(options.maxConsecutiveLessons || 3, 10), 1),
-      PERIODS.length,
+      maxPeriodCount,
     ),
   };
 }
@@ -1516,7 +1703,7 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
     throw error;
   }
 
-  const normalized = normalizeTeacherScheduleRuleInput(options);
+  const normalized = normalizeTeacherScheduleRuleInput(options, scopeConfig.periods?.length || PERIODS.length);
   const now = new Date().toISOString();
   const nextRule = {
     id: scopedConfigId("TSR", term.id, division.stageId, teacherId),

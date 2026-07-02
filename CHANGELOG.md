@@ -2,6 +2,185 @@
 
 从 `2026-06-16` 开始，本项目每次功能、修复、部署或文档更新都必须记录在这里。
 
+## 2026-06-26 - 第一阶段 SQL Schema 初版
+
+- 类型：数据库 / 文档
+- 影响范围：正式数据库迁移、后续 PostgreSQL repository 接入
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `tests/phase1-production.test.js`
+  - `tests/postgres-export.test.js`
+  - 真实数据导出：1000 位老师、1005 个账号、1320 节课次、916 条考勤、1014 份工资，生成 19977 条 SQL 语句。
+- 内容：
+  - 新增 `database/postgres/001_phase1_schema.sql`，覆盖账号、教师、学期、班级、教室、排课、课次、扫码考勤、工资、通知和审计日志等第一阶段核心表。
+  - 新增 `database/README.md`，说明当前仍是 JSON 数据仓库，SQL schema 只是正式数据库迁移第一步。
+  - 新增 `server/exportPostgresData.js`，可将当前 `server/data/phase1-db.json` 导出为 PostgreSQL 数据导入 SQL。
+  - 新增 `tests/postgres-export.test.js`，验证 PostgreSQL 数据导出结构和基础映射。
+  - 更新 `docs/database-migration-plan.md`，把原先“建议表结构”改成已落地 schema 清单，并明确下一步是 PostgreSQL repository 接入和正式库试导入。
+  - README 新增数据库 schema 和迁移方案入口。
+
+## 2026-06-26 - 薪资验收阻断项二次收口
+
+- 类型：前端 / 后端 / 薪资结算 / 异常提醒 / 导出
+- 影响范围：工资记录导出、财务锁定、老师端工资确认、异常提醒、批量结算
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node tests/phase1-production.test.js`
+  - 内存数据库断言：CSV 导出返回内容；批量锁定对无阻断老师成功，对待处理课次老师失败并返回原因。
+- 内容：
+  - 工资记录 CSV 导出增加页面内下载状态和手动下载链接，避免浏览器拦截自动下载时静默失败。
+  - 财务锁定按钮与锁定阻断课次绑定，有待处理/异常课次时前置禁用，并在按钮旁显示原因。
+  - 老师端工资已锁定时，月度确认页把未完成课次解释为“未计薪归档记录”，避免“已锁定”和“待确认”并存造成误解。
+  - 异常提醒页改为合并展示扫码异常、待处理签入/签出、工资锁定阻断课次。
+  - 新增 `/api/payroll/batch-lock` 和“批量锁定可发工资”按钮，只批量锁定已确认、已复核且无阻断课次的工资单。
+
+## 2026-06-26 - 第一阶段交付阻断项收口
+
+- 类型：前端 / 后端 / 权限 / 薪资结算 / 导出 / 验收修复
+- 影响范围：行政权限、系统管理员账号、财务薪资、老师端月度确认、工资记录导出、排课发布状态
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `git diff --check`
+  - 本地接口断言：行政 `/api/teachers` 不返回 `salaryProfile/payroll`；财务汇总覆盖 1000 位老师；工资导出返回 CSV 内容；锁定失败返回具体阻断课次。
+- 内容：
+  - 新增 `sysadmin / 123456` 系统管理员账号，用于教师导入、账号重置、启用/停用等后台账号管理。
+  - 行政账号从财务结算、工资记录、薪资配置、异常提醒中移除；服务端薪资接口同步限制为财务或系统管理员。
+  - `/api/teachers` 按角色返回字段：行政只能拿老师公开身份和基础排课信息，财务/系统管理员才可拿薪资摘要和工资状态。
+  - 人员列表新增账号操作列，系统管理员可重置密码、启用或停用账号。
+  - 财务老师列表与汇总改为按当前筛选范围统计全部 1000 位老师，不再只统计当前页样例数据。
+  - 工资 CSV 导出增加空数据提示、成功提示和浏览器下载触发，避免点击后没有反馈。
+  - 锁定工资失败时返回并展示具体阻断课次，包含日期、时间、班级、课程、教室和原因。
+  - 老师端首页、月度确认和总薪资统一读取后端工资状态，避免“待确认”和“已锁定”并存。
+  - 老师端与财务端工资明细中的内部枚举值统一转换为中文档位文案。
+  - 排课总览在已有正式发布版本时不再显示“未生成”，减少草稿状态与老师端正式课表矛盾。
+
+## 2026-06-26 - 行政排课发布动作移到流程末尾
+
+- 类型：前端 / UI 流程调整
+- 影响范围：行政排课 / 生成草稿 / 最终发布
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `git diff --check`
+- 内容：
+  - “生成与发布”模块改为“生成排课草稿”，只负责生成草稿，不再放正式发布动作。
+  - “确认并发布到老师端”移动到排课预览之后的“最终发布”模块，符合先检查冲突、查看课表、再发布的操作顺序。
+  - 最终发布按钮改为主按钮样式，明确它是流程最后一步。
+
+## 2026-06-26 - 作息时间与学期创建 UI 微调
+
+- 类型：前端 / UI 打磨
+- 影响范围：行政排课 / 作息时间配置 / 学期管理
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `git diff --check`
+- 内容：
+  - 修正作息时间配置中“节次类型”下拉框视觉上移的问题，与开始/结束时间输入框统一高度和底部对齐。
+  - 学期管理的新建区域改为底部动作行，“沿用当前配置”和“新建学期”按钮合并为一组，减少按钮横向撑满造成的粗糙感。
+  - 移动端下新建学期动作区改为单列布局，保证按钮和选项不挤压。
+
+## 2026-06-26 - 行政排课新增作息时间配置
+
+- 类型：前端 / 后端 / 排课配置
+- 影响范围：行政排课 / 后端排课配置 / 硬约束 / 老师时间规则 / 学期复制配置
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/scheduling.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `git diff --check`
+  - 内存数据库验证：默认 6 节，保存 7 节作息后后端 `config.periods` 返回 7 节；硬约束和老师不可用时间可选择第 7 节，超出当前节次数会被过滤。
+- 内容：
+  - 行政排课页在“班级结构”下新增“作息时间”配置，可维护当前学期、学部、年级每天可排课节次。
+  - 支持新增/删除节次，配置开始时间、结束时间和节次类型（正课、自习、活动、晚自习）。
+  - 后端新增 `schedulePeriodTemplates` 存储和 `/api/scheduling/periods` 接口。
+  - 后端排课配置 `config.periods` 改为读取当前学期/学部/年级作息时间；未配置时继续使用默认 6 节课。
+  - 课程禁排节次、老师不可用节次、每天最多/最多连续等规则改为跟随当前节次数，不再固定按 6 节上限。
+  - 保存作息时间会清空当前年级未发布草稿和调课请求，提示重新生成受影响课表。
+  - 新建学期复制配置时同步复制作息时间；删除未投入使用学期时同步清理作息配置。
+
+## 2026-06-26 - 老师端整学期课表周次修复
+
+- 类型：前端 / 后端 / 本地演示数据修复
+- 影响范围：老师端课表 / 老师课表接口 / 周次下拉
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/server.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `git diff --check`
+- 内容：
+  - 老师端课表周次改为读取后端返回的整学期已发布周列表，不再用旧 demo 固定周次推导。
+  - 老师端课表头部新增当前学年/学期与学期起止日期，避免只看自然周日期无法判断所属学期。
+  - 顶部环境说明从固定“试运行环境 · 2026 年 6 月”改为动态展示：本地开发/正式环境 + 当前学期 + 当前结算月。
+  - 修复老师端“月度确认”闪烁/抖动：总薪资组件和确认页统一读取当前结算月，避免隐藏组件继续拉取旧的 `2026-06` 数据覆盖确认单。
+  - 修复后端登录态失效时反复请求的问题；401 后统一清理会话并回到登录态。
+  - 切换周次时只替换当前周课表，不再清空该老师已加载的其他周后端课表。
+  - 老师课表接口自动周选择优先落在当前教学周/当前结算月份附近，避免默认跳到学期最后一周。
+  - 后端老师周列表按自然时间顺序返回，便于老师按学期顺序查看。
+
+## 2026-06-25 - 本地模拟下半学期第二个月数据
+
+- 类型：本地数据 / 前端默认月份 / 试运行场景
+- 影响范围：本地 JSON 数据仓库 / 学期管理 / 排课 / 老师端 / 财务薪资
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check app.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/storage.js`
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check server/terms.js`
+  - `git diff --check`
+  - 本地数据核对：当前学期 `TERM-2026-2027-FALL`，当前结算月 `2026-10`，10 月发布课次 60 节，9 月历史工资 8 份，10 月工资样例 7 份。
+- 内容：
+  - 新增当前学期模拟数据：`2026-2027学年上学期`，周期 `2026-09-01` 至 `2027-01-31`。
+  - 学期模型新增可选 `settlementMonth` 字段，本地模拟设为 `2026-10`，用于表示当前结算月份。
+  - 前端默认结算月份改为优先读取当前学期 `settlementMonth`，避免继续固定显示 2026 年 6 月。
+  - 生成并发布小学部一年级 `2026-10-12` 自然周课表，共 60 节。
+  - 模拟 10 月课次状态：已完成、待签出、异常、未开始。
+  - 模拟工资流转状态：已保存、等待老师确认、老师已确认、有异议、财务已处理待锁定、已锁定发放。
+  - 模拟 9 月历史工资记录，便于在财务端“工资记录”中按学期/月查看。
+- 注意事项：
+  - 这是本地演示数据，已由 `saveDatabase` 自动备份原 `server/data/phase1-db.json`。
+  - 当前不提交、不部署，等本地验收确认后再决定是否提交代码改动；模拟数据不建议推到生产。
+
+## 2026-06-25 - 前端品牌露出改为通用学校管理系统
+
+- 类型：前端 / 安全收口 / 品牌隐藏
+- 影响范围：登录页 / 主导航 / 教室屏 PWA / 小程序 MVP
+- 提交：未提交
+- 部署：未部署
+- 验证：
+  - `rg -n "富源学校|school-logo|富源课堂|富源学校管理系统" index.html classroom.html classroom.webmanifest classroom-sw.js miniprogram -S` 无匹配
+  - `/Users/yyzzz/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --check classroom-sw.js`
+  - `git diff --check`
+- 内容：
+  - 移除主网页登录页和侧边栏中的校徽展示。
+  - 主网页浏览器标题、登录页品牌和侧边栏品牌统一改为“学校管理系统”。
+  - 教室屏 PWA manifest 改为通用名称，并移除校徽图标引用。
+  - 教室屏 Service Worker 缓存清单移除校徽，避免安装版继续缓存旧图标。
+  - 小程序 MVP 登录页和导航标题改为“学校管理系统”。
+  - 小程序 MVP README 标题改为通用名称。
+- 注意事项：
+  - 历史文档、部署记录和内部薪资规则版本暂不改名，用于保持审计追溯和测试稳定。
+
 ## 2026-06-23 - 薪资结算流程置顶
 
 - 类型：前端 / 体验优化

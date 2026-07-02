@@ -929,6 +929,10 @@ h2 {
   grid-template-columns: minmax(220px, 0.7fr) minmax(420px, 1.3fr);
 }
 
+.period-template-card {
+  grid-template-columns: minmax(220px, 0.7fr) minmax(420px, 1.3fr);
+}
+
 .class-structure-copy {
   display: grid;
   gap: 4px;
@@ -957,10 +961,63 @@ h2 {
 }
 
 .room-resource-type-list,
-.room-resource-add-row {
+.room-resource-add-row,
+.period-template-list {
   grid-column: 1 / -1;
   display: grid;
   gap: 10px;
+}
+
+.period-template-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: end;
+  gap: 10px;
+}
+
+.period-template-list {
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+}
+
+.period-template-row {
+  display: grid;
+  grid-template-columns: 54px minmax(100px, 1fr) minmax(100px, 1fr) minmax(104px, 0.8fr) auto;
+  gap: 8px;
+  align-items: end;
+  border: 1px solid rgba(0, 32, 104, 0.12);
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+}
+
+.period-template-index {
+  display: grid;
+  place-items: center;
+  min-height: 44px;
+  border-radius: 6px;
+  background: rgba(0, 32, 104, 0.08);
+  color: var(--brand);
+  font-weight: 800;
+}
+
+.period-template-row .field-label {
+  margin-bottom: 0;
+}
+
+.period-template-row .field-label span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.period-template-row input,
+.period-template-row .lesson-select {
+  height: 44px;
+  min-height: 44px;
+}
+
+.period-template-row .lesson-select {
+  margin-bottom: 0;
 }
 
 .room-resource-type-list {
@@ -1113,8 +1170,12 @@ h2 {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  min-height: 44px;
-  color: var(--muted);
+  min-height: 40px;
+  border: 1px solid rgba(0, 32, 104, 0.12);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 12px;
   font-size: 13px;
   line-height: 1.35;
   cursor: pointer;
@@ -1131,6 +1192,21 @@ h2 {
 
 .term-copy-toggle span {
   overflow-wrap: anywhere;
+}
+
+.term-create-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.term-create-actions #createTermButton {
+  min-width: 150px;
+  padding-inline: 22px;
+  box-shadow: none;
 }
 
 .term-list {
@@ -2310,12 +2386,21 @@ h2 {
   display: block;
 }
 
+.schedule-context-card {
+  min-width: 0;
+}
+
 .schedule-toolbar strong {
   font-size: 20px;
 }
 
 .schedule-toolbar p {
   margin: 4px 0 0;
+}
+
+.schedule-week-context {
+  color: var(--primary);
+  font-weight: 700;
 }
 
 .week-select-label {
@@ -3386,6 +3471,84 @@ td {
   background: var(--rose-soft);
 }
 
+.personnel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.payroll-lock-blocker-row td {
+  background: #fff7ed;
+}
+
+.payroll-lock-blockers {
+  display: grid;
+  gap: 10px;
+}
+
+.payroll-lock-blockers > p,
+.payroll-lock-blockers small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.payroll-lock-blocker-list {
+  display: grid;
+  gap: 8px;
+}
+
+.payroll-lock-blocker-list article {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid rgba(188, 0, 12, 0.14);
+  border-radius: 6px;
+  background: #fff;
+  padding: 10px;
+}
+
+.payroll-lock-blocker-list article div {
+  display: grid;
+  gap: 4px;
+}
+
+.payroll-lock-blocker-list article p,
+.payroll-lock-blocker-list article small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.payroll-confirm-state-note,
+.payroll-export-status {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.payroll-confirm-state-note strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+
+.payroll-confirm-state-note p {
+  margin: 0;
+}
+
+.payroll-export-status:empty {
+  display: none;
+}
+
+.payroll-export-status a {
+  color: var(--primary-strong);
+  font-weight: 900;
+}
+
 .mini-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -4345,7 +4508,7 @@ td {
 .settlement-action-group {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   align-items: end;
   gap: 8px;
   padding: 12px;
@@ -4355,14 +4518,35 @@ td {
 }
 
 .settlement-action-group.finance-only-actions {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.settlement-action-group > span,
+.settlement-action-group .action-hint {
+  grid-column: 1 / -1;
 }
 
 .settlement-action-group > span {
-  grid-column: 1 / -1;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.action-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.action-hint a {
+  color: var(--primary-strong);
+  font-weight: 900;
+}
+
+.teacher-confirm-hint {
+  margin-top: 10px;
 }
 
 .settlement-action-group button {
@@ -5314,6 +5498,15 @@ td {
     grid-template-columns: 1fr;
   }
 
+  .term-create-actions {
+    display: grid;
+    justify-content: stretch;
+  }
+
+  .term-create-actions #createTermButton {
+    width: 100%;
+  }
+
   .term-row-actions {
     justify-content: flex-start;
   }
@@ -5341,8 +5534,17 @@ td {
     padding: 8px 10px;
   }
 
-  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-toolbar > div {
-    display: none;
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-context-card {
+    display: block;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-context-card strong {
+    font-size: 16px;
+  }
+
+  body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .schedule-context-card p {
+    margin-top: 2px;
+    font-size: 12px;
   }
 
   body[data-account-role="teacher"][data-active-view="schedule"] #scheduleView .week-select-label .lesson-select {
@@ -5474,6 +5676,7 @@ td {
 
   .class-structure-card,
   .class-structure-controls,
+  .period-template-card,
   .room-resource-card,
   .room-resource-controls {
     grid-template-columns: 1fr;
@@ -5489,8 +5692,14 @@ td {
 
   .room-resource-type-list,
   .room-resource-type-row,
-  .room-resource-add-row {
+  .room-resource-add-row,
+  .period-template-list,
+  .period-template-row {
     grid-template-columns: 1fr;
+  }
+
+  .period-template-actions {
+    display: grid;
   }
 
   .room-resource-type-row > span {

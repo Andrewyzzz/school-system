@@ -311,6 +311,15 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       status: "active",
     },
     {
+      id: "ACC-SYSTEM-ADMIN",
+      username: "sysadmin",
+      passwordHash: defaultPasswordHash,
+      role: "system_admin",
+      name: "系统管理员",
+      department: "系统管理",
+      status: "active",
+    },
+    {
       id: "ACC-FINANCE",
       username: "finance",
       passwordHash: defaultPasswordHash,
@@ -530,6 +539,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     accounts,
     teacherAssignments,
     gradeCourseRules: [],
+    schedulePeriodTemplates: [],
     scheduleConstraints: [],
     teacherScheduleRules: [],
     scheduleChangeRequests: [],
@@ -560,6 +570,7 @@ function normalizeDatabase(db) {
     "teachers",
     "accounts",
     "gradeCourseRules",
+    "schedulePeriodTemplates",
     "scheduleConstraints",
     "teacherScheduleRules",
     "scheduleChangeRequests",
@@ -598,6 +609,7 @@ function normalizeDatabase(db) {
   const activeTerm = currentTerm(db);
   [
     "roomResourceOverrides",
+    "schedulePeriodTemplates",
     "scheduleDrafts",
     "scheduleVersions",
     "scheduleChangeRequests",
@@ -680,6 +692,14 @@ function normalizeDatabase(db) {
     const classroomAccount = (defaults.accounts || []).find((account) => account.username === "classroom");
     if (classroomAccount) {
       db.accounts.push(classroomAccount);
+      changed = true;
+    }
+  }
+
+  if (!(db.accounts || []).some((account) => account.username === "sysadmin")) {
+    const systemAdminAccount = (defaults.accounts || []).find((account) => account.username === "sysadmin");
+    if (systemAdminAccount) {
+      db.accounts.push(systemAdminAccount);
       changed = true;
     }
   }
@@ -941,6 +961,7 @@ function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
   const sourceTeacherRules = sourceTermRows(db.teacherScheduleRules || [], sourceTermId);
   const sourceConstraints = sourceTermRows(db.scheduleConstraints || [], sourceTermId);
   const sourceRoomResourceOverrides = sourceTermRows(db.roomResourceOverrides || [], sourceTermId);
+  const sourcePeriodTemplates = sourceTermRows(db.schedulePeriodTemplates || [], sourceTermId);
   return {
     courseRuleCount: sourceCourseRules.length,
     teacherAssignmentCount: sourceAssignments.filter(
@@ -949,6 +970,7 @@ function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
     teacherRuleCount: sourceTeacherRules.length,
     constraintCount: sourceConstraints.filter((constraint) => constraint.active !== false).length,
     roomResourceConfigCount: sourceRoomResourceOverrides.length,
+    periodTemplateCount: sourcePeriodTemplates.length,
     classCount: sourceClasses.length,
   };
 }
@@ -1004,6 +1026,13 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
       id: scopedStorageConfigId("RRC", targetTerm.id, row.stageId),
     })),
   );
+  replaceTargetRows(
+    "schedulePeriodTemplates",
+    sourceTermRows(db.schedulePeriodTemplates || [], sourceTermId).map((row) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("SPT", targetTerm.id, row.stageId, row.grade),
+    })),
+  );
 
   appendAuditLog(db, {
     action: "term_config_clone",
@@ -1047,6 +1076,7 @@ export function createAcademicTerm(db, options = {}, actorAccount = null) {
     semester,
     startDate,
     endDate,
+    settlementMonth: normalizeTermText(options.settlementMonth, ""),
     status: makeCurrent ? "active" : "planned",
     current: makeCurrent,
     copiedFromTermId: copyConfig ? copyFromTermId : "",
@@ -1178,6 +1208,7 @@ function removeTermConfigRows(db, termId = "") {
     "scheduleConstraints",
     "teacherScheduleRules",
     "roomResourceOverrides",
+    "schedulePeriodTemplates",
   ].forEach((key) => {
     db[key] = (db[key] || []).filter((row) => row.termId !== termId);
   });
@@ -1939,7 +1970,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
   return queryTeacherAssignments(db, { termId: term.id, stageId, grade, subjectId })[0];
 }
 
-export function queryTeachers(db, query = {}) {
+export function queryTeachers(db, query = {}, options = {}) {
   const page = Math.max(Number.parseInt(query.page || "1", 10), 1);
   const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || "20", 10), 1), 100);
   const search = String(query.search || "").trim().toLowerCase();
@@ -1949,6 +1980,7 @@ export function queryTeachers(db, query = {}) {
   const status = String(query.status || "active").trim();
   const month = String(query.month || "2026-06").trim();
   const strictGrade = String(query.strictGrade || "false") === "true";
+  const includeFinance = options.includeFinance !== false;
 
   const filtered = db.teachers.filter((teacher) => {
     if (status && teacher.status !== status) return false;
@@ -1973,23 +2005,81 @@ export function queryTeachers(db, query = {}) {
       .includes(search);
   });
 
-	  const start = (page - 1) * pageSize;
-	  const payrollStatusCounts = filtered.reduce(
-	    (counts, teacher) => {
-	      const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
-	      const key = payrollDetail?.status || "missing";
-	      counts[key] = (counts[key] || 0) + 1;
-	      return counts;
-	    },
-	    {},
-	  );
-	  const items = filtered.slice(start, start + pageSize).map((teacher) => {
+  const emptyFinanceSummary = {
+    teacherCount: filtered.length,
+    completedUnits: 0,
+    pendingCount: 0,
+    exceptionCount: 0,
+    grossPay: 0,
+    netPay: 0,
+    lockedCount: 0,
+    payrollStatusCounts: {},
+    groups: {
+      department: {},
+      subject: {},
+      grade: {},
+    },
+  };
+  const financeSummary = includeFinance
+    ? filtered.reduce((summary, teacher) => {
+        const lessonSummary = teacherLessonSummary(db, teacher.id, month);
+        const payroll = teacherPayrollPreview(db, teacher.id, month);
+        const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
+        const statusKey = payrollDetail?.status || "missing";
+        const stageKey = teacher.department || teacher.stageName || "未设置学部";
+        const subjectKey = teacher.primarySubjectName || teacher.subject || "未设置学科";
+        const gradeKey = gradeCoverageText(db, teacher) || "未设置年级";
+        const addGroup = (bucket, key) => {
+          if (!bucket[key]) {
+            bucket[key] = {
+              key,
+              teacherCount: 0,
+              completedUnits: 0,
+              pendingCount: 0,
+              exceptionCount: 0,
+              gross: 0,
+              net: 0,
+              lockedCount: 0,
+            };
+          }
+          bucket[key].teacherCount += 1;
+          bucket[key].completedUnits += lessonSummary.completedUnits || 0;
+          bucket[key].pendingCount += lessonSummary.pendingCount || 0;
+          bucket[key].exceptionCount += lessonSummary.exceptionCount || 0;
+          bucket[key].gross += payroll?.grossPay || 0;
+          bucket[key].net += payroll?.netPay || 0;
+          if (statusKey === "locked") bucket[key].lockedCount += 1;
+        };
+
+        summary.payrollStatusCounts[statusKey] = (summary.payrollStatusCounts[statusKey] || 0) + 1;
+        summary.pendingCount += lessonSummary.pendingCount || 0;
+        summary.exceptionCount += lessonSummary.exceptionCount || 0;
+        summary.completedUnits += lessonSummary.completedUnits || 0;
+        summary.grossPay += payroll?.grossPay || 0;
+        summary.netPay += payroll?.netPay || 0;
+        if (statusKey === "locked") summary.lockedCount += 1;
+        addGroup(summary.groups.department, stageKey);
+        addGroup(summary.groups.subject, subjectKey);
+        addGroup(summary.groups.grade, gradeKey);
+        return summary;
+      }, emptyFinanceSummary)
+    : emptyFinanceSummary;
+  const toSortedGroupRows = (bucket) =>
+    Object.values(bucket).sort((a, b) => String(a.key).localeCompare(String(b.key), "zh-CN"));
+
+  const start = (page - 1) * pageSize;
+  const items = filtered.slice(start, start + pageSize).map((teacher) => {
+    const base = {
+      ...(includeFinance ? teacher : publicTeacherIdentity(teacher) || {}),
+      gradeText: gradeCoverageText(db, teacher),
+    };
+    if (!includeFinance) return base;
+
     const summary = teacherLessonSummary(db, teacher.id, month);
     const payroll = teacherPayrollPreview(db, teacher.id, month);
     const payrollDetail = findTeacherPayrollDetail(db, teacher.id, month);
     return {
-      ...teacher,
-      gradeText: gradeCoverageText(db, teacher),
+      ...base,
       summary,
       payroll: payroll
         ? {
@@ -2014,12 +2104,27 @@ export function queryTeachers(db, query = {}) {
 
   return {
     items,
+    summary: {
+      teacherCount: financeSummary.teacherCount,
+      completedUnits: financeSummary.completedUnits,
+      pendingCount: financeSummary.pendingCount,
+      exceptionCount: financeSummary.exceptionCount,
+      grossPay: financeSummary.grossPay,
+      netPay: financeSummary.netPay,
+      lockedCount: financeSummary.lockedCount,
+      payrollStatusCounts: financeSummary.payrollStatusCounts,
+      groups: {
+        department: toSortedGroupRows(financeSummary.groups.department),
+        subject: toSortedGroupRows(financeSummary.groups.subject),
+        grade: toSortedGroupRows(financeSummary.groups.grade),
+      },
+    },
     meta: {
       page,
       pageSize,
 	      total: filtered.length,
 	      totalPages: Math.max(Math.ceil(filtered.length / pageSize), 1),
-	      payrollStatusCounts,
+	      payrollStatusCounts: financeSummary.payrollStatusCounts,
 	    },
 	  };
 	}
@@ -2090,10 +2195,7 @@ export function teacherScheduleWeeks(db, teacherId, options = {}) {
       if (lesson.date > current.latestDate) current.latestDate = lesson.date;
       weekMap.set(weekStart, current);
     });
-  return Array.from(weekMap.values()).sort((a, b) => {
-    if (b.publishedCount !== a.publishedCount) return b.publishedCount - a.publishedCount;
-    return b.weekStart.localeCompare(a.weekStart);
-  });
+  return Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
 function attendanceActionLabel(action) {
@@ -2230,6 +2332,36 @@ function buildPayrollRows(db, payroll, workload) {
   ];
 }
 
+function payrollLockBlockersFromWorkload(workload) {
+  if (!workload) return [];
+  const pending = (workload.pendingLines || []).map((line) => ({
+    type: "pending",
+    lessonId: line.lessonId,
+    date: line.date,
+    time: line.time,
+    className: line.className,
+    subjectName: line.subjectName,
+    room: line.room,
+    status: line.status,
+    reason:
+      line.status === "checkedIn"
+        ? "已签入但未签出，暂不能计入工资"
+        : "未完成签入签出，暂不能计入工资",
+  }));
+  const exceptions = (workload.exceptionLines || []).map((line) => ({
+    type: "exception",
+    lessonId: line.lessonId,
+    date: line.date,
+    time: line.time,
+    className: line.className,
+    subjectName: line.subjectName,
+    room: line.room,
+    status: "exception",
+    reason: line.note || "异常课次需处理后才能锁定工资",
+  }));
+  return [...pending, ...exceptions];
+}
+
 export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
   const payroll = teacherPayrollPreview(db, teacherId, month);
   const workload = teacherMonthlyWorkload(db, teacherId, month);
@@ -2239,6 +2371,7 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
     ...payroll,
     rows: buildPayrollRows(db, payroll, workload),
     workloadSummary: workload.summary,
+    lockBlockers: payrollLockBlockersFromWorkload(workload),
     confirmation: workload.confirmation,
     generated: generated
       ? {
@@ -2537,7 +2670,11 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
   if (pendingCount || exceptionCount) {
     const error = new Error("仍有待处理或异常课时，不能锁定薪资");
     error.statusCode = 409;
-    error.details = { pendingCount, exceptionCount };
+    error.details = {
+      pendingCount,
+      exceptionCount,
+      blockers: detail?.lockBlockers || [],
+    };
     throw error;
   }
 
@@ -2658,6 +2795,54 @@ export function generatePayrollBatch(db, options = {}, actorAccount = null) {
 
   const batch = {
     id: `PB-${month.replace("-", "")}-${Date.now()}`,
+    month,
+    total: results.length,
+    successCount: results.filter((item) => item.ok).length,
+    failedCount: results.filter((item) => !item.ok).length,
+    createdAt: now,
+    createdByAccountId: actorAccount?.id || "",
+    createdByName: actorAccount?.name || "",
+    results,
+  };
+  db.payrollBatches.push(batch);
+  db.meta.updatedAt = now;
+  return batch;
+}
+
+export function lockPayrollBatch(db, options = {}, actorAccount = null) {
+  const month = String(options.month || "2026-06");
+  assertMonthTermEditable(db, month, "批量锁定薪资");
+  const teacherIds = Array.isArray(options.teacherIds)
+    ? options.teacherIds
+    : db.teachers.filter((teacher) => teacher.status === "active").map((teacher) => teacher.id);
+  const now = new Date().toISOString();
+  const results = [];
+
+  teacherIds.forEach((teacherId) => {
+    try {
+      const detail = lockTeacherPayrollDetail(db, teacherId, month, actorAccount);
+      results.push({
+        teacherId,
+        teacherName: detail.teacher.name,
+        status: detail.generated?.status || "locked",
+        grossPay: detail.grossPay,
+        netPay: detail.netPay,
+        ok: true,
+      });
+    } catch (error) {
+      results.push({
+        teacherId,
+        teacherName: findTeacher(db, teacherId)?.name || teacherId,
+        ok: false,
+        error: error.message,
+        details: error.details || null,
+      });
+    }
+  });
+
+  const batch = {
+    id: `PBL-${month.replace("-", "")}-${Date.now()}`,
+    type: "lock",
     month,
     total: results.length,
     successCount: results.filter((item) => item.ok).length,

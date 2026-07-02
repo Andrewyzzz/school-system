@@ -1,6 +1,6 @@
 <view class="page login-page">
   <view class="login-hero">
-    <text class="eyebrow">富源学校管理系统</text>
+    <text class="eyebrow">学校管理系统</text>
     <text class="h1">老师端小程序 MVP</text>
     <text class="muted">用于查看课表、扫码签入签出、确认工作量和查看总薪资。</text>
   </view>

@@ -90,6 +90,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/:teacherId/payroll/review`：财务复核老师月度薪资明细
 - `POST /api/teachers/:teacherId/payroll/lock`：财务锁定老师月度薪资明细
 - `POST /api/payroll/batch-generate`：财务批量生成任课老师月度薪资明细
+- `POST /api/payroll/batch-lock`：财务批量锁定已确认、已复核且无阻断课次的工资单
 - `GET /api/payroll/export`：财务导出工资明细 CSV 内容
 - `GET /api/phase1/readiness`：第一阶段试运行自动验收检查
 
@@ -118,6 +119,9 @@ http://127.0.0.1:4173/api/health
 - 更新日志：`CHANGELOG.md`
 - 第一阶段 PRD：`docs/学校教学薪资管理系统-第一阶段PRD.md`
 - 排课系统最高标准 TODO：`docs/scheduling-high-standard-todo.md`
+- 数据库迁移方案：`docs/database-migration-plan.md`
+- 第一阶段 PostgreSQL schema：`database/postgres/001_phase1_schema.sql`
+- JSON 到 PostgreSQL 数据导出脚本：`server/exportPostgresData.js`
 - 字段字典：`docs/phase1-field-dictionary.md`
 - 教师导入说明：`docs/teacher-import-guide.md`
 - 教师导入 CSV 模板：`templates/teacher-import-template.csv`

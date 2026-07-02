@@ -1,9 +1,8 @@
-const CACHE_NAME = "school-classroom-screen-v1";
+const CACHE_NAME = "school-classroom-screen-v2";
 const SHELL_ASSETS = [
   "/classroom.html",
   "/classroom.webmanifest",
   "/vendor/qrcode.min.js",
-  "/assets/school-logo.jpeg",
 ];
 
 self.addEventListener("install", (event) => {

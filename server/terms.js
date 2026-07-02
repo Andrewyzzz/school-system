@@ -49,6 +49,7 @@ function normalizeTerm(term = {}, fallback = DEFAULT_TERMS[0]) {
     semester: String(term.semester || fallback.semester || ""),
     startDate: String(term.startDate || fallback.startDate || "2026-06-15"),
     endDate: String(term.endDate || fallback.endDate || "2026-07-31"),
+    settlementMonth: String(term.settlementMonth || fallback.settlementMonth || ""),
     status: String(term.status || fallback.status || "active"),
     current: Boolean(term.current),
     divisionWeekStarts:
@@ -133,6 +134,7 @@ export function publicTerm(term) {
     semester: term.semester,
     startDate: term.startDate,
     endDate: term.endDate,
+    settlementMonth: term.settlementMonth || "",
     status: term.status,
     current: Boolean(term.current),
     copiedFromTermId: term.copiedFromTermId || "",

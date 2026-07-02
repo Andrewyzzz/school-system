@@ -284,6 +284,7 @@ const initialState = {
     subjectId: "",
   },
   scheduleVersions: [],
+  teacherScheduleWeeks: {},
   selectedScheduleWeekStart: "2026-06-08",
   scannerLessonId: "L002",
   lastScanText: "",
@@ -360,6 +361,13 @@ const initialState = {
       name: "周主任",
       title: "行政账号",
       department: "教务行政",
+    },
+    {
+      id: "system-admin",
+      role: "system_admin",
+      name: "系统管理员",
+      title: "系统管理员",
+      department: "系统管理",
     },
     {
       id: "classroom-screen",
@@ -704,12 +712,14 @@ const loginUsers = [
   { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
   { username: "admin", password: "123456", accountId: "admin-zhou" },
+  { username: "sysadmin", password: "123456", accountId: "system-admin" },
   { username: "classroom", password: "123456", accountId: "classroom-screen" },
 ];
 
 let state = loadSavedState();
 let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
+let backendAuthExpiredHandled = false;
 let qrScanner = null;
 let courseRulesEditMode = false;
 let notificationComposerState = {
@@ -763,6 +773,7 @@ let payrollRuleState = {
 let financeTeacherPage = {
   items: [],
   meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
+  summary: null,
   page: 1,
   pageSize: 20,
   stageId: "",
@@ -800,6 +811,7 @@ let financeTeacherDetailState = {
   workload: null,
   payroll: null,
   payrollGenerated: false,
+  lockBlockers: [],
 };
 let payrollHistoryState = {
   termId: "",
@@ -882,17 +894,17 @@ const views = {
     el: document.querySelector("#adminScheduleOverviewView"),
   },
   personnel: {
-    role: "admin",
+    role: "admin,system_admin",
     title: "人员列表",
     el: document.querySelector("#personnelView"),
   },
   teacherImport: {
-    role: "admin",
+    role: "system_admin",
     title: "教师导入",
     el: document.querySelector("#teacherImportView"),
   },
   notifications: {
-    role: "teacher,finance,admin",
+    role: "teacher,finance,admin,system_admin",
     title: "通知中心",
     el: document.querySelector("#notificationsView"),
   },
@@ -922,27 +934,27 @@ const views = {
     el: document.querySelector("#financeView"),
   },
   financeRecords: {
-    role: "finance,admin",
+    role: "finance,system_admin",
     title: "老师考勤记录",
     el: document.querySelector("#financeRecordsView"),
   },
   settlement: {
-    role: "finance,admin",
+    role: "finance,system_admin",
     title: "薪资结算",
     el: document.querySelector("#settlementView"),
   },
   payrollHistory: {
-    role: "finance,admin",
+    role: "finance,system_admin",
     title: "工资记录",
     el: document.querySelector("#payrollHistoryView"),
   },
   payrollConfig: {
-    role: "finance,admin",
+    role: "finance,system_admin",
     title: "薪资配置",
     el: document.querySelector("#payrollConfigView"),
   },
   warnings: {
-    role: "teacher,finance,admin",
+    role: "teacher,finance",
     title: "异常提醒",
     el: document.querySelector("#warningsView"),
   },
@@ -957,6 +969,7 @@ const defaultViewByRole = {
   teacher: "dashboard",
   finance: "finance",
   admin: "adminScheduling",
+  system_admin: "personnel",
   classroom: "classroomScreens",
 };
 
@@ -1096,6 +1109,7 @@ function loadBackendSession() {
 }
 
 function saveBackendSession(session) {
+  backendAuthExpiredHandled = false;
   backendSession = session;
   try {
     window.localStorage.setItem(API_SESSION_KEY, JSON.stringify(session));
@@ -1113,10 +1127,28 @@ function clearBackendSession() {
   }
 }
 
+function handleBackendAuthExpired() {
+  if (backendAuthExpiredHandled) return;
+  backendAuthExpiredHandled = true;
+  sessionAccountId = "";
+  clearSession();
+  clearBackendSession();
+  resetTeacherWorkloadState();
+  resetAttendanceRecordState();
+  resetTeacherPayrollState();
+  resetFinanceTeacherDetailState();
+  resetPersonnelPage();
+  showToast("登录状态已失效，请重新登录");
+  window.setTimeout(() => {
+    backendAuthExpiredHandled = false;
+    render();
+  }, 0);
+}
+
 function resetTeacherWorkloadState() {
   teacherWorkloadState = {
     teacherId: "",
-    month: "2026-06",
+    month: currentSettlementMonth(),
     loading: false,
     loaded: false,
     error: "",
@@ -1127,7 +1159,7 @@ function resetTeacherWorkloadState() {
 function resetAttendanceRecordState() {
   attendanceRecordState = {
     teacherId: "",
-    month: "2026-06",
+    month: currentSettlementMonth(),
     loading: false,
     loaded: false,
     error: "",
@@ -1140,7 +1172,7 @@ function resetAttendanceRecordState() {
 function resetTeacherPayrollState() {
   teacherPayrollState = {
     teacherId: "",
-    month: "2026-06",
+    month: currentSettlementMonth(),
     loading: false,
     loaded: false,
     error: "",
@@ -1152,13 +1184,14 @@ function resetFinanceTeacherDetailState() {
   salaryProfileEditMode = false;
   financeTeacherDetailState = {
     teacherId: "",
-    month: "2026-06",
+    month: currentSettlementMonth(),
     loading: false,
     loaded: false,
     error: "",
     workload: null,
     payroll: null,
     payrollGenerated: false,
+    lockBlockers: [],
   };
 }
 
@@ -1198,6 +1231,9 @@ async function apiRequest(path, options = {}) {
     const error = new Error(message);
     error.status = response.status;
     error.details = payload?.error?.details || null;
+    if (response.status === 401 && !String(path).includes("/api/auth/login")) {
+      handleBackendAuthExpired();
+    }
     throw error;
   }
   return payload;
@@ -1207,6 +1243,7 @@ function roleTitle(role) {
   if (role === "teacher") return "老师账号";
   if (role === "finance") return "财务账号";
   if (role === "admin") return "行政账号";
+  if (role === "system_admin") return "系统管理员";
   if (role === "classroom") return "教室屏账号";
   return "系统账号";
 }
@@ -1295,9 +1332,19 @@ function normalizeBackendLesson(lesson) {
   };
 }
 
-function mergeBackendLessons(teacherId, lessons) {
+function mergeBackendLessons(teacherId, lessons, options = {}) {
+  const replaceWeeks = new Set(
+    options.replaceWeekStart
+      ? [options.replaceWeekStart]
+      : lessons.map((lesson) => startOfNaturalWeek(lesson.date)),
+  );
   state.lessons = state.lessons.filter(
-    (lesson) => !(lesson.source === "backend-api" && lesson.teacherId === teacherId),
+    (lesson) =>
+      !(
+        lesson.source === "backend-api" &&
+        lesson.teacherId === teacherId &&
+        (replaceWeeks.size === 0 || replaceWeeks.has(startOfNaturalWeek(lesson.date)))
+      ),
   );
   state.lessons = state.lessons.concat(lessons.map(normalizeBackendLesson));
 }
@@ -1312,6 +1359,14 @@ function currentAccount() {
 
 function currentRole() {
   return currentAccount().role;
+}
+
+function isFinanceRole(role = currentRole()) {
+  return role === "finance" || role === "system_admin";
+}
+
+function isPersonnelRole(role = currentRole()) {
+  return role === "admin" || role === "system_admin";
 }
 
 function currentTeacherId() {
@@ -1472,8 +1527,34 @@ function monthKeysBetween(startDate = "", endDate = "") {
 
 function defaultMonthForTerm(term = null) {
   const months = monthKeysBetween(term?.startDate, term?.endDate);
+  const settlementMonth = String(term?.settlementMonth || "").slice(0, 7);
+  if (months.includes(settlementMonth)) return settlementMonth;
   const currentMonth = formatDateKey(new Date()).slice(0, 7);
   return months.includes(currentMonth) ? currentMonth : months[0] || "2026-06";
+}
+
+function currentSettlementMonth() {
+  return defaultMonthForTerm(termManagementState.currentTerm);
+}
+
+function runtimeEnvironmentName() {
+  const host = window.location.hostname;
+  if (host === "127.0.0.1" || host === "localhost" || host === "") return "本地开发";
+  return "正式环境";
+}
+
+function runtimeContextLabel() {
+  const term = termManagementState.currentTerm;
+  const month = currentSettlementMonth();
+  if (!term?.name) return `${runtimeEnvironmentName()} · 等待读取学期`;
+  return `${runtimeEnvironmentName()} · ${term.name} · 当前结算月：${formatMonthLabel(month)}`;
+}
+
+function renderEnvironmentLabels() {
+  const label = runtimeContextLabel();
+  document.querySelectorAll("#loginEnvironmentLabel, #appEnvironmentLabel").forEach((node) => {
+    node.textContent = label;
+  });
 }
 
 function addDays(date, days) {
@@ -2644,6 +2725,38 @@ function settlementSalaryRowsHtml(rows = [], fallback = {}) {
   `;
 }
 
+function payrollLockBlockersTableRows(blockers = []) {
+  if (!Array.isArray(blockers) || !blockers.length) return "";
+  return `
+    <tr class="payroll-lock-blocker-row">
+      <td colspan="3">
+        <div class="payroll-lock-blockers">
+          <strong>锁定前需处理的课次</strong>
+          <p>以下课次仍未完成或存在异常，处理后重新生成/复核工资，再执行锁定。</p>
+          <div class="payroll-lock-blocker-list">
+            ${blockers
+              .slice(0, 12)
+              .map(
+                (item) => `
+                  <article>
+                    <span class="tag ${item.type === "exception" ? "exception" : "pending"}">${item.type === "exception" ? "异常" : "待处理"}</span>
+                    <div>
+                      <strong>${escapeHtml(item.date || "-")} ${escapeHtml(item.time || "")}</strong>
+                      <small>${escapeHtml([item.className, item.subjectName, item.room].filter(Boolean).join(" · "))}</small>
+                      <p>${escapeHtml(item.reason || "需处理后才能锁定工资")}</p>
+                    </div>
+                  </article>
+                `,
+              )
+              .join("")}
+          </div>
+          ${blockers.length > 12 ? `<small>另有 ${blockers.length - 12} 条未展示，请先处理前 12 条。</small>` : ""}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
 function teacherLessonStats(teacherId) {
   const lessons = teacherLessons(teacherId);
   return {
@@ -2975,6 +3088,9 @@ function backendFinanceGroupKey(teacher) {
 }
 
 function backendFinanceGroupRows() {
+  const serverGroups = financeTeacherPage.summary?.groups?.[state.financeGroupBy];
+  if (Array.isArray(serverGroups)) return serverGroups;
+
   const groups = new Map();
   financeTeacherPage.items.forEach((teacher) => {
     const key = backendFinanceGroupKey(teacher);
@@ -3001,15 +3117,26 @@ function backendFinanceGroupRows() {
 }
 
 function financePageTotals() {
+  const summary = financeTeacherPage.summary;
+  if (summary) {
+    return {
+      pending: summary.pendingCount || 0,
+      exception: summary.exceptionCount || 0,
+      gross: summary.grossPay || 0,
+      net: summary.netPay || 0,
+      locked: summary.lockedCount || 0,
+    };
+  }
   return financeTeacherPage.items.reduce(
     (totals, teacher) => {
       totals.pending += teacher.summary?.pendingCount || 0;
       totals.exception += teacher.summary?.exceptionCount || 0;
       totals.gross += teacher.payroll?.grossPay || 0;
       totals.net += teacher.payroll?.netPay || 0;
+      if (teacher.payrollDetail?.status === "locked" || teacher.payroll?.status === "locked") totals.locked += 1;
       return totals;
     },
-    { pending: 0, exception: 0, gross: 0, net: 0 },
+    { pending: 0, exception: 0, gross: 0, net: 0, locked: 0 },
   );
 }
 
@@ -3017,15 +3144,27 @@ async function loadBackendTeacherContext(teacherId, weekStart = state.selectedSc
   if (!backendMode() || !teacherId) return;
   try {
     const schedule = await apiRequest(`/api/teachers/${teacherId}/schedule?weekStart=${weekStart}`);
-    state.selectedScheduleWeekStart = schedule.weekStart || weekStart;
+    const nextWeekStart = schedule.weekStart || weekStart;
+    if (schedule.currentTerm) {
+      termManagementState.currentTerm = schedule.currentTerm;
+      if (!termManagementState.terms.some((term) => term.id === schedule.currentTerm.id)) {
+        termManagementState.terms = [schedule.currentTerm, ...termManagementState.terms];
+      }
+    }
+    state.selectedScheduleWeekStart = nextWeekStart;
+    state.teacherScheduleWeeks[teacherId] = Array.isArray(schedule.availableWeeks) ? schedule.availableWeeks : [];
+    const weekDates = weekDateKeys(nextWeekStart);
+    if (!weekDates.includes(state.selectedScheduleDate)) {
+      state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
+    }
     if (schedule.teacher) upsertTeacher(schedule.teacher);
-    mergeBackendLessons(teacherId, schedule.lessons || []);
+    mergeBackendLessons(teacherId, schedule.lessons || [], { replaceWeekStart: nextWeekStart });
   } catch (error) {
     showToast(error.message || "老师课表加载失败");
   }
 }
 
-async function loadBackendWorkload(teacherId = currentTeacherId(), month = "2026-06") {
+async function loadBackendWorkload(teacherId = currentTeacherId(), month = currentSettlementMonth()) {
   if (!backendMode() || !teacherId) return;
   teacherWorkloadState = {
     ...teacherWorkloadState,
@@ -3057,12 +3196,12 @@ async function loadBackendWorkload(teacherId = currentTeacherId(), month = "2026
     };
   }
 
-  if (state.activeView === "confirm") {
+  if (["confirm", "warnings"].includes(state.activeView)) {
     render();
   }
 }
 
-async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), month = "2026-06") {
+async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), month = currentSettlementMonth()) {
   if (!backendMode() || !teacherId) return;
   attendanceRecordState = {
     ...attendanceRecordState,
@@ -3100,7 +3239,7 @@ async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), mont
   }
 }
 
-function ensureBackendAttendanceRecords(teacherId, month = "2026-06") {
+function ensureBackendAttendanceRecords(teacherId, month = currentSettlementMonth()) {
   const needsRecords =
     attendanceRecordState.teacherId !== teacherId ||
     attendanceRecordState.month !== month ||
@@ -3110,7 +3249,7 @@ function ensureBackendAttendanceRecords(teacherId, month = "2026-06") {
   }
 }
 
-async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month = "2026-06", options = {}) {
+async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month = currentSettlementMonth(), options = {}) {
   if (!backendMode() || !teacherId) return;
   const detail = Boolean(options.detail);
   teacherPayrollState = {
@@ -3151,7 +3290,7 @@ async function loadBackendTeacherPayroll(teacherId = currentTeacherId(), month =
   if (["dashboard", "confirm", "teacherPayroll"].includes(state.activeView)) render();
 }
 
-function ensureBackendTeacherPayroll(teacherId, month = "2026-06", options = {}) {
+function ensureBackendTeacherPayroll(teacherId, month = currentSettlementMonth(), options = {}) {
   const detail = Boolean(options.detail);
   const needsPayroll =
     teacherPayrollState.teacherId !== teacherId ||
@@ -3164,7 +3303,7 @@ function ensureBackendTeacherPayroll(teacherId, month = "2026-06", options = {})
 }
 
 async function loadPayrollRules() {
-  if (!backendMode() || !["finance", "admin"].includes(currentRole())) return;
+  if (!backendMode() || !isFinanceRole()) return;
   payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
   try {
     const data = await apiRequest("/api/payroll-rules");
@@ -3213,8 +3352,8 @@ function payrollRulesFromInputs() {
 }
 
 async function saveBackendPayrollRules() {
-  if (!backendMode() || currentRole() !== "finance") {
-    showToast("请使用后端财务账号保存薪资规则");
+  if (!backendMode() || !isFinanceRole()) {
+    showToast("请使用后端财务或系统管理员账号保存薪资规则");
     return;
   }
   let payrollRules;
@@ -3278,8 +3417,8 @@ function salaryProfileFromInputs() {
 
 function handleTeacherSalaryProfileAction() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
-    showToast("请使用后端财务账号维护教师工资档案");
+  if (!backendMode() || !isFinanceRole() || !teacherId) {
+    showToast("请使用后端财务或系统管理员账号维护教师工资档案");
     return;
   }
   if (!salaryProfileEditMode) {
@@ -3298,8 +3437,8 @@ function cancelTeacherSalaryProfileEdit() {
 
 async function saveBackendTeacherSalaryProfile() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
-    showToast("请使用后端财务账号维护教师工资档案");
+  if (!backendMode() || !isFinanceRole() || !teacherId) {
+    showToast("请使用后端财务或系统管理员账号维护教师工资档案");
     return;
   }
   let salaryProfile;
@@ -3334,8 +3473,8 @@ async function saveBackendTeacherSalaryProfile() {
 
 async function saveBackendTeacherMonthlyAdjustments() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) {
-    showToast("请使用后端财务账号维护本月奖扣");
+  if (!backendMode() || !isFinanceRole() || !teacherId) {
+    showToast("请使用后端财务或系统管理员账号维护本月奖扣");
     return;
   }
   let manualItems;
@@ -3368,7 +3507,8 @@ async function saveBackendTeacherMonthlyAdjustments() {
 
 async function unlockBackendPayroll() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  if (!backendMode() || !isFinanceRole() || !teacherId) return;
+  const month = financeTeacherDetailState.month || currentSettlementMonth();
   const reason = window.prompt("请输入解锁原因，系统会保留原锁定快照和操作记录。", "财务更正后重新核算");
   if (reason === null) return;
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
@@ -3376,7 +3516,7 @@ async function unlockBackendPayroll() {
   try {
     const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/unlock`, {
       method: "POST",
-      body: { month: "2026-06", reason },
+      body: { month, reason },
     });
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
@@ -3385,11 +3525,12 @@ async function unlockBackendPayroll() {
       error: "",
       payroll,
       payrollGenerated: true,
+      lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
     showToast("工资已解锁，请重新生成、复核并锁定");
   } catch (error) {
-    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资解锁失败" };
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资解锁失败", lockBlockers: error.details?.blockers || [] };
     showToast(financeTeacherDetailState.error);
   }
   render();
@@ -3397,13 +3538,14 @@ async function unlockBackendPayroll() {
 
 async function reviewBackendPayroll() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  if (!backendMode() || !isFinanceRole() || !teacherId) return;
+  const month = financeTeacherDetailState.month || currentSettlementMonth();
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
   try {
     const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/review`, {
       method: "POST",
-      body: { month: "2026-06" },
+      body: { month },
     });
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
@@ -3412,11 +3554,12 @@ async function reviewBackendPayroll() {
       error: "",
       payroll,
       payrollGenerated: true,
+      lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
     showToast("工资异议已处理/确认无误，可以锁定该老师工资");
   } catch (error) {
-    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "财务处理失败" };
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "财务处理失败", lockBlockers: error.details?.blockers || [] };
     showToast(financeTeacherDetailState.error);
   }
   render();
@@ -3424,13 +3567,20 @@ async function reviewBackendPayroll() {
 
 async function lockBackendPayroll() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  if (!backendMode() || !isFinanceRole() || !teacherId) return;
+  const month = financeTeacherDetailState.month || currentSettlementMonth();
+  const payrollStatus = financeTeacherDetailState.payroll?.generated?.status || "";
+  const blockers = financeTeacherDetailState.payroll?.lockBlockers || financeTeacherDetailState.lockBlockers || [];
+  if (payrollStatus === "reviewed" && blockers.length) {
+    showToast(`仍有 ${blockers.length} 条待处理或异常课次，不能锁定`);
+    return;
+  }
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
   try {
     const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/lock`, {
       method: "POST",
-      body: { month: "2026-06" },
+      body: { month },
     });
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
@@ -3439,11 +3589,12 @@ async function lockBackendPayroll() {
       error: "",
       payroll,
       payrollGenerated: true,
+      lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
     showToast("该老师本月工资已锁定");
   } catch (error) {
-    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资锁定失败" };
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资锁定失败", lockBlockers: error.details?.blockers || [] };
     showToast(financeTeacherDetailState.error);
   }
   render();
@@ -3451,13 +3602,14 @@ async function lockBackendPayroll() {
 
 async function saveBackendTeacherPayrollDraft() {
   const teacherId = state.selectedFinanceTeacherId;
-  if (!backendMode() || currentRole() !== "finance" || !teacherId) return;
+  if (!backendMode() || !isFinanceRole() || !teacherId) return;
+  const month = financeTeacherDetailState.month || currentSettlementMonth();
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
   try {
     const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll/generate`, {
       method: "POST",
-      body: { month: "2026-06" },
+      body: { month },
     });
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
@@ -3466,18 +3618,20 @@ async function saveBackendTeacherPayrollDraft() {
       error: "",
       payroll,
       payrollGenerated: true,
+      lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
     showToast("该老师工资已保存为财务草稿");
   } catch (error) {
-    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资保存失败" };
+    financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资保存失败", lockBlockers: error.details?.blockers || [] };
     showToast(financeTeacherDetailState.error);
   }
   render();
 }
 
 async function batchGenerateBackendPayroll() {
-  if (!backendMode() || currentRole() !== "finance") return;
+  if (!backendMode() || !isFinanceRole()) return;
+  const month = currentSettlementMonth();
   const confirmed = window.confirm(
     "发布本月工资明细会把所有在职老师的已保存工资单发布到老师端；未保存的老师会按当前规则自动生成并发布。确认继续吗？",
   );
@@ -3485,7 +3639,7 @@ async function batchGenerateBackendPayroll() {
   try {
     const result = await apiRequest("/api/payroll/batch-generate", {
       method: "POST",
-      body: { month: "2026-06" },
+      body: { month },
     });
     financeTeacherPage.loaded = false;
     resetFinanceTeacherDetailState();
@@ -3496,25 +3650,76 @@ async function batchGenerateBackendPayroll() {
   }
 }
 
-async function exportBackendPayrollCsv() {
-  if (!backendMode() || currentRole() !== "finance") return;
+async function batchLockBackendPayroll() {
+  if (!backendMode() || !isFinanceRole()) return;
+  const month = currentSettlementMonth();
+  const confirmed = window.confirm(
+    "批量锁定只会处理已由老师确认、财务处理完成、且没有待处理/异常课次的工资单；不符合条件的老师会保留失败原因。确认继续吗？",
+  );
+  if (!confirmed) return;
   try {
-    const params = new URLSearchParams({ month: "2026-06" });
+    const result = await apiRequest("/api/payroll/batch-lock", {
+      method: "POST",
+      body: { month },
+    });
+    financeTeacherPage.loaded = false;
+    resetFinanceTeacherDetailState();
+    showToast(`已锁定 ${result.successCount} 份工资，未锁定 ${result.failedCount} 份`);
+    const status = document.querySelector("#payrollExportStatus");
+    if (status) {
+      status.textContent = `批量锁定完成：成功 ${result.successCount} 份，未锁定 ${result.failedCount} 份；未锁定的老师请按状态逐个处理。`;
+    }
+    render();
+  } catch (error) {
+    showToast(error.message || "批量锁定工资失败");
+    const status = document.querySelector("#payrollExportStatus");
+    if (status) status.textContent = error.message || "批量锁定工资失败";
+  }
+}
+
+function downloadCsvResult(result, fallbackFilename, options = {}) {
+  const content = result?.content || "";
+  const total = Number(result?.total || 0);
+  const filename = result?.filename || fallbackFilename;
+  const status = options.statusSelector ? document.querySelector(options.statusSelector) : null;
+  if (!content || total <= 0) {
+    if (status) status.textContent = "当前筛选没有可导出的工资明细。";
+    showToast("当前筛选没有可导出的工资明细");
+    return false;
+  }
+  const blob = new Blob([`\uFEFF${content}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = result.filename || fallbackFilename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  window.setTimeout(() => {
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, 1000);
+  if (status) {
+    const dataUrl = `data:text/csv;charset=utf-8,%EF%BB%BF${encodeURIComponent(content)}`;
+    status.innerHTML = `已准备 ${total} 份工资明细 CSV；如浏览器未自动下载，<a href="${dataUrl}" download="${escapeHtml(filename)}">点击这里下载</a>。`;
+  }
+  showToast(`已导出 ${total} 份工资明细`);
+  return true;
+}
+
+async function exportBackendPayrollCsv() {
+  if (!backendMode() || !isFinanceRole()) return;
+  try {
+    const month = currentSettlementMonth();
+    const params = new URLSearchParams({ month });
     if (financeTeacherPage.stageId) params.set("stageId", financeTeacherPage.stageId);
     if (financeTeacherPage.grade) params.set("grade", financeTeacherPage.grade);
     if (financeTeacherPage.search) params.set("search", financeTeacherPage.search);
     const result = await apiRequest(`/api/payroll/export?${params.toString()}`);
-    const blob = new Blob([result.content || ""], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = result.filename || "teacher-payroll-2026-06.csv";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    showToast(`已导出 ${result.total || 0} 份工资明细`);
+    downloadCsvResult(result, `teacher-payroll-${month}.csv`, { statusSelector: "#payrollExportStatus" });
   } catch (error) {
+    const status = document.querySelector("#payrollExportStatus");
+    if (status) status.textContent = error.message || "工资明细导出失败";
     showToast(error.message || "工资明细导出失败");
   }
 }
@@ -3545,7 +3750,7 @@ function ensurePayrollHistorySelection() {
 }
 
 async function loadPayrollHistory(options = {}) {
-  if (!backendMode() || !["finance", "admin"].includes(currentRole())) return;
+  if (!backendMode() || !isFinanceRole()) return;
   const termId = options.termId || payrollHistoryState.termId || termManagementState.currentTerm?.id || "";
   const month = options.month || payrollHistoryState.month || "2026-06";
   if (!termId || !month) return;
@@ -3585,7 +3790,7 @@ async function loadPayrollHistory(options = {}) {
 }
 
 async function exportPayrollHistoryCsv() {
-  if (!backendMode() || !["finance", "admin"].includes(currentRole())) return;
+  if (!backendMode() || !isFinanceRole()) return;
   ensurePayrollHistorySelection();
   const termId = payrollHistoryState.termId;
   const month = payrollHistoryState.month;
@@ -3596,17 +3801,10 @@ async function exportPayrollHistoryCsv() {
   try {
     const params = new URLSearchParams({ termId, month });
     const result = await apiRequest(`/api/payroll/export?${params.toString()}`);
-    const blob = new Blob([result.content || ""], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = result.filename || `teacher-payroll-${month}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    showToast(`已导出 ${result.total || 0} 份工资明细`);
+    downloadCsvResult(result, `teacher-payroll-${month}.csv`, { statusSelector: "#payrollHistoryExportStatus" });
   } catch (error) {
+    const status = document.querySelector("#payrollHistoryExportStatus");
+    if (status) status.textContent = error.message || "历史工资导出失败";
     showToast(error.message || "历史工资导出失败");
   }
 }
@@ -3628,7 +3826,7 @@ function payrollFlowStage(status = "") {
   return 0;
 }
 
-async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2026-06") {
+async function confirmBackendWorkload(teacherId = currentTeacherId(), month = currentSettlementMonth()) {
   if (!backendMode() || currentRole() !== "teacher" || !teacherId) return;
   teacherPayrollState = {
     ...teacherPayrollState,
@@ -3682,7 +3880,7 @@ async function confirmBackendWorkload(teacherId = currentTeacherId(), month = "2
   render();
 }
 
-async function disputeBackendPayroll(teacherId = currentTeacherId(), month = "2026-06") {
+async function disputeBackendPayroll(teacherId = currentTeacherId(), month = currentSettlementMonth()) {
   if (!backendMode() || currentRole() !== "teacher" || !teacherId) return;
   const reason = document.querySelector("#payrollDisputeReason")?.value.trim() || "";
   if (!reason) {
@@ -3737,24 +3935,26 @@ async function approveBackendWorkload(step) {
     showToast("请使用行政账号审批工作量");
     return;
   }
+  const month = financeTeacherDetailState.month || currentSettlementMonth();
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
   try {
     const workload = await apiRequest(`/api/teachers/${teacherId}/workload/approve`, {
       method: "POST",
-      body: { month: "2026-06", step },
+      body: { month, step },
     });
-    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll?month=2026-06`);
+    const payroll = await apiRequest(`/api/teachers/${teacherId}/payroll?month=${month}`);
     financeTeacherDetailState = {
       ...financeTeacherDetailState,
       teacherId,
-      month: "2026-06",
+      month,
       loading: false,
       loaded: true,
       error: "",
       workload,
       payroll,
       payrollGenerated: Boolean(payroll.generated),
+      lockBlockers: payroll.lockBlockers || [],
     };
     state.confirmationStages[teacherId] = backendWorkloadStage(workload);
     financeTeacherPage.loaded = false;
@@ -3782,7 +3982,7 @@ async function loadFinanceTeacherPage(overrides = {}) {
   const params = new URLSearchParams({
     page: String(financeTeacherPage.page),
     pageSize: String(financeTeacherPage.pageSize),
-    month: "2026-06",
+    month: currentSettlementMonth(),
   });
   if (financeTeacherPage.stageId) params.set("stageId", financeTeacherPage.stageId);
   if (financeTeacherPage.grade) params.set("grade", financeTeacherPage.grade);
@@ -3793,6 +3993,7 @@ async function loadFinanceTeacherPage(overrides = {}) {
     financeTeacherPage = {
       ...financeTeacherPage,
       items: result.items || [],
+      summary: result.summary || null,
       meta: result.meta || financeTeacherPage.meta,
       page: result.meta?.page || financeTeacherPage.page,
       pageSize: result.meta?.pageSize || financeTeacherPage.pageSize,
@@ -3864,11 +4065,44 @@ async function loadPersonnelPage(overrides = {}) {
   }
 }
 
+async function resetBackendAccountPassword(accountId) {
+  if (!backendMode() || currentRole() !== "system_admin" || !accountId) return;
+  const confirmed = window.confirm("确认将该账号密码重置为 123456？账号下次登录后应立即修改密码。");
+  if (!confirmed) return;
+  try {
+    const result = await apiRequest(`/api/accounts/${encodeURIComponent(accountId)}/reset-password`, {
+      method: "POST",
+      body: { newPassword: "123456" },
+    });
+    showToast(`${result.account?.username || "账号"} 密码已重置为 123456`);
+    await loadPersonnelPage({ page: personnelPage.page });
+  } catch (error) {
+    showToast(error.message || "账号密码重置失败");
+  }
+}
+
+async function updateBackendAccountStatus(accountId, nextStatus) {
+  if (!backendMode() || currentRole() !== "system_admin" || !accountId) return;
+  const actionText = nextStatus === "disabled" ? "停用" : "启用";
+  const confirmed = window.confirm(`确认${actionText}该账号？`);
+  if (!confirmed) return;
+  try {
+    const result = await apiRequest(`/api/accounts/${encodeURIComponent(accountId)}/status`, {
+      method: "POST",
+      body: { status: nextStatus },
+    });
+    showToast(`${result.account?.username || "账号"} 已${actionText}`);
+    await loadPersonnelPage({ page: personnelPage.page });
+  } catch (error) {
+    showToast(error.message || `${actionText}账号失败`);
+  }
+}
+
 async function loadFinanceTeacherDetail(
   teacherId = state.selectedFinanceTeacherId,
-  { month = "2026-06", generatePayroll = false } = {},
+  { month = currentSettlementMonth(), generatePayroll = false } = {},
 ) {
-  if (!backendMode() || !["finance", "admin"].includes(currentRole()) || !teacherId) return;
+  if (!backendMode() || !isFinanceRole() || !teacherId) return;
   financeTeacherDetailState = {
     ...financeTeacherDetailState,
     teacherId,
@@ -3904,16 +4138,17 @@ async function loadFinanceTeacherDetail(
       loading: false,
       loaded: true,
       error: error.message || "财务详情加载失败",
+      lockBlockers: error.details?.blockers || [],
     };
   }
 
-  if (["financeRecords", "settlement"].includes(state.activeView)) {
+  if (["financeRecords", "settlement", "warnings"].includes(state.activeView)) {
     render();
   }
 }
 
 function ensureFinanceTeacherDetail(teacherId, { generatePayroll = false } = {}) {
-  const month = "2026-06";
+  const month = currentSettlementMonth();
   const needsDetail =
     financeTeacherDetailState.teacherId !== teacherId ||
     financeTeacherDetailState.month !== month ||
@@ -4513,6 +4748,205 @@ function resetCourseDraftAfterConfigChange() {
     divisionId: state.schedulingConfig.divisionId,
     gradeId: state.schedulingConfig.gradeId,
   };
+}
+
+function splitSchedulePeriodTime(period = {}) {
+  const [startTime = "", endTime = ""] = String(period.time || "").split("-");
+  return {
+    startTime: period.startTime || startTime || "08:00",
+    endTime: period.endTime || endTime || "08:40",
+  };
+}
+
+function schedulePeriodTypeText(type = "regular") {
+  if (type === "selfStudy") return "自习";
+  if (type === "activity") return "活动";
+  if (type === "evening") return "晚自习";
+  return "正课";
+}
+
+function schedulePeriodTypeOptions(selected = "regular") {
+  return [
+    ["regular", "正课"],
+    ["selfStudy", "自习"],
+    ["activity", "活动"],
+    ["evening", "晚自习"],
+  ]
+    .map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`)
+    .join("");
+}
+
+function timeTextToMinutes(value) {
+  const text = String(value || "").trim();
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(text)) return null;
+  const [hour, minute] = text.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function minutesToTimeText(value) {
+  const minutes = Math.min(Math.max(Number(value || 0), 0), 23 * 60 + 59);
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function schedulePeriodsFromConfig(config = state.schedulingConfig) {
+  return (config.periods?.length ? config.periods : schedulingCatalog.periods).map((period, index) => {
+    const { startTime, endTime } = splitSchedulePeriodTime(period);
+    return {
+      period: index + 1,
+      label: period.label || `第 ${index + 1} 节`,
+      startTime,
+      endTime,
+      time: `${startTime}-${endTime}`,
+      type: period.type || "regular",
+      typeName: schedulePeriodTypeText(period.type || "regular"),
+      active: period.active !== false,
+    };
+  });
+}
+
+function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
+  return schedulePeriodsFromConfig(config)
+    .map((period, index) => `
+      <div class="period-template-row" data-schedule-period-row>
+        <div class="period-template-index">第 ${index + 1} 节</div>
+        <label class="field-label" for="periodStart-${index}">
+          <span>开始时间</span>
+          <input id="periodStart-${index}" data-schedule-period-start type="time" value="${escapeHtml(period.startTime)}" />
+        </label>
+        <label class="field-label" for="periodEnd-${index}">
+          <span>结束时间</span>
+          <input id="periodEnd-${index}" data-schedule-period-end type="time" value="${escapeHtml(period.endTime)}" />
+        </label>
+        <label class="field-label" for="periodType-${index}">
+          <span>节次类型</span>
+          <select id="periodType-${index}" data-schedule-period-type class="lesson-select">
+            ${schedulePeriodTypeOptions(period.type)}
+          </select>
+        </label>
+        <button class="ghost-button icon-danger" data-delete-schedule-period="${index}" type="button">删除</button>
+      </div>
+    `)
+    .join("");
+}
+
+function readSchedulePeriodsFromForm(options = {}) {
+  const validate = options.validate !== false;
+  const rows = Array.from(document.querySelectorAll("[data-schedule-period-row]"));
+  const periods = rows.map((row, index) => {
+    const startTime = row.querySelector("[data-schedule-period-start]")?.value || "";
+    const endTime = row.querySelector("[data-schedule-period-end]")?.value || "";
+    const type = row.querySelector("[data-schedule-period-type]")?.value || "regular";
+    return {
+      period: index + 1,
+      label: `第 ${index + 1} 节`,
+      startTime,
+      endTime,
+      time: `${startTime}-${endTime}`,
+      type,
+      typeName: schedulePeriodTypeText(type),
+      active: true,
+    };
+  });
+
+  if (!validate) return periods.length ? periods : schedulePeriodsFromConfig();
+  if (!periods.length) throw new Error("请至少保留 1 个可排课节次");
+  periods.forEach((period, index) => {
+    const startMinutes = timeTextToMinutes(period.startTime);
+    const endMinutes = timeTextToMinutes(period.endTime);
+    if (startMinutes === null || endMinutes === null || startMinutes >= endMinutes) {
+      throw new Error(`第 ${index + 1} 节时间无效，请确认开始和结束时间`);
+    }
+    if (index > 0) {
+      const previousEnd = timeTextToMinutes(periods[index - 1].endTime);
+      if (previousEnd !== null && startMinutes < previousEnd) {
+        throw new Error(`第 ${index + 1} 节与上一节时间重叠`);
+      }
+    }
+  });
+  return periods;
+}
+
+function addSchedulePeriodRow() {
+  const periods = readSchedulePeriodsFromForm({ validate: false });
+  if (periods.length >= 12) {
+    showToast("每天最多配置 12 个可排课节次");
+    return;
+  }
+  const last = periods[periods.length - 1] || { endTime: "08:40" };
+  const lastEnd = timeTextToMinutes(last.endTime) ?? 8 * 60 + 40;
+  const startTime = minutesToTimeText(Math.min(lastEnd + 10, 23 * 60 + 10));
+  const endTime = minutesToTimeText(Math.min((timeTextToMinutes(startTime) ?? lastEnd + 10) + 40, 23 * 60 + 59));
+  state.schedulingConfig.periods = [
+    ...periods,
+    {
+      period: periods.length + 1,
+      label: `第 ${periods.length + 1} 节`,
+      startTime,
+      endTime,
+      time: `${startTime}-${endTime}`,
+      type: "regular",
+      typeName: schedulePeriodTypeText("regular"),
+      active: true,
+    },
+  ];
+  renderAdminScheduling();
+}
+
+function deleteSchedulePeriodRow(index) {
+  const periods = readSchedulePeriodsFromForm({ validate: false }).filter((_, rowIndex) => rowIndex !== Number(index));
+  if (!periods.length) {
+    showToast("请至少保留 1 个可排课节次");
+    return;
+  }
+  state.schedulingConfig.periods = periods.map((period, rowIndex) => ({
+    ...period,
+    period: rowIndex + 1,
+    label: `第 ${rowIndex + 1} 节`,
+  }));
+  renderAdminScheduling();
+}
+
+async function saveSchedulePeriods() {
+  let periods;
+  try {
+    periods = readSchedulePeriodsFromForm();
+  } catch (error) {
+    showToast(error.message || "作息时间无效");
+    return;
+  }
+
+  if (backendMode() && currentRole() === "admin") {
+    schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+    renderAdminScheduling();
+    try {
+      const result = await apiRequest("/api/scheduling/periods", {
+        method: "POST",
+        body: {
+          termId: currentSchedulingTermId(),
+          stageId: state.schedulingConfig.stageId,
+          grade: state.schedulingConfig.grade,
+          periods,
+        },
+      });
+      applyBackendScheduleResult(result);
+      schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
+      showToast("作息时间已保存，请重新生成受影响年级的课表");
+    } catch (error) {
+      schedulingBackendState = {
+        loaded: true,
+        loading: false,
+        error: error.message || "作息时间保存失败",
+      };
+      showToast(schedulingBackendState.error);
+    }
+    render();
+    return;
+  }
+
+  state.schedulingConfig.periods = periods;
+  resetCourseDraftAfterConfigChange();
+  showToast("作息时间已保存到试运行数据");
+  render();
 }
 
 function classStructureFromConfig(config = state.schedulingConfig) {
@@ -6054,8 +6488,8 @@ function resetTeacherImportPreviewForEdit() {
 async function previewTeacherImportCsv() {
   syncTeacherImportText();
   const csvText = teacherImportState.csvText;
-  if (!backendMode() || currentRole() !== "admin") {
-    showToast("请通过后端服务登录行政账号后再导入");
+  if (!backendMode() || currentRole() !== "system_admin") {
+    showToast("请通过后端服务登录系统管理员账号后再导入");
     return;
   }
   if (!csvText.trim()) {
@@ -6102,6 +6536,10 @@ async function previewTeacherImportCsv() {
 async function commitTeacherImportCsv() {
   syncTeacherImportText();
   const csvText = teacherImportState.csvText;
+  if (!backendMode() || currentRole() !== "system_admin") {
+    showToast("请通过后端服务登录系统管理员账号后再导入");
+    return;
+  }
   if (!teacherImportState.preview?.canImport || teacherImportState.previewCsvText !== csvText) {
     showToast("请先完成当前 CSV 的预览校验");
     return;
@@ -6260,6 +6698,7 @@ function renderAuth() {
   const loggedIn = Boolean(sessionAccountId);
   document.querySelector("#loginScreen").classList.toggle("is-hidden", loggedIn);
   document.querySelector("#appShell").classList.toggle("is-hidden", !loggedIn);
+  renderEnvironmentLabels();
   renderScheduledTeacherLoginShortcuts();
 }
 
@@ -6287,6 +6726,7 @@ function renderShell() {
 
   document.body.dataset.activeView = state.activeView;
   document.body.dataset.accountRole = role;
+  renderEnvironmentLabels();
   document.querySelector("#viewTitle").textContent = views[state.activeView].title;
   document.querySelector("#accountRoleSide").textContent = account.title;
   document.querySelector("#teacherNameSide").textContent = account.name;
@@ -6295,6 +6735,8 @@ function renderShell() {
       ? `${teacher.department} · ${teacher.subject}`
       : role === "finance"
         ? `${account.department} · 薪资结算`
+        : role === "system_admin"
+          ? `${account.department} · 账号管理`
         : role === "classroom"
           ? `${account.department} · 动态二维码`
           : `${account.department} · 排课管理`;
@@ -6336,7 +6778,14 @@ function renderNotices() {
 
   const role = currentRole();
   const notices = roleNotices(role);
-  title.textContent = role === "teacher" ? "老师通知栏" : role === "admin" ? "行政通知栏" : "财务通知栏";
+  title.textContent =
+    role === "teacher"
+      ? "老师通知栏"
+      : role === "admin"
+        ? "行政通知栏"
+        : role === "system_admin"
+          ? "系统通知栏"
+          : "财务通知栏";
   count.textContent = `${notices.length} 条`;
   list.innerHTML = notices.length
     ? notices
@@ -6370,7 +6819,14 @@ function renderNotificationCenter() {
   const canPublish = canPublishNotifications();
   const candidateId = state.selectedNoticeId || notices[0]?.id || "";
   const selectedId = notices.some((notice) => notice.id === candidateId) ? candidateId : notices[0]?.id || "";
-  title.textContent = role === "teacher" ? "老师通知中心" : role === "admin" ? "行政通知中心" : "财务通知中心";
+  title.textContent =
+    role === "teacher"
+      ? "老师通知中心"
+      : role === "admin"
+        ? "行政通知中心"
+        : role === "system_admin"
+          ? "系统通知中心"
+          : "财务通知中心";
   count.textContent = `${notices.length} 条`;
   if (composer && composerStatus && sendButton && clearButton) {
     composer.classList.toggle("is-hidden", !canPublish);
@@ -6414,6 +6870,18 @@ function renderNotificationCenter() {
 
 function renderDashboard() {
   const teacherId = currentRole() === "teacher" ? currentTeacherId() : state.teachers[0].id;
+  const month = currentSettlementMonth();
+  if (backendMode() && currentRole() === "teacher") {
+    ensureBackendTeacherPayroll(teacherId, month);
+  }
+  const backendPayroll =
+    backendMode() &&
+    teacherPayrollState.teacherId === teacherId &&
+    teacherPayrollState.month === month &&
+    teacherPayrollState.loaded
+      ? teacherPayrollState.data
+      : null;
+  const backendPayrollStatus = backendPayroll?.generated?.status || "";
   const salary = calculateSalary(teacherId);
   const lessons = teacherLessons(teacherId);
   const completedUnits = payableLessons(teacherId).reduce((sum, lesson) => sum + lesson.units, 0);
@@ -6428,13 +6896,22 @@ function renderDashboard() {
   document.querySelector("#completedLessons").textContent = completedUnits;
   document.querySelector("#pendingLessons").textContent = pendingLessons.length;
   document.querySelector("#warningCount").textContent = warnings.length;
-  document.querySelector("#netPreview").textContent = formatCurrency(salary.net);
+  document.querySelector("#netPreview").textContent = backendPayroll
+    ? formatCurrency(backendPayroll.netPay || 0)
+    : formatCurrency(salary.net);
   const dashboardPayrollStatus = document.querySelector("#dashboardPayrollStatus");
   if (dashboardPayrollStatus) {
-    dashboardPayrollStatus.textContent = settlementText(teacherId);
+    dashboardPayrollStatus.textContent = backendPayrollStatus
+      ? payrollStatusLabel(backendPayrollStatus)
+      : backendMode()
+        ? "财务尚未生成"
+        : settlementText(teacherId);
   }
-  document.querySelector("#confirmStatusText").textContent = confirmationText(teacherId);
-  document.querySelector("#confirmProgressBar").style.width = `${25 + (state.confirmationStages[teacherId] || 0) * 25}%`;
+  const confirmationStage = backendPayrollStatus ? payrollFlowStage(backendPayrollStatus) : state.confirmationStages[teacherId] || 0;
+  document.querySelector("#confirmStatusText").textContent = backendPayrollStatus
+    ? payrollStatusLabel(backendPayrollStatus)
+    : confirmationText(teacherId);
+  document.querySelector("#confirmProgressBar").style.width = `${25 + confirmationStage * 25}%`;
 
   const nextStatus = document.querySelector("#nextLessonStatus");
   const detail = document.querySelector("#nextLessonDetail");
@@ -6495,7 +6972,25 @@ function renderTasks() {
     : `<tr><td colspan="8"><div class="empty-state">暂无课程任务，行政发布课表后自动同步到这里</div></td></tr>`;
 }
 
-function availableScheduleWeeks(lessons) {
+function availableScheduleWeeks(lessons, teacherId = currentTeacherId()) {
+  const backendWeeks = state.teacherScheduleWeeks?.[teacherId] || [];
+  if (backendMode() && backendWeeks.length) {
+    const weekMap = new Map();
+    backendWeeks.forEach((week) => {
+      if (!week?.weekStart) return;
+      weekMap.set(week.weekStart, {
+        weekStart: week.weekStart,
+        lessonCount: Number(week.lessonCount) || 0,
+      });
+    });
+    lessons.forEach((lesson) => {
+      const weekStart = startOfNaturalWeek(lesson.date);
+      if (!weekMap.has(weekStart)) {
+        weekMap.set(weekStart, { weekStart, lessonCount: 0 });
+      }
+    });
+    return Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+  }
   const baseWeek = startOfNaturalWeek(TERM_START_WEEK);
   const baseDate = parseDateKey(baseWeek);
   const termWeeks = Array.from({ length: TERM_WEEK_COUNT }, (_, index) => formatDateKey(addDays(baseDate, index * 7)));
@@ -6507,7 +7002,10 @@ function availableScheduleWeeks(lessons) {
   ).sort();
   const currentWeek = startOfNaturalWeek(todayKey());
   if (!weeks.includes(currentWeek)) weeks.unshift(currentWeek);
-  return weeks;
+  return weeks.map((weekStart) => ({
+    weekStart,
+    lessonCount: lessons.filter((lesson) => weekDateKeys(weekStart).includes(lesson.date)).length,
+  }));
 }
 
 function minutesFromClock(value = "00:00") {
@@ -6676,10 +7174,11 @@ function renderSchedule() {
   const summary = document.querySelector("#scheduleSummary");
   const grid = document.querySelector("#scheduleWeekGrid");
   const select = document.querySelector("#scheduleWeekSelect");
-  const title = document.querySelector("#scheduleWeekTitle");
+  const termTitle = document.querySelector("#scheduleTermTitle");
+  const termRange = document.querySelector("#scheduleTermRange");
   const range = document.querySelector("#scheduleWeekRange");
   const syncStatus = document.querySelector("#scheduleSyncStatus");
-  if (!summary || !grid || !select || !title || !range) return;
+  if (!summary || !grid || !select || !termTitle || !termRange || !range) return;
 
   const lessons = teacherLessons(currentTeacherId()).sort((a, b) =>
     `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
@@ -6688,7 +7187,8 @@ function renderSchedule() {
     syncStatus.textContent = lessons.length ? "教务已分发" : "等待发布";
     syncStatus.className = lessons.length ? "status-pill done" : "status-pill warning";
   }
-  const weeks = availableScheduleWeeks(lessons);
+  const weekOptions = availableScheduleWeeks(lessons, currentTeacherId());
+  const weeks = weekOptions.map((week) => week.weekStart);
   if (!weeks.includes(state.selectedScheduleWeekStart)) {
     state.selectedScheduleWeekStart = weeks[0] || startOfNaturalWeek(todayKey());
   }
@@ -6705,7 +7205,9 @@ function renderSchedule() {
 
   select.innerHTML = weeks
     .map((week) => {
-      const count = lessons.filter((lesson) => weekDateKeys(week).includes(lesson.date)).length;
+      const count =
+        weekOptions.find((option) => option.weekStart === week)?.lessonCount ??
+        lessons.filter((lesson) => weekDateKeys(week).includes(lesson.date)).length;
       return `
         <option value="${week}" ${week === selectedWeek ? "selected" : ""}>
           ${formatWeekRange(week)} · ${count} 节
@@ -6713,8 +7215,11 @@ function renderSchedule() {
       `;
     })
     .join("");
-  title.textContent = `${formatWeekRange(selectedWeek)} 自然周`;
-  range.textContent = "按周一到周日展示排班";
+  const term = termManagementState.currentTerm || {};
+  termTitle.textContent = term.name || "当前学期";
+  termRange.textContent =
+    term.startDate && term.endDate ? `${term.startDate} 至 ${term.endDate}` : "未设置学期日期";
+  range.textContent = `${formatWeekRange(selectedWeek)} · 自然周排班`;
 
   summary.innerHTML = [
     ["本周课程", `${weekLessons.length} 节`, "当前自然周"],
@@ -6787,7 +7292,7 @@ function renderTermManagement() {
   document.querySelector("#termList").innerHTML = terms
     .map((term) => {
       const copiedSummary = term.copiedConfigSummary
-        ? `复制配置：课程 ${term.copiedConfigSummary.courseRuleCount || 0}，任课 ${term.copiedConfigSummary.teacherAssignmentCount || 0}，约束 ${term.copiedConfigSummary.constraintCount || 0}`
+        ? `复制配置：课程 ${term.copiedConfigSummary.courseRuleCount || 0}，作息 ${term.copiedConfigSummary.periodTemplateCount || 0}，任课 ${term.copiedConfigSummary.teacherAssignmentCount || 0}，约束 ${term.copiedConfigSummary.constraintCount || 0}`
         : "未记录复制配置";
       const isCurrent = Boolean(term.current);
       const archived = term.status === "archived";
@@ -6843,6 +7348,9 @@ function renderAdminScheduling() {
         gradeId: config.gradeId,
       };
   const assignments = draft.assignments || [];
+  const scheduleVersions = state.scheduleVersions || [];
+  const currentVersion = scheduleVersions.find((version) => version.current);
+  const effectiveScheduleStatus = draft.status === "empty" && currentVersion ? "published" : draft.status;
   const conflicts = validateScheduleConflicts(assignments);
   draft.conflicts = conflicts;
   const selectedClassId =
@@ -6875,16 +7383,16 @@ function renderAdminScheduling() {
   document.querySelector("#adminResourceHelp").textContent =
     `老师池 · ${roomSummary.totalCount} 间教室（${roomSummary.homeroomCount} 间普通 + ${roomSummary.specialCount} 间专用）`;
   document.querySelector("#adminConflictCount").textContent = conflicts.length;
-  document.querySelector("#adminPublishStatus").textContent = scheduleStatusText(draft.status);
+  document.querySelector("#adminPublishStatus").textContent = scheduleStatusText(effectiveScheduleStatus);
   document.querySelector("#adminPublishTime").textContent =
-    draft.status === "published"
-      ? draft.publishedAt
+    effectiveScheduleStatus === "published"
+      ? draft.publishedAt || currentVersion?.publishedAt || "已发布"
       : draft.status === "draft"
         ? draft.generatedAt
         : "等待生成";
-  document.querySelector("#adminScheduleStatus").textContent = scheduleStatusText(draft.status);
+  document.querySelector("#adminScheduleStatus").textContent = scheduleStatusText(effectiveScheduleStatus);
   document.querySelector("#adminScheduleStatus").className =
-    draft.status === "published"
+    effectiveScheduleStatus === "published"
       ? "status-pill done"
       : draft.status === "draft"
         ? "status-pill warning"
@@ -6903,7 +7411,7 @@ function renderAdminScheduling() {
       status.textContent = "排课已取消";
       status.className = "status-pill warning";
     } else if (schedulingBackendState.loaded) {
-      status.textContent = `${scheduleStatusText(draft.status)} · 后端`;
+      status.textContent = `${scheduleStatusText(effectiveScheduleStatus)} · 后端`;
     }
   }
   document.querySelector("#conflictStatus").textContent =
@@ -6928,6 +7436,9 @@ function renderAdminScheduling() {
     classStructure.regularCount,
     classStructure.experimentalCount,
   );
+  document.querySelector("#periodTemplateHelp").textContent =
+    `${config.divisionName}${config.gradeName}当前 ${schedulePeriodsFromConfig(config).length} 个可排课节次；午休、大课间通过相邻节次之间的空档体现。`;
+  document.querySelector("#periodTemplateList").innerHTML = schedulePeriodTemplateHtml(config);
   document.querySelector("#roomResourceHelp").textContent =
     `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室；下方目录名称会用于排课、换教室和教室二维码。`;
   document.querySelector("#roomResourceTypeControls").innerHTML = roomResourceTypeControlsHtml(config, roomSummary.counts);
@@ -6953,8 +7464,6 @@ function renderAdminScheduling() {
   document.querySelector("#courseRulesStatus").className = (config.constraints || []).length
     ? "status-pill warning"
     : "status-pill done";
-  const scheduleVersions = state.scheduleVersions || [];
-  const currentVersion = scheduleVersions.find((version) => version.current);
   document.querySelector("#scheduleVersionStatus").textContent = currentVersion
     ? `当前 V${currentVersion.versionNumber}`
     : "暂无版本";
@@ -7052,6 +7561,8 @@ function renderAdminScheduling() {
   confirmButton.title = readiness.publishReason || "";
   document.querySelector("#saveCourseRules").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#saveSchedulePeriods").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#addSchedulePeriod").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveRoomResources").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addGradeCourse").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#toggleCourseEditMode").disabled = termReadOnly || schedulingBackendState.loading;
@@ -7060,6 +7571,9 @@ function renderAdminScheduling() {
   document.querySelector("#saveTeacherRule").disabled = termReadOnly || schedulingBackendState.loading || !(config.teachers || []).length;
   document.querySelector("#refreshSchedulePrecheck").disabled = schedulingBackendState.loading;
   document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
+    button.disabled = termReadOnly || schedulingBackendState.loading;
+  });
+  document.querySelectorAll("[data-delete-schedule-period]").forEach((button) => {
     button.disabled = termReadOnly || schedulingBackendState.loading;
   });
 }
@@ -7077,6 +7591,8 @@ function renderAdminScheduleOverview() {
         gradeId: config.gradeId,
       };
   const assignments = draft.assignments || [];
+  const currentVersion = (state.scheduleVersions || []).find((version) => version.current);
+  const effectiveScheduleStatus = draft.status === "empty" && currentVersion ? "published" : draft.status;
   const selectedClassId =
     config.classes.some((schoolClass) => schoolClass.id === state.selectedScheduleOverviewClassId)
       ? state.selectedScheduleOverviewClassId
@@ -7123,12 +7639,12 @@ function renderAdminScheduleOverview() {
   } else if (schedulingBackendState.error) {
     status.textContent = "后端异常";
     status.className = "status-pill warning";
-  } else if (assignments.length === 0) {
+  } else if (assignments.length === 0 && !currentVersion) {
     status.textContent = "未生成";
     status.className = "status-pill";
   } else {
-    status.textContent = scheduleStatusText(draft.status);
-    status.className = draft.status === "published" ? "status-pill done" : "status-pill warning";
+    status.textContent = scheduleStatusText(effectiveScheduleStatus);
+    status.className = effectiveScheduleStatus === "published" ? "status-pill done" : "status-pill warning";
   }
 
   summary.innerHTML = `
@@ -7144,8 +7660,8 @@ function renderAdminScheduleOverview() {
     </article>
     <article class="metric">
       <span>课表状态</span>
-      <strong>${escapeHtml(scheduleStatusText(draft.status))}</strong>
-      <small>${draft.publishedAt || draft.generatedAt || "等待生成"}</small>
+      <strong>${escapeHtml(scheduleStatusText(effectiveScheduleStatus))}</strong>
+      <small>${draft.publishedAt || currentVersion?.publishedAt || draft.generatedAt || "等待生成"}</small>
     </article>
     <article class="metric">
       <span>自然周</span>
@@ -7165,7 +7681,9 @@ function renderAdminScheduleOverview() {
   `;
   grid.innerHTML = selectedClassAssignments.length
     ? adminScheduleGrid(selectedClassAssignments, { readonly: true })
-    : `<div class="empty-state schedule-overview-empty">当前学部年级还没有课表，请先到“行政排课”生成草稿或发布正式课表。</div>`;
+    : currentVersion
+      ? `<div class="empty-state schedule-overview-empty">当前学部年级已有发布版本 V${escapeHtml(currentVersion.versionNumber)}，但课表明细暂未载入。请回到“行政排课”重新读取当前学部年级。</div>`
+      : `<div class="empty-state schedule-overview-empty">当前学部年级还没有课表，请先到“行政排课”生成草稿或发布正式课表。</div>`;
 }
 
 function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
@@ -7478,7 +7996,7 @@ function renderTeacherImport() {
   const status = document.querySelector("#teacherImportStatus");
   const preview = teacherImportState.preview;
   const imported = teacherImportState.imported;
-  const connected = backendMode() && currentRole() === "admin";
+  const connected = backendMode() && currentRole() === "system_admin";
   const currentCsv = teacherImportState.csvText.trim();
   const previewMatchesCsv = Boolean(preview) && teacherImportState.previewCsvText.trim() === currentCsv;
   const alreadyCommitted = Boolean(currentCsv) && teacherImportState.committedCsvText.trim() === currentCsv;
@@ -7499,7 +8017,7 @@ function renderTeacherImport() {
         ? teacherImportState.error
         : connected
           ? "已连接后端导入接口"
-          : "请通过后端服务登录行政账号";
+          : "请通过后端服务登录系统管理员账号";
     status.className = teacherImportState.error
       ? "status-pill warning"
       : connected
@@ -7727,6 +8245,18 @@ function filteredLocalPersonnelRows() {
 function personnelRow(row) {
   const usernames = row.usernames?.length ? row.usernames.join(" / ") : row.username || "未开通";
   const identifier = [row.employeeNo, row.teacherId].filter(Boolean).join(" · ") || row.accountId || row.id;
+  const canManageAccount = backendMode() && currentRole() === "system_admin" && row.accountId;
+  const isDisabled = row.accountStatus === "disabled" || row.status === "disabled";
+  const accountActions = canManageAccount
+    ? `
+      <div class="personnel-actions">
+        <button class="mini-button" data-account-reset="${escapeHtml(row.accountId)}" type="button">重置密码</button>
+        <button class="mini-button ${isDisabled ? "primary" : ""}" data-account-status="${escapeHtml(row.accountId)}" data-next-status="${isDisabled ? "active" : "disabled"}" type="button">
+          ${isDisabled ? "启用账号" : "停用账号"}
+        </button>
+      </div>
+    `
+    : `<span class="muted">${row.accountId ? "仅系统管理员可操作" : "未开通账号"}</span>`;
   const subjectAndTitle =
     row.subjectName && row.subjectName !== "不适用"
       ? `${escapeHtml(row.subjectName)}<span class="cell-subline">${escapeHtml(row.title || "")}</span>`
@@ -7747,12 +8277,13 @@ function personnelRow(row) {
       <td data-label="学科/岗位">${subjectAndTitle}</td>
       <td data-label="状态">${personnelStatusTag(row.status)}</td>
       <td data-label="联系方式">${escapeHtml(row.phone || row.hiredAt || "-")}</td>
+      <td data-label="账号操作">${accountActions}</td>
     </tr>
   `;
 }
 
 function renderPersonnelList() {
-  if (backendMode() && currentRole() === "admin" && !personnelPage.loaded && !personnelPage.loading) {
+  if (backendMode() && isPersonnelRole() && !personnelPage.loaded && !personnelPage.loading) {
     loadPersonnelPage();
   }
 
@@ -7787,12 +8318,12 @@ function renderPersonnelList() {
       status.className = personnelPage.error ? "status-pill warning" : "status-pill done";
     }
     table.innerHTML = personnelPage.loading
-      ? `<tr><td colspan="8"><div class="empty-state">正在加载全校人员列表...</div></td></tr>`
+      ? `<tr><td colspan="9"><div class="empty-state">正在加载全校人员列表...</div></td></tr>`
       : personnelPage.error
-        ? `<tr><td colspan="8"><div class="empty-state">${escapeHtml(personnelPage.error)}</div></td></tr>`
+        ? `<tr><td colspan="9"><div class="empty-state">${escapeHtml(personnelPage.error)}</div></td></tr>`
         : personnelPage.items.length
           ? personnelPage.items.map(personnelRow).join("")
-          : `<tr><td colspan="8"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
+          : `<tr><td colspan="9"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
     if (pageInfo) {
       pageInfo.textContent = `第 ${meta.page || 1} / ${meta.totalPages || 1} 页 · 共 ${meta.total || 0} 人`;
     }
@@ -7818,7 +8349,7 @@ function renderPersonnelList() {
   }
   table.innerHTML = pageRows.length
     ? pageRows.map(personnelRow).join("")
-    : `<tr><td colspan="8"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
+    : `<tr><td colspan="9"><div class="empty-state">没有符合条件的人员</div></td></tr>`;
   if (pageInfo) {
     pageInfo.textContent = `第 ${currentPage} / ${totalPages} 页 · 共 ${rows.length} 人`;
   }
@@ -9175,7 +9706,7 @@ function renderConfirmation() {
               <div class="workload-item payroll-line-item">
                 <div>
                   <span>${escapeHtml(row.name)}</span>
-                  <p class="muted">${escapeHtml(row.basis)}</p>
+                  <p class="muted">${escapeHtml(humanizePayrollBasis(row.basis))}</p>
                 </div>
                 <strong>${formatCurrency(row.amount)}</strong>
               </div>
@@ -9191,7 +9722,7 @@ function renderConfirmation() {
 
 function renderBackendConfirmation() {
   const teacherId = currentTeacherId();
-  const month = "2026-06";
+  const month = currentSettlementMonth();
   if (
     (!teacherWorkloadState.loaded && !teacherWorkloadState.loading) ||
     teacherWorkloadState.teacherId !== teacherId ||
@@ -9210,6 +9741,24 @@ function renderBackendConfirmation() {
       : null;
   const payrollStatus = payroll?.generated?.status || "missing";
   const stage = payrollFlowStage(payrollStatus);
+  const isLockedPayroll = payrollStatus === "locked";
+  const confirmNote = document.querySelector("#confirmPayrollNote");
+  const confirmStatus = document.querySelector("#confirmPayrollStatus");
+  const confirmNet = document.querySelector("#confirmPayrollNet");
+  const actionHint = document.querySelector("#teacherConfirmActionHint");
+
+  if (payroll?.generated) {
+    if (confirmNet) confirmNet.textContent = formatCurrency(payroll.netPay || 0);
+    if (confirmStatus) {
+      confirmStatus.textContent = payrollStatusLabel(payrollStatus);
+      confirmStatus.className = isLockedPayroll ? "status-pill locked" : "status-pill done";
+    }
+    if (confirmNote) {
+      confirmNote.textContent = isLockedPayroll
+        ? "本月工资已锁定；未完成课次已按未计薪记录归档。"
+        : "请核对本月工资明细，确认后财务才能进入锁定发放。";
+    }
+  }
 
   document.querySelector("#confirmSteps").innerHTML = confirmSteps
     .map((step, index) => {
@@ -9241,11 +9790,28 @@ function renderBackendConfirmation() {
     const summary = data.summary || {};
     const rows = normalizeSettlementRows(payroll.rows || []);
     const disputeReason = payroll.generated?.disputeReason || "";
+    const stateNote = isLockedPayroll
+      ? `
+        <div class="payroll-confirm-state-note">
+          <strong>本月工资已锁定</strong>
+          <p>这里仍展示 ${summary.pendingCount || 0} 节未完成课次，是为了留痕说明这些课次未进入本月工资；老师不需要再确认或提交异议。如确需调整，请联系财务解锁重算。</p>
+        </div>
+      `
+      : "";
     list.innerHTML =
+      stateNote +
       [
       ...categories.map((category) => [category.label, `${category.units} 节`, "签入签出完成后计入月度工作量"]),
-      ["待处理考勤", `${summary.pendingCount || 0} 节`, "未完成签入和签出，暂不计入工资"],
-      ["异常记录", `${summary.exceptionCount || 0} 条`, "异常课次不会进入本次工资，需财务处理后重算"],
+      [
+        "待处理考勤",
+        `${summary.pendingCount || 0} 节`,
+        isLockedPayroll ? "已作为未计薪记录归档，不影响已锁定工资" : "未完成签入和签出，暂不计入工资",
+      ],
+      [
+        "异常记录",
+        `${summary.exceptionCount || 0} 条`,
+        isLockedPayroll ? "已按锁定前处理结果归档留痕" : "异常课次不会进入本次工资，需财务处理后重算",
+      ],
       ["可计薪课时", `${summary.payableUnits || 0} 节`, "已完成签入签出的课时数量"],
     ]
       .map(
@@ -9269,7 +9835,7 @@ function renderBackendConfirmation() {
                 <div class="workload-item payroll-line-item">
                   <div>
                     <span>${escapeHtml(row.name)}</span>
-                    <p class="muted">${escapeHtml(row.basis)}</p>
+                    <p class="muted">${escapeHtml(humanizePayrollBasis(row.basis))}</p>
                   </div>
                   <strong>${formatCurrency(row.amount)}</strong>
                 </div>
@@ -9286,10 +9852,21 @@ function renderBackendConfirmation() {
   }
 
   setTeacherPayrollSupport(teacherId, payroll);
-  document.querySelector("#confirmWorkload").disabled =
+  const actionDisabled =
     payrollStatus !== "generated" || teacherPayrollState.loading || teacherWorkloadState.loading || Boolean(teacherPayrollState.error);
-  document.querySelector("#submitPayrollDispute").disabled =
-    payrollStatus !== "generated" || teacherPayrollState.loading || teacherWorkloadState.loading || Boolean(teacherPayrollState.error);
+  document.querySelector("#confirmWorkload").disabled = actionDisabled;
+  document.querySelector("#submitPayrollDispute").disabled = actionDisabled;
+  if (actionHint) {
+    if (payrollStatus === "missing") {
+      actionHint.textContent = "财务尚未发布本月工资明细，暂不能确认。";
+    } else if (payrollStatus === "generated") {
+      actionHint.textContent = "请核对工资明细，确认无误后点击确认；如有问题可提交异议。";
+    } else if (payrollStatus === "locked") {
+      actionHint.textContent = "本月工资已锁定，当前页面只保留明细和未计薪记录供查看。";
+    } else {
+      actionHint.textContent = `当前状态：${payrollStatusLabel(payrollStatus)}，无需重复确认。`;
+    }
+  }
 }
 
 function setTeacherPayrollSupport(teacherId, payroll = null) {
@@ -9346,11 +9923,12 @@ function setTeacherPayrollWidgets({ amountText, statusText, statusClass = "statu
 
 function renderTeacherPayroll() {
   const teacherId = currentRole() === "teacher" ? currentTeacherId() : "";
+  const month = currentSettlementMonth();
   setTeacherPayrollSupport(teacherId);
 
   if (backendMode() && currentRole() === "teacher") {
-    ensureBackendTeacherPayroll(teacherId);
-    const isCurrent = teacherPayrollState.teacherId === teacherId;
+    ensureBackendTeacherPayroll(teacherId, month);
+    const isCurrent = teacherPayrollState.teacherId === teacherId && teacherPayrollState.month === month;
     const payroll = isCurrent ? teacherPayrollState.data : null;
 
     if (teacherPayrollState.loading && (!isCurrent || !teacherPayrollState.loaded)) {
@@ -9375,14 +9953,21 @@ function renderTeacherPayroll() {
       return;
     }
 
-	    const payrollStatus = payroll?.generated ? payrollStatusLabel(payroll.generated.status) : "后端试算";
+	    const backendPayrollStatus = payroll?.generated?.status || "";
+	    const payrollStatus = payroll?.generated ? payrollStatusLabel(backendPayrollStatus) : "后端试算";
 	    setTeacherPayrollSupport(teacherId, payroll);
 	    setTeacherPayrollWidgets({
 	      amountText: formatCurrency(payroll?.netPay || 0),
 	      statusText: payrollStatus,
-	      statusClass: payroll?.generated?.status === "locked" ? "status-pill locked" : "status-pill done",
-	      noteText: "结算期到月度确认查看明细",
-	      summaryText: "老师端平时只展示月度汇总；财务生成工资后，请到“月度确认”查看完整工资明细并确认或提出异议。",
+	      statusClass: backendPayrollStatus === "locked" ? "status-pill locked" : "status-pill done",
+	      noteText:
+	        backendPayrollStatus === "locked"
+	          ? "本月工资已锁定，月度确认页保留明细和未计薪记录"
+	          : "结算期到月度确认查看明细",
+	      summaryText:
+	        backendPayrollStatus === "locked"
+	          ? "本月工资已锁定；未完成课次只作为未计薪留痕展示，不需要老师继续操作。"
+	          : "老师端平时只展示月度汇总；财务生成工资后，请到“月度确认”查看完整工资明细并确认或提出异议。",
 	    });
     return;
   }
@@ -9398,7 +9983,7 @@ function renderTeacherPayroll() {
 }
 
 function renderFinanceDashboard() {
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && isFinanceRole()) {
     renderBackendFinanceDashboard();
     return;
   }
@@ -9486,9 +10071,7 @@ function renderBackendFinanceDashboard() {
   document.querySelector("#financeTeacherCount").textContent = meta.total || 0;
   document.querySelector("#financePendingCount").textContent = totals.pending;
   document.querySelector("#financeWarningCount").textContent = totals.exception;
-  document.querySelector("#financeSettledCount").textContent = financeTeacherPage.items.filter(
-    (teacher) => teacher.payrollDetail?.status === "locked" || teacher.payroll?.status === "locked",
-  ).length;
+  document.querySelector("#financeSettledCount").textContent = totals.locked || 0;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
   document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
 
@@ -9553,7 +10136,7 @@ function renderBackendFinanceDashboard() {
 }
 
 function renderFinanceRecords() {
-  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+  if (backendMode() && isFinanceRole()) {
     renderBackendFinanceRecords();
     return;
   }
@@ -10101,7 +10684,7 @@ function humanizePayrollBasis(basis = "") {
 }
 
 function renderSettlement() {
-  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+  if (backendMode() && isFinanceRole()) {
     renderBackendSettlement();
     return;
   }
@@ -10127,8 +10710,10 @@ function renderSettlement() {
 	  document.querySelector("#settleTeacherPayroll").disabled = settled;
   document.querySelector("#reviewTeacherPayroll").disabled = true;
   document.querySelector("#batchGeneratePayroll").disabled = true;
+  document.querySelector("#batchLockPayroll").disabled = true;
   document.querySelector("#exportPayrollCsv").disabled = true;
   document.querySelector("#unlockTeacherPayroll").disabled = true;
+  document.querySelector("#settleTeacherPayrollHint").textContent = "";
   renderSettlementWorkspaceState({
     teacherId,
     teacher: teacherById(teacherId),
@@ -10162,9 +10747,11 @@ function renderBackendSettlement() {
 	    document.querySelector("#saveTeacherPayrollDraft").disabled = true;
 	    document.querySelector("#settleTeacherPayroll").disabled = true;
     document.querySelector("#reviewTeacherPayroll").disabled = true;
-    document.querySelector("#batchGeneratePayroll").disabled = currentRole() !== "finance";
-    document.querySelector("#exportPayrollCsv").disabled = currentRole() !== "finance";
+    document.querySelector("#batchGeneratePayroll").disabled = !isFinanceRole();
+    document.querySelector("#batchLockPayroll").disabled = !isFinanceRole();
+    document.querySelector("#exportPayrollCsv").disabled = !isFinanceRole();
     document.querySelector("#unlockTeacherPayroll").disabled = true;
+    document.querySelector("#settleTeacherPayrollHint").textContent = "请先选择老师。";
     document.querySelector("#settlementSalaryTable").innerHTML = `<tr><td colspan="3"><div class="empty-state">当前筛选下暂无老师，请调整学部、年级或搜索条件。</div></td></tr>`;
     renderSettlementWorkspaceState({ teacherId: "", payroll: null });
     renderSalaryProfilePanel(null);
@@ -10182,8 +10769,10 @@ function renderBackendSettlement() {
 	  const button = document.querySelector("#settleTeacherPayroll");
   const reviewButton = document.querySelector("#reviewTeacherPayroll");
   const batchButton = document.querySelector("#batchGeneratePayroll");
+  const batchLockButton = document.querySelector("#batchLockPayroll");
   const exportButton = document.querySelector("#exportPayrollCsv");
   const unlockButton = document.querySelector("#unlockTeacherPayroll");
+  const lockHint = document.querySelector("#settleTeacherPayrollHint");
   const table = document.querySelector("#settlementSalaryTable");
 
   if (financeTeacherDetailState.loading && !payroll) {
@@ -10196,8 +10785,10 @@ function renderBackendSettlement() {
 	    button.disabled = true;
     reviewButton.disabled = true;
     batchButton.disabled = true;
+    batchLockButton.disabled = true;
     exportButton.disabled = true;
     unlockButton.disabled = true;
+    if (lockHint) lockHint.textContent = "薪资明细读取中。";
     table.innerHTML = `<tr><td colspan="3"><div class="empty-state">正在从后端读取该老师薪资明细...</div></td></tr>`;
     renderSettlementWorkspaceState({
       teacherId,
@@ -10210,18 +10801,21 @@ function renderBackendSettlement() {
   }
 
   if (financeTeacherDetailState.error) {
+    const blockerRows = payrollLockBlockersTableRows(financeTeacherDetailState.lockBlockers || []);
     document.querySelector("#settlementGrossSalary").textContent = "¥0";
     document.querySelector("#settlementTaxSalary").textContent = "¥0";
     document.querySelector("#settlementNetSalary").textContent = "¥0";
 	    status.textContent = financeTeacherDetailState.error;
 	    status.className = "status-pill warning";
-	    saveButton.disabled = currentRole() !== "finance";
+	    saveButton.disabled = !isFinanceRole();
 	    button.disabled = true;
     reviewButton.disabled = true;
     batchButton.disabled = false;
+    batchLockButton.disabled = false;
     exportButton.disabled = false;
     unlockButton.disabled = true;
-    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>`;
+    if (lockHint) lockHint.textContent = "当前老师详情异常，不能锁定。";
+    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">${financeTeacherDetailState.error}</div></td></tr>${blockerRows}`;
     renderSettlementWorkspaceState({
       teacherId,
       teacher: selectedFinanceTeacherRecord(teacherId),
@@ -10238,12 +10832,14 @@ function renderBackendSettlement() {
     document.querySelector("#settlementNetSalary").textContent = "¥0";
 	    status.textContent = "暂无薪资明细";
 	    status.className = "status-pill";
-	    saveButton.disabled = currentRole() !== "finance";
+	    saveButton.disabled = !isFinanceRole();
 	    button.disabled = true;
     reviewButton.disabled = true;
     batchButton.disabled = false;
+    batchLockButton.disabled = false;
     exportButton.disabled = false;
     unlockButton.disabled = true;
+    if (lockHint) lockHint.textContent = "请先保存或发布该老师工资明细。";
 	    table.innerHTML = `<tr><td colspan="3"><div class="empty-state">暂无该老师薪资明细，可先保存该老师工资草稿。</div></td></tr>`;
     renderSettlementWorkspaceState({
       teacherId,
@@ -10264,20 +10860,35 @@ function renderBackendSettlement() {
   document.querySelector("#settlementTaxSalary").textContent = formatCurrency(totals.tax);
   document.querySelector("#settlementNetSalary").textContent = formatCurrency(totals.net);
 	  const payrollStatus = payroll.generated?.status || "preview";
+  const lockBlockers = payroll.lockBlockers || financeTeacherDetailState.lockBlockers || [];
+  const hasLockBlockers = payrollStatus === "reviewed" && lockBlockers.length > 0;
 	  status.textContent = payroll.generated
 	    ? `${payrollStatusLabel(payrollStatus)} ${payroll.generated.lockedAt?.slice(0, 10) || payroll.generated.reviewedAt?.slice(0, 10) || payroll.generated.teacherConfirmedAt?.slice(0, 10) || payroll.generated.disputedAt?.slice(0, 10) || payroll.generated.publishedAt?.slice(0, 10) || payroll.generated.savedAt?.slice(0, 10) || payroll.generated.generatedAt?.slice(0, 10) || ""}`
 	    : "后端试算";
 	  status.className = payrollStatus === "locked" ? "status-pill locked" : "status-pill done";
 	  saveButton.disabled =
 	    financeTeacherDetailState.loading ||
-	    currentRole() !== "finance" ||
+	    !isFinanceRole() ||
 	    ["teacher_confirmed", "disputed", "reviewed", "locked"].includes(payrollStatus);
-	  reviewButton.disabled =
-    financeTeacherDetailState.loading || currentRole() !== "finance" || !["teacher_confirmed", "disputed"].includes(payrollStatus);
-  button.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "reviewed";
-  batchButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
-  exportButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance";
-  unlockButton.disabled = financeTeacherDetailState.loading || currentRole() !== "finance" || payrollStatus !== "locked";
+  reviewButton.disabled =
+    financeTeacherDetailState.loading || !isFinanceRole() || !["teacher_confirmed", "disputed"].includes(payrollStatus);
+  button.disabled = financeTeacherDetailState.loading || !isFinanceRole() || payrollStatus !== "reviewed" || hasLockBlockers;
+  button.title = hasLockBlockers ? `还有 ${lockBlockers.length} 条待处理/异常课次，处理后才能锁定` : "";
+  batchButton.disabled = financeTeacherDetailState.loading || !isFinanceRole();
+  batchLockButton.disabled = financeTeacherDetailState.loading || !isFinanceRole();
+  exportButton.disabled = financeTeacherDetailState.loading || !isFinanceRole();
+  unlockButton.disabled = financeTeacherDetailState.loading || !isFinanceRole() || payrollStatus !== "locked";
+  if (lockHint) {
+    if (hasLockBlockers) {
+      lockHint.textContent = `不能锁定：仍有 ${lockBlockers.length} 条待处理或异常课次，请先处理后重新生成/复核。`;
+    } else if (payrollStatus === "reviewed") {
+      lockHint.textContent = "该老师工资已满足锁定条件。";
+    } else if (payrollStatus === "locked") {
+      lockHint.textContent = "该老师本月工资已锁定，如需调整请先解锁重算。";
+    } else {
+      lockHint.textContent = "需老师确认并由财务处理完成后，才能锁定。";
+    }
+  }
   renderSettlementWorkspaceState({
     teacherId,
     teacher: payroll.teacher || selectedFinanceTeacherRecord(teacherId),
@@ -10286,7 +10897,9 @@ function renderBackendSettlement() {
     loading: financeTeacherDetailState.loading,
   });
   renderSalaryProfilePanel(settlementSalaryProfileSource(teacherId, payroll));
-  table.innerHTML = settlementSalaryRowsHtml(payroll.rows || [], totals);
+  table.innerHTML =
+    settlementSalaryRowsHtml(payroll.rows || [], totals) +
+    (payrollStatus === "reviewed" ? payrollLockBlockersTableRows(lockBlockers) : "");
 }
 
 function renderPayrollHistoryControls() {
@@ -10378,7 +10991,7 @@ function renderPayrollHistoryTable(data = null) {
 }
 
 function renderPayrollHistory() {
-  if (!["finance", "admin"].includes(currentRole())) return;
+  if (!isFinanceRole()) return;
   if (!backendMode()) {
     renderPayrollHistoryControls();
     renderPayrollHistorySummary(null);
@@ -10417,7 +11030,7 @@ function renderPayrollHistory() {
 }
 
 function renderPayrollConfig() {
-  if (!["finance", "admin"].includes(currentRole())) return;
+  if (!isFinanceRole()) return;
   if (!payrollRuleState.loaded && !payrollRuleState.loading) {
     loadPayrollRules();
   }
@@ -10458,7 +11071,7 @@ function renderPayrollRulesPanel() {
   renderPayrollSchemeEditor(rules);
   const saveButton = document.querySelector("#savePayrollRules");
   if (saveButton) {
-    saveButton.disabled = payrollRuleState.loading || !backendMode() || currentRole() !== "finance";
+    saveButton.disabled = payrollRuleState.loading || !backendMode() || !isFinanceRole();
     saveButton.textContent = payrollRuleState.loading ? "保存中" : "保存规则";
   }
 }
@@ -10486,7 +11099,7 @@ function salaryProfileEditContextAllowsInput() {
   return Boolean(
     salaryProfileEditMode &&
       backendMode() &&
-      currentRole() === "finance" &&
+      isFinanceRole() &&
       state.selectedFinanceTeacherId &&
       !financeTeacherDetailState.loading,
   );
@@ -10496,7 +11109,7 @@ function monthlyAdjustmentContextAllowsInput(profile = null) {
   const hasProfile = Boolean(profile && typeof profile === "object");
   return Boolean(
     backendMode() &&
-      currentRole() === "finance" &&
+      isFinanceRole() &&
       state.selectedFinanceTeacherId &&
       hasProfile &&
       !financeTeacherDetailState.loading,
@@ -10531,7 +11144,7 @@ function syncSalaryProfileEditState(profile) {
     panel.classList.toggle("is-readonly", !editable);
   }
   if (saveButton) {
-    saveButton.disabled = !backendMode() || currentRole() !== "finance" || !hasProfile || financeTeacherDetailState.loading;
+    saveButton.disabled = !backendMode() || !isFinanceRole() || !hasProfile || financeTeacherDetailState.loading;
     saveButton.textContent = financeTeacherDetailState.loading
       ? "保存中"
       : salaryProfileEditMode && hasProfile
@@ -10787,40 +11400,142 @@ function renderWarnings() {
     : `<div class="empty-state">暂无异常提醒</div>`;
 }
 
+function backendWarningItems({ records = [], workload = null, payroll = null } = {}) {
+  const items = [];
+  const seen = new Set();
+  const addItem = (item) => {
+    const key = item.key || `${item.type}-${item.lessonId || item.title}-${item.detail}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  records
+    .filter((record) => record.status !== "accepted")
+    .forEach((record) => {
+      addItem({
+        key: `record-${record.id || record.lessonId || `${record.date}-${record.time}-${record.actionLabel}`}`,
+        type: record.status === "exception" ? "exception" : "rejected",
+        title: `${record.actionLabel || "扫码"} · ${record.className || "未匹配课次"}`,
+        tag: record.status === "exception" ? "异常" : "拦截",
+        detail: `${formatDate(record.date)} ${record.time || ""} · ${record.room || "未知教室"} · ${record.resultText || "需要复核"}`,
+      });
+    });
+
+  (workload?.pendingLines || []).forEach((line) => {
+    addItem({
+      key: `pending-${line.lessonId}`,
+      type: "pending",
+      lessonId: line.lessonId,
+      title: `${line.className || "未设置班级"} · ${line.subjectName || "未设置课程"}`,
+      tag: "待处理",
+      detail: `${formatDate(line.date)} ${line.time || ""} · ${line.room || "未设置教室"} · 未完成签入/签出，暂不计入工资`,
+    });
+  });
+
+  (workload?.exceptionLines || []).forEach((line) => {
+    addItem({
+      key: `exception-line-${line.lessonId}`,
+      type: "exception",
+      lessonId: line.lessonId,
+      title: `${line.className || "未设置班级"} · ${line.subjectName || "未设置课程"}`,
+      tag: "异常",
+      detail: `${formatDate(line.date)} ${line.time || ""} · ${line.room || "未设置教室"} · ${line.note || "异常课次需处理后重算"}`,
+    });
+  });
+
+  (payroll?.lockBlockers || []).forEach((blocker) => {
+    addItem({
+      key: `blocker-${blocker.lessonId || `${blocker.date}-${blocker.time}-${blocker.reason}`}`,
+      type: blocker.type === "exception" ? "exception" : "pending",
+      lessonId: blocker.lessonId,
+      title: `${blocker.className || "未设置班级"} · ${blocker.subjectName || "未设置课程"}`,
+      tag: blocker.type === "exception" ? "异常" : "待处理",
+      detail: `${formatDate(blocker.date)} ${blocker.time || ""} · ${blocker.room || "未设置教室"} · ${blocker.reason || "锁定前需处理"}`,
+    });
+  });
+
+  return items.sort((a, b) => {
+    const typeWeight = { exception: 0, rejected: 1, pending: 2 };
+    return (typeWeight[a.type] ?? 9) - (typeWeight[b.type] ?? 9) || a.detail.localeCompare(b.detail);
+  });
+}
+
 function renderBackendWarnings() {
   const role = currentRole();
   const teacherId = role === "teacher" ? currentTeacherId() : state.selectedFinanceTeacherId;
-  ensureBackendAttendanceRecords(teacherId);
-  const isCurrent = attendanceRecordState.teacherId === teacherId;
-  document.querySelector("#warningsTitle").textContent = role === "teacher" ? "我的异常提醒" : "老师异常扫码记录";
+  const month = currentSettlementMonth();
+  document.querySelector("#warningsTitle").textContent = role === "teacher" ? "我的异常与待处理课次" : "老师异常与锁定阻断";
 
   const list = document.querySelector("#warningList");
-  if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
-    list.innerHTML = `<div class="empty-state">正在加载后端异常记录...</div>`;
+  if (!teacherId) {
+    list.innerHTML = `<div class="empty-state">请先选择老师后查看异常和待处理课次。</div>`;
     return;
   }
 
-  if (attendanceRecordState.error && isCurrent) {
-    list.innerHTML = `<div class="empty-state">${attendanceRecordState.error}</div>`;
+  ensureBackendAttendanceRecords(teacherId, month);
+  if (role === "teacher") {
+    if (
+      (!teacherWorkloadState.loaded && !teacherWorkloadState.loading) ||
+      teacherWorkloadState.teacherId !== teacherId ||
+      teacherWorkloadState.month !== month
+    ) {
+      loadBackendWorkload(teacherId, month);
+    }
+    ensureBackendTeacherPayroll(teacherId, month, { detail: true });
+  } else if (isFinanceRole()) {
+    ensureFinanceTeacherDetail(teacherId, { generatePayroll: false });
+  }
+
+  const attendanceCurrent = attendanceRecordState.teacherId === teacherId && attendanceRecordState.month === month;
+  const teacherWorkloadCurrent = teacherWorkloadState.teacherId === teacherId && teacherWorkloadState.month === month;
+  const teacherPayrollCurrent =
+    teacherPayrollState.teacherId === teacherId && teacherPayrollState.month === month && teacherPayrollState.detail;
+  const financeDetailCurrent =
+    financeTeacherDetailState.teacherId === teacherId && financeTeacherDetailState.month === month;
+  const workload = role === "teacher" ? (teacherWorkloadCurrent ? teacherWorkloadState.data : null) : financeDetailCurrent ? financeTeacherDetailState.workload : null;
+  const payroll = role === "teacher" ? (teacherPayrollCurrent ? teacherPayrollState.data : null) : financeDetailCurrent ? financeTeacherDetailState.payroll : null;
+
+  const loading =
+    (attendanceRecordState.loading && !attendanceCurrent) ||
+    (role === "teacher" && teacherWorkloadState.loading && !teacherWorkloadCurrent) ||
+    (role === "teacher" && teacherPayrollState.loading && !teacherPayrollCurrent) ||
+    (role !== "teacher" && financeTeacherDetailState.loading && !financeDetailCurrent);
+  if (loading) {
+    list.innerHTML = `<div class="empty-state">正在加载异常、待处理考勤和工资锁定阻断...</div>`;
     return;
   }
 
-  const warnings = (isCurrent ? attendanceRecordState.records : []).filter((record) => record.status !== "accepted");
+  const error =
+    (attendanceCurrent && attendanceRecordState.error) ||
+    (role === "teacher" && teacherWorkloadCurrent && teacherWorkloadState.error) ||
+    (role === "teacher" && teacherPayrollCurrent && teacherPayrollState.error) ||
+    (role !== "teacher" && financeDetailCurrent && financeTeacherDetailState.error);
+  if (error) {
+    list.innerHTML = `<div class="empty-state">${escapeHtml(error)}</div>`;
+    return;
+  }
+
+  const warnings = backendWarningItems({
+    records: attendanceCurrent ? attendanceRecordState.records : [],
+    workload,
+    payroll,
+  });
   list.innerHTML = warnings.length
     ? warnings
         .map(
           (warning) => `
             <article class="warning-item">
               <header>
-                <strong>${warning.actionLabel} · ${warning.className || "未匹配课次"}</strong>
-                <span class="tag exception">${warning.status === "exception" ? "异常" : "拦截"}</span>
+                <strong>${escapeHtml(warning.title)}</strong>
+                <span class="tag ${warning.type === "pending" ? "pending" : "exception"}">${escapeHtml(warning.tag)}</span>
               </header>
-              <p>${formatDate(warning.date)} ${warning.time || ""} · ${warning.room || "未知教室"} · ${warning.resultText}</p>
+              <p>${escapeHtml(warning.detail)}</p>
             </article>
           `,
         )
         .join("")
-    : `<div class="empty-state">暂无后端异常记录</div>`;
+    : `<div class="empty-state">暂无异常、待处理课次或工资锁定阻断。</div>`;
 }
 
 function teacherOptions(selectedId) {
@@ -11689,8 +12404,10 @@ async function authenticate(username, password) {
         resetPersonnelPage();
         await loadTermContext();
         await loadBackendSchedulingContext();
-        await loadFinanceTeacherPage({ page: 1 });
-        await loadPayrollRules();
+      }
+      if (payload.account.role === "system_admin") {
+        resetPersonnelPage();
+        await loadPersonnelPage({ page: 1 });
       }
       if (payload.account.role === "classroom") {
         classroomScreenState = { rooms: [], loading: false, loaded: false, error: "", search: "" };
@@ -11789,6 +12506,21 @@ document.addEventListener("click", async (event) => {
     } else if (target) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
+    return;
+  }
+
+  const resetAccountButton = event.target.closest("[data-account-reset]");
+  if (resetAccountButton) {
+    await resetBackendAccountPassword(resetAccountButton.dataset.accountReset);
+    return;
+  }
+
+  const accountStatusButton = event.target.closest("[data-account-status]");
+  if (accountStatusButton) {
+    await updateBackendAccountStatus(
+      accountStatusButton.dataset.accountStatus,
+      accountStatusButton.dataset.nextStatus || "active",
+    );
     return;
   }
 
@@ -12319,6 +13051,8 @@ document.querySelector("#createTermButton").addEventListener("click", createBack
 
 document.querySelector("#regularClassCountInput").addEventListener("input", updateClassStructurePreview);
 document.querySelector("#experimentalClassCountInput").addEventListener("input", updateClassStructurePreview);
+document.querySelector("#addSchedulePeriod").addEventListener("click", addSchedulePeriodRow);
+document.querySelector("#saveSchedulePeriods").addEventListener("click", saveSchedulePeriods);
 
 document.querySelector("#adminClassSelect").addEventListener("change", (event) => {
   state.selectedSchedulingClassId = event.target.value;
@@ -12373,6 +13107,12 @@ document.querySelector("#regenerateUnlockedSchedule").addEventListener("click", 
 
 document.querySelector("#saveTeacherRule").addEventListener("click", () => {
   saveTeacherScheduleRule();
+});
+
+document.addEventListener("click", (event) => {
+  const deletePeriodButton = event.target.closest("[data-delete-schedule-period]");
+  if (!deletePeriodButton) return;
+  deleteSchedulePeriodRow(deletePeriodButton.dataset.deleteSchedulePeriod);
 });
 
 document.querySelector("#submitScheduleChangeRequest").addEventListener("click", () => {
@@ -12438,7 +13178,7 @@ document.querySelector("#financeTeacherSelect").addEventListener("change", async
   state.selectedFinanceTeacherId = event.target.value;
   resetAttendanceRecordState();
   resetFinanceTeacherDetailState();
-  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+  if (backendMode() && isFinanceRole()) {
     await loadBackendAttendanceRecords(state.selectedFinanceTeacherId);
     return;
   }
@@ -12448,7 +13188,7 @@ document.querySelector("#financeTeacherSelect").addEventListener("change", async
 document.querySelector("#settlementTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
   resetFinanceTeacherDetailState();
-  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+  if (backendMode() && isFinanceRole()) {
     await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, { generatePayroll: false });
     return;
   }
@@ -12465,7 +13205,7 @@ document.addEventListener("click", async (event) => {
   resetAttendanceRecordState();
   const select = document.querySelector("#settlementTeacherSelect");
   if (select) select.value = teacherId;
-  if (backendMode() && ["finance", "admin"].includes(currentRole())) {
+  if (backendMode() && isFinanceRole()) {
     await loadFinanceTeacherDetail(teacherId, { generatePayroll: false });
     return;
   }
@@ -12473,7 +13213,7 @@ document.addEventListener("click", async (event) => {
 });
 
 document.querySelector("#settleTeacherPayroll").addEventListener("click", async () => {
-  if (backendMode() && currentRole() === "finance") {
+  if (backendMode() && isFinanceRole()) {
     await lockBackendPayroll();
     return;
   }
@@ -12491,6 +13231,7 @@ document.querySelector("#approveAcademicWorkload")?.addEventListener("click", ()
 document.querySelector("#approveSchoolWorkload")?.addEventListener("click", () => approveBackendWorkload("school"));
 document.querySelector("#saveTeacherPayrollDraft").addEventListener("click", saveBackendTeacherPayrollDraft);
 document.querySelector("#batchGeneratePayroll").addEventListener("click", batchGenerateBackendPayroll);
+document.querySelector("#batchLockPayroll").addEventListener("click", batchLockBackendPayroll);
 document.querySelector("#exportPayrollCsv").addEventListener("click", exportBackendPayrollCsv);
 document.querySelector("#queryPayrollHistory").addEventListener("click", () => {
   loadPayrollHistory({ termId: payrollHistoryState.termId, month: payrollHistoryState.month });
@@ -12541,14 +13282,15 @@ if (backendMode()) {
   if (currentRole() === "teacher") {
     loadBackendTeacherContext(currentTeacherId(), "auto").then(render);
   }
-  if (currentRole() === "finance") {
+  if (isFinanceRole()) {
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
     loadPayrollRules();
   }
   if (currentRole() === "admin") {
     loadTermContext().then(() => loadBackendSchedulingContext());
-    loadFinanceTeacherPage({ page: financeTeacherPage.page });
-    loadPayrollRules();
+  }
+  if (currentRole() === "system_admin") {
+    loadPersonnelPage({ page: personnelPage.page });
   }
   if (currentRole() === "classroom") {
     loadClassroomRooms();

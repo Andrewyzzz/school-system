@@ -4,3 +4,4 @@ publish/
 server/data/*.json
 server/data/*.tmp
 server/data/
+database/postgres/generated/

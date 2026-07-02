@@ -27,6 +27,7 @@ import {
   regenerateUnlockedScheduleAssignments,
   rollbackScheduleVersion,
   setScheduleAssignmentLock,
+  updateSchedulePeriods,
   updateGradeClassStructure,
   updateGradeCourseRules,
   updateRoomResources,
@@ -51,6 +52,7 @@ import {
   generateTeacherPayrollDetail,
   disputeTeacherPayrollDetail,
   lockTeacherPayrollDetail,
+  lockPayrollBatch,
   markNotificationRead,
   publicAccount,
   queryNotifications,
@@ -82,6 +84,43 @@ import {
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_ROOT = fileURLToPath(new URL("../", import.meta.url));
+
+function addDays(dateKey, days) {
+  const [year, month, day] = String(dateKey || "").split("-").map(Number);
+  const date = new Date(year || 2026, (month || 1) - 1, day || 1);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function startOfNaturalWeek(dateKey) {
+  const [year, month, day] = String(dateKey || "").split("-").map(Number);
+  const date = new Date(year || 2026, (month || 1) - 1, day || 1);
+  const dayIndex = date.getDay();
+  const offset = dayIndex === 0 ? -6 : 1 - dayIndex;
+  return addDays(`${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`, offset);
+}
+
+function teacherDivisionId(teacher) {
+  if (teacher?.stageId === "primary") return "elementary";
+  if (teacher?.stageId === "middle") return "middle";
+  if (teacher?.stageId === "high") return "high";
+  return "";
+}
+
+function preferredTeacherScheduleWeek(term, teacher, availableWeeks) {
+  const weekStarts = new Set(availableWeeks.map((week) => week.weekStart));
+  const divisionWeek = term?.divisionWeekStarts?.[teacherDivisionId(teacher)];
+  if (divisionWeek && weekStarts.has(divisionWeek)) return divisionWeek;
+  const settlementMonth = String(term?.settlementMonth || "").slice(0, 7);
+  if (settlementMonth) {
+    const middleOfMonthWeek = startOfNaturalWeek(`${settlementMonth}-15`);
+    if (weekStarts.has(middleOfMonthWeek)) return middleOfMonthWeek;
+    const monthFirstWeek = startOfNaturalWeek(`${settlementMonth}-01`);
+    const monthCandidate = availableWeeks.find((week) => week.weekStart >= monthFirstWeek);
+    if (monthCandidate) return monthCandidate.weekStart;
+  }
+  return availableWeeks[0]?.weekStart || "2026-06-15";
+}
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -157,7 +196,7 @@ function requireAuth(req, res, db, allowedRoles = []) {
 }
 
 function canReadTeacher(account, teacherId) {
-  if (["admin", "finance", "system_admin"].includes(account.role)) return true;
+  if (["finance", "system_admin"].includes(account.role)) return true;
   return account.role === "teacher" && account.teacherId === teacherId;
 }
 
@@ -475,14 +514,14 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll-rules") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, { payrollRules: db.payrollRules });
       return;
     }
 
     if (req.method === "PATCH" && url.pathname === "/api/payroll-rules") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
       const payrollRules = updatePayrollRules(db, body.payrollRules || body, auth.account);
@@ -528,7 +567,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (parts[0] === "api" && parts[1] === "accounts" && parts.length >= 4) {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["system_admin"]);
       if (!auth) return;
       const accountId = decodeURIComponent(parts[2] || "");
       if (req.method === "POST" && parts[3] === "reset-password") {
@@ -666,6 +705,16 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = updateGradeClassStructure(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/scheduling/periods") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = updateSchedulePeriods(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, attachSchedulingPrecheck(db, result));
       return;
@@ -813,7 +862,9 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/teachers") {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams)));
+      sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams), {
+        includeFinance: ["finance", "system_admin"].includes(auth.account.role),
+      }));
       return;
     }
 
@@ -825,7 +876,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/teachers/import/preview") {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
       const csvText = String(body.csvText || "");
@@ -834,7 +885,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/teachers/import/commit") {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
       const csvText = String(body.csvText || "");
@@ -882,7 +933,7 @@ async function handleApi(req, res, db, url) {
         const weekStart =
           requestedWeekStart && requestedWeekStart !== "auto"
             ? requestedWeekStart
-            : availableWeeks[0]?.weekStart || "2026-06-15";
+            : preferredTeacherScheduleWeek(termContext.currentTerm, teacher, availableWeeks);
         sendJson(res, 200, {
           teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher,
           currentTerm: termContext.currentTerm,
@@ -995,8 +1046,8 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "generate") {
-        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或管理账号可以生成薪资明细");
+        if (!["finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或系统管理员可以生成薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1008,8 +1059,8 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "review") {
-        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或管理账号可以复核薪资明细");
+        if (!["finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或系统管理员可以复核薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1048,8 +1099,8 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "lock") {
-        if (!["admin", "finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或管理账号可以锁定薪资明细");
+        if (!["finance", "system_admin"].includes(auth.account.role)) {
+          sendError(res, 403, "只有财务或系统管理员可以锁定薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1076,7 +1127,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/payroll/batch-generate") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = generatePayrollBatch(db, body, auth.account);
@@ -1085,22 +1136,32 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/payroll/batch-lock") {
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = lockPayrollBatch(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/payroll/export") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, exportPayrollDetails(db, Object.fromEntries(url.searchParams)));
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/history") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, queryPayrollHistory(db, Object.fromEntries(url.searchParams)));
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/phase1/readiness") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, validatePhase1Readiness(db));
       return;

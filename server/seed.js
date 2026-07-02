@@ -8,4 +8,5 @@ console.log(`Seeded ${db.accounts.length} accounts.`);
 console.log("Default password: 123456");
 console.log("Admin account: admin / 123456");
 console.log("Finance account: finance / 123456");
+console.log("System admin account: sysadmin / 123456");
 console.log("Teacher accounts: teacher0001 ... teacher1000 / 123456");
