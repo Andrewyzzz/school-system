@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260707-lark-refresh-10" />
+    <link rel="stylesheet" href="styles.css?v=20260707-lark-refresh-11" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -84,7 +84,7 @@
             <span aria-hidden="true">▤</span>
             课表总览
           </button>
-          <button class="nav-item" data-view="personnel" data-role="admin,system_admin" type="button">
+          <button class="nav-item" data-view="personnel" data-role="system_admin" type="button">
             <span aria-hidden="true">☷</span>
             人员列表
           </button>
@@ -108,10 +108,6 @@
             <span aria-hidden="true">≡</span>
             人事审计
           </button>
-          <button class="nav-item" data-view="myHrProfile" data-role="teacher" type="button">
-            <span aria-hidden="true">○</span>
-            我的档案
-          </button>
           <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin,hr" type="button">
             <span aria-hidden="true">✉</span>
             通知中心
@@ -126,11 +122,7 @@
           </button>
           <button class="nav-item" data-view="confirm" data-role="teacher" type="button">
             <span aria-hidden="true">○</span>
-            月度确认
-          </button>
-          <button class="nav-item" data-view="teacherPayroll" data-role="teacher" type="button">
-            <span aria-hidden="true">¥</span>
-            总薪资
+            工资确认
           </button>
           <button class="nav-item" data-view="finance" data-role="finance" type="button">
             <span aria-hidden="true">□</span>
@@ -1079,6 +1071,10 @@
               placeholder="employeeNo,name,stageId,department,primarySubjectId,title,phone,hiredAt,username,defaultPassword,status"
             ></textarea>
             <div class="import-actions">
+              <label class="ghost-button import-file-button" for="teacherImportFile">
+                上传 CSV 文件
+                <input id="teacherImportFile" type="file" accept=".csv,text/csv" hidden />
+              </label>
               <button class="ghost-button" id="loadTeacherImportTemplate" type="button">
                 填入模板
               </button>
@@ -1210,8 +1206,8 @@
           <section class="panel">
             <div class="panel-heading">
               <div>
-                <h2 id="myHrProfileTitle">我的档案</h2>
-                <p>档案信息以人事记录为准；联系方式变更可在这里提交申请，人事专员审核后生效。</p>
+                <h2 id="myHrProfileTitle">我的账户</h2>
+                <p>账户与人事档案信息以人事记录为准；联系方式可在下方申请修改，其余字段请联系人事专员。</p>
               </div>
             </div>
             <div class="my-hr-profile" id="myHrProfileCard"></div>
@@ -1373,7 +1369,7 @@
             <section class="panel">
               <div class="panel-heading">
                 <div>
-                  <h2 id="confirmTitle">月度工资确认</h2>
+                  <h2 id="confirmTitle">工资与月度确认</h2>
                   <p>财务生成工资明细后，老师核对课时、补贴、奖扣、个税和实发金额；有问题可直接提出异议。</p>
                 </div>
               </div>
@@ -1384,6 +1380,23 @@
                   <small id="confirmPayrollNote">结算期展示工资明细</small>
                 </div>
                 <span class="status-pill" id="confirmPayrollStatus">读取中</span>
+              </div>
+              <div class="salary-support-grid" id="teacherPayrollSupportGrid">
+                <article>
+                  <span>可计工作量</span>
+                  <strong id="teacherPayrollPayableUnits">0 节</strong>
+                  <small>已完成签入签出</small>
+                </article>
+                <article>
+                  <span>待处理考勤</span>
+                  <strong id="teacherPayrollPendingUnits">0 节</strong>
+                  <small>未完成不进入结算</small>
+                </article>
+                <article>
+                  <span>确认状态</span>
+                  <strong id="teacherPayrollConfirmState">待确认</strong>
+                  <small>工资确认流程</small>
+                </article>
               </div>
               <div class="confirm-steps" id="confirmSteps"></div>
               <div class="action-row">
@@ -1412,49 +1425,6 @@
               <div class="workload-list" id="workloadList"></div>
             </section>
           </div>
-        </section>
-
-        <section class="view" id="teacherPayrollView" aria-labelledby="teacherPayrollTitle">
-          <section class="panel salary-summary-panel">
-            <div class="panel-heading">
-              <div>
-                <h2 id="teacherPayrollTitle">我的总薪资</h2>
-                <p>平时只展示本人月度总薪资；结算期请到“月度确认”核对工资明细。</p>
-              </div>
-              <span class="status-pill" id="teacherPayrollStatus">读取中</span>
-            </div>
-            <div class="salary-total teacher-pay-hero">
-              <div>
-                <span>本月总薪资</span>
-                <strong id="teacherPayrollNet">¥0</strong>
-                <small>工资确认并锁定后生效</small>
-              </div>
-            </div>
-            <div class="salary-support-grid" id="teacherPayrollSupportGrid">
-              <article>
-                <span>可计工作量</span>
-                <strong id="teacherPayrollPayableUnits">0 节</strong>
-                <small>已完成签入签出</small>
-              </article>
-              <article>
-                <span>待处理考勤</span>
-                <strong id="teacherPayrollPendingUnits">0 节</strong>
-                <small>未完成不进入结算</small>
-              </article>
-              <article>
-                <span>确认状态</span>
-                <strong id="teacherPayrollConfirmState">待确认</strong>
-                <small>工资确认流程</small>
-              </article>
-            </div>
-            <div class="empty-state" id="teacherPayrollSummaryNote">
-              老师端平时只展示月度汇总；财务生成工资后，请到“月度确认”查看完整工资明细并确认或提出异议。
-            </div>
-            <div class="action-row salary-summary-actions">
-              <button class="primary-button" data-view-jump="confirm" type="button">查看月度确认</button>
-              <button class="ghost-button" data-view-jump="records" type="button">查看考勤记录</button>
-            </div>
-          </section>
         </section>
 
         <section class="view" id="financeView" aria-labelledby="financeTitle">
@@ -2004,6 +1974,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260707-lark-refresh-10"></script>
+    <script src="app.js?v=20260707-lark-refresh-11"></script>
   </body>
 </html>

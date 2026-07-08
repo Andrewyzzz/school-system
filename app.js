@@ -894,7 +894,7 @@ const views = {
     el: document.querySelector("#adminScheduleOverviewView"),
   },
   personnel: {
-    role: "admin,system_admin",
+    role: "system_admin",
     title: "人员列表",
     el: document.querySelector("#personnelView"),
   },
@@ -925,7 +925,7 @@ const views = {
   },
   myHrProfile: {
     role: "teacher",
-    title: "我的档案",
+    title: "我的账户",
     el: document.querySelector("#myHrProfileView"),
   },
   notifications: {
@@ -947,11 +947,6 @@ const views = {
     role: "teacher",
     title: "月度工作量确认",
     el: document.querySelector("#confirmView"),
-  },
-  teacherPayroll: {
-    role: "teacher",
-    title: "薪资汇总",
-    el: document.querySelector("#teacherPayrollView"),
   },
   finance: {
     role: "finance",
@@ -1395,7 +1390,8 @@ function isFinanceRole(role = currentRole()) {
 }
 
 function isPersonnelRole(role = currentRole()) {
-  return role === "admin" || role === "system_admin";
+  // 角色收敛（2026-07-08）：账号管理是技术操作，收归系统管理员；教务(admin)专注排课
+  return role === "system_admin";
 }
 
 function currentTeacherId() {
@@ -13575,7 +13571,7 @@ const FLOW_STATUS_LABELS = { pending: "待审核", approved: "已通过", reject
 function renderMyHrProfile() {
   if (state.activeView !== "myHrProfile" || currentRole() !== "teacher") return;
   if (!backendMode()) {
-    document.querySelector("#myHrProfileCard").innerHTML = `<div class="empty-state">请使用后端模式登录查看人事档案</div>`;
+    document.querySelector("#myHrProfileCard").innerHTML = `<div class="empty-state">请使用后端模式登录查看账户信息</div>`;
     return;
   }
   if (!myHrProfileState.loaded && !myHrProfileState.loading) {
@@ -13591,29 +13587,59 @@ function renderMyHrProfile() {
   }
   const employee = myHrProfileState.data.employee;
   cardEl.innerHTML = `
+    <div class="my-hr-hero">
+      <div class="my-hr-avatar">${escapeHtml((employee.personName || "?").slice(0, 1))}</div>
+      <div>
+        <h3>${escapeHtml(employee.personName)}</h3>
+        <span>${escapeHtml(employee.employeeNo)} · ${escapeHtml(employee.orgUnitName || "未分配")} · ${escapeHtml(employee.positionName || "未定岗")}</span>
+      </div>
+      <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
+    </div>
     <div class="hr-form-grid readonly">
-      <div class="hr-field"><span>姓名</span><strong>${escapeHtml(employee.personName)}</strong></div>
-      <div class="hr-field"><span>工号</span><strong>${escapeHtml(employee.employeeNo)}</strong></div>
-      <div class="hr-field"><span>组织</span><strong>${escapeHtml(employee.orgUnitName || "未分配")}</strong></div>
-      <div class="hr-field"><span>岗位</span><strong>${escapeHtml(employee.positionName || "未定岗")}</strong></div>
       <div class="hr-field"><span>人事状态</span><strong>${escapeHtml(employee.statusLabel)}</strong></div>
       <div class="hr-field"><span>入职日期</span><strong>${escapeHtml(employee.hiredAt || "—")}</strong></div>
-      <div class="hr-field"><span>电话</span><strong>${escapeHtml(employee.phone || "—")}</strong></div>
       <div class="hr-field"><span>证件号</span><strong>${escapeHtml(employee.idCardMasked || "未录入")}</strong></div>
+      <div class="hr-field"><span>银行卡</span><strong>${escapeHtml(employee.bankCardMasked || "未录入")}</strong></div>
     </div>
   `;
+
+  const editing = Boolean(myHrProfileState.editing);
   document.querySelector("#myHrChangeForm").innerHTML = `
-    <h3>申请修改联系方式</h3>
-    <div class="hr-form-grid">
-      <label class="field-label">电话<input id="myHr-phone" placeholder="${escapeHtml(employee.phone || "未录入")}" /></label>
-      <label class="field-label">紧急联系人<input id="myHr-emergencyContact" placeholder="${escapeHtml(employee.emergencyContact || "未录入")}" /></label>
-      <label class="field-label">紧急联系电话<input id="myHr-emergencyPhone" placeholder="${escapeHtml(employee.emergencyPhone || "未录入")}" /></label>
+    <div class="my-hr-contact-head">
+      <h3>联系方式</h3>
+      ${
+        editing
+          ? ""
+          : `<button class="mini-button" data-myhr-edit type="button" title="申请修改联系方式">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="m13.5 6.5 4 4"/></svg>
+              修改
+            </button>`
+      }
     </div>
-    <label class="field-label">申请原因（必填）<input id="myHr-reason" placeholder="例如 更换手机号" /></label>
-    <div class="action-row">
-      <button class="primary-button compact-button" id="myHrSubmitChange" type="button">提交申请</button>
+    <div class="hr-form-grid readonly">
+      <div class="hr-field"><span>电话</span><strong>${escapeHtml(employee.phone || "未录入")}</strong></div>
+      <div class="hr-field"><span>紧急联系人</span><strong>${escapeHtml(employee.emergencyContact || "未录入")}</strong></div>
+      <div class="hr-field"><span>紧急联系电话</span><strong>${escapeHtml(employee.emergencyPhone || "未录入")}</strong></div>
     </div>
-    <p class="action-hint">只填写需要修改的项，其余留空；人事专员审核通过后生效。</p>
+    ${
+      editing
+        ? `
+          <div class="my-hr-edit-form">
+            <div class="hr-form-grid">
+              <label class="field-label">电话<input id="myHr-phone" value="${escapeHtml(employee.phone || "")}" /></label>
+              <label class="field-label">紧急联系人<input id="myHr-emergencyContact" value="${escapeHtml(employee.emergencyContact || "")}" /></label>
+              <label class="field-label">紧急联系电话<input id="myHr-emergencyPhone" value="${escapeHtml(employee.emergencyPhone || "")}" /></label>
+            </div>
+            <label class="field-label">申请原因（必填）<input id="myHr-reason" placeholder="例如 更换手机号" /></label>
+            <div class="action-row">
+              <button class="primary-button compact-button" id="myHrSubmitChange" type="button">提交申请</button>
+              <button class="ghost-button compact-button" data-myhr-edit-cancel type="button">取消</button>
+            </div>
+            <p class="action-hint">只有与当前值不同的字段会进入申请；人事专员审核通过后生效。</p>
+          </div>
+        `
+        : ""
+    }
   `;
   const requests = myHrProfileState.data.changeRequests || [];
   document.querySelector("#myHrRequestList").innerHTML = `
@@ -14150,12 +14176,23 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest("[data-myhr-edit]")) {
+    myHrProfileState.editing = true;
+    render();
+    return;
+  }
+  if (event.target.closest("[data-myhr-edit-cancel]")) {
+    myHrProfileState.editing = false;
+    render();
+    return;
+  }
   if (event.target.closest("#myHrSubmitChange")) {
     try {
+      const current = myHrProfileState.data?.employee || {};
       const changes = {};
       ["phone", "emergencyContact", "emergencyPhone"].forEach((field) => {
         const value = document.querySelector(`#myHr-${field}`).value.trim();
-        if (value) changes[field] = value;
+        if (value !== String(current[field] || "")) changes[field] = value;
       });
       await apiRequest("/api/hr/profile-change-requests", {
         method: "POST",
@@ -14163,9 +14200,17 @@ document.addEventListener("click", async (event) => {
       });
       showToast("申请已提交，等待人事审核");
       myHrProfileState.loaded = false;
+      myHrProfileState.editing = false;
       render();
     } catch (error) {
       showToast(error.message || "提交失败");
+    }
+    return;
+  }
+  // 左下角/顶部账户卡：老师点击进入我的账户
+  if (event.target.closest("#accountSummary") || event.target.closest(".teacher-card")) {
+    if (currentRole() === "teacher" && viewAllowed("myHrProfile")) {
+      switchView("myHrProfile");
     }
     return;
   }
@@ -14346,6 +14391,28 @@ document.querySelector("#loadTeacherImportTemplate").addEventListener("click", (
   };
   renderTeacherImport();
 });
+// 教师导入：支持直接上传 CSV 文件（读入文本框并自动预览校验，仍可手工修改后重新预览）
+document.querySelector("#teacherImportFile").addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  if (file.size > 5 * 1024 * 1024) {
+    showToast("CSV 文件超过 5MB，请拆分后导入");
+    event.target.value = "";
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const textarea = document.querySelector("#teacherImportCsv");
+    textarea.value = String(reader.result || "").replace(/^\uFEFF/, "");
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    showToast(`已读入 ${file.name}，正在预览校验`);
+    document.querySelector("#previewTeacherImport").click();
+  };
+  reader.onerror = () => showToast("文件读取失败，请重试或改用粘贴");
+  reader.readAsText(file, "utf-8");
+  event.target.value = "";
+});
+
 document.querySelector("#teacherImportCsv").addEventListener("input", () => {
   syncTeacherImportText();
   resetTeacherImportPreviewForEdit();

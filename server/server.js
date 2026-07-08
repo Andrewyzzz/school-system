@@ -1026,7 +1026,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/personnel") {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["system_admin"]);
       if (!auth) return;
       sendJson(res, 200, queryPersonnel(db, Object.fromEntries(url.searchParams)));
       return;
