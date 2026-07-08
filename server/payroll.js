@@ -527,6 +527,9 @@ export function calculateDedicatedTeacherPayroll({
   month = "2026-06",
   payrollRules = {},
   getRoomName = () => "",
+  // 人事联动（第二阶段 M4）：离职/入职当月固定项按在职天数折算，1 表示不折算
+  fixedProrationFactor = 1,
+  prorationNote = "",
 } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
@@ -562,6 +565,7 @@ export function calculateDedicatedTeacherPayroll({
   });
 
   const lessonAmount = roundMoney(lines.reduce((sum, line) => sum + line.amount, 0));
+  const prorate = Math.min(Math.max(Number(fixedProrationFactor) || 1, 0), 1);
   const fixedComponents = [
     baseSalaryComponent(profile, scheme),
     assessmentComponent(teacher, profile, scheme),
@@ -569,7 +573,17 @@ export function calculateDedicatedTeacherPayroll({
     housingComponent(profile, scheme),
     ...roleComponents(teacher, profile, scheme),
     ...manualComponents(profile),
-  ].filter((component) => component.amount);
+  ]
+    .filter((component) => component.amount)
+    .map((component) => {
+      // 只折算固定月度项（fixed/allowance）：课时按实际完成结算、奖扣按实际录入不折算
+      if (prorate >= 1 || !["fixed", "allowance"].includes(component.category)) return component;
+      return {
+        ...component,
+        amount: roundMoney(component.amount * prorate),
+        basis: `${component.basis}；${prorationNote || `按在职天数折算 ${Math.round(prorate * 100)}%`}`,
+      };
+    });
   const lessonComponent = {
     name: "课时工资",
     basis: "按实际完成课次、课型、学段、学科系数和高中超课时规则汇总",

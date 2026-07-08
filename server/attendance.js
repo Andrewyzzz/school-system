@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { currentTerm, ensureEditableTerm } from "./terms.js";
+import { teacherEligibility } from "./hr.js";
 
 const SECURITY_SECRET = "school-demo-signing-key";
 const CHECK_WINDOW_MINUTES = 15;
@@ -287,6 +289,13 @@ export function submitTeacherAttendance(db, options = {}, actorAccount = null) {
     throw error;
   }
 
+  // 人事联动（PRD 4.5）：已离职/停用/待入职人员不能产生签到记录
+  if (!teacherEligibility(db, actorAccount.teacherId).canAttend) {
+    const error = new Error("当前人事状态不允许签到，请联系人事专员");
+    error.statusCode = 403;
+    throw error;
+  }
+
   const lessonId = String(options.lessonId || "").replace(/^API-/, "");
   const action = String(options.action || "checkIn");
   if (!["checkIn", "checkOut"].includes(action)) {
@@ -301,6 +310,10 @@ export function submitTeacherAttendance(db, options = {}, actorAccount = null) {
     error.statusCode = 404;
     throw error;
   }
+
+  // 归档学期只读：历史学期的课次不允许再产生签到/签出，避免污染已结算数据
+  const lessonTerm = lesson.termId ? (db.terms || []).find((term) => term.id === lesson.termId) : null;
+  ensureEditableTerm(lessonTerm || currentTerm(db), "提交签到签出");
 
   let payload = null;
   try {

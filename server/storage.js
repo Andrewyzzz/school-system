@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadDatabaseFromPostgres, persistDatabaseToPostgres, resetPostgresStore } from "./db/postgresStore.js";
+import { ensureHrData, seedHrData, teacherEligibility } from "./hr.js";
 import { hashPassword, hashToken, verifyPassword } from "./auth.js";
 import {
   calculateDedicatedTeacherPayroll,
@@ -28,8 +30,7 @@ const DATA_FILE = path.join(DATA_DIR, "phase1-db.json");
 const BACKUP_DIR = path.join(DATA_DIR, "backups");
 const MAX_BACKUP_FILES = 50;
 const SESSION_TTL_HOURS = 12;
-const NOTIFICATION_AUDIENCES = new Set(["all", "teacher", "finance", "admin", "system_admin"]);
-let databaseSaveQueue = Promise.resolve();
+const NOTIFICATION_AUDIENCES = new Set(["all", "teacher", "finance", "admin", "system_admin", "hr"]);
 
 const STAGES = [
   { id: "primary", name: "小学部", grades: [1, 2, 3, 4, 5, 6], classesPerGrade: 10 },
@@ -329,6 +330,45 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       status: "active",
     },
     {
+      id: "ACC-HR",
+      username: "hr",
+      passwordHash: defaultPasswordHash,
+      role: "hr",
+      name: "人事专员",
+      department: "人事处",
+      status: "active",
+    },
+    {
+      id: "ACC-HEAD-PRIMARY",
+      username: "head_primary",
+      passwordHash: defaultPasswordHash,
+      role: "division_head",
+      scopeStageIds: ["primary"],
+      name: "小学部负责人",
+      department: "小学部",
+      status: "active",
+    },
+    {
+      id: "ACC-HEAD-MIDDLE",
+      username: "head_middle",
+      passwordHash: defaultPasswordHash,
+      role: "division_head",
+      scopeStageIds: ["middle"],
+      name: "初中部负责人",
+      department: "初中部",
+      status: "active",
+    },
+    {
+      id: "ACC-HEAD-HIGH",
+      username: "head_high",
+      passwordHash: defaultPasswordHash,
+      role: "division_head",
+      scopeStageIds: ["high"],
+      name: "高中部负责人",
+      department: "高中部",
+      status: "active",
+    },
+    {
       id: "ACC-CLASSROOM",
       username: "classroom",
       passwordHash: defaultPasswordHash,
@@ -522,7 +562,7 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
   const lessonInstances = [];
   const teacherAssignments = createTeacherAssignments(teachers, classes);
 
-  return {
+  const db = {
     meta: {
       schemaVersion: 1,
       seedVersion: "phase1-20260611",
@@ -556,7 +596,19 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     sessions: [],
     notifications: [],
     auditLogs: [],
+    // 第二阶段（人事管控）集合：组织、岗位、全员档案、合同、薪资模板、审批流、人事审计
+    orgUnits: [],
+    positions: [],
+    employees: [],
+    employeeContracts: [],
+    salaryTemplates: [],
+    salaryTemplateVersions: [],
+    hrFlows: [],
+    hrFlowSteps: [],
+    hrAuditLogs: [],
   };
+  seedHrData(db);
+  return db;
 }
 
 function normalizeDatabase(db) {
@@ -586,6 +638,15 @@ function normalizeDatabase(db) {
     "sessions",
     "notifications",
     "auditLogs",
+    "orgUnits",
+    "positions",
+    "employees",
+    "employeeContracts",
+    "salaryTemplates",
+    "salaryTemplateVersions",
+    "hrFlows",
+    "hrFlowSteps",
+    "hrAuditLogs",
   ];
 
   arrayKeys.forEach((key) => {
@@ -704,6 +765,24 @@ function normalizeDatabase(db) {
     }
   }
 
+  if (!(db.accounts || []).some((account) => account.username === "hr")) {
+    const hrAccount = (defaults.accounts || []).find((account) => account.username === "hr");
+    if (hrAccount) {
+      db.accounts.push(hrAccount);
+      changed = true;
+    }
+  }
+
+  ["head_primary", "head_middle", "head_high"].forEach((username) => {
+    if (!(db.accounts || []).some((account) => account.username === username)) {
+      const headAccount = (defaults.accounts || []).find((account) => account.username === username);
+      if (headAccount) {
+        db.accounts.push(headAccount);
+        changed = true;
+      }
+    }
+  });
+
   (db.rooms || []).forEach((room) => {
     if (!room.roomType) {
       room.roomType = "homeroom";
@@ -780,39 +859,144 @@ function normalizeDatabase(db) {
     changed = true;
   }
 
+  // 第二阶段：组织/岗位/模板缺省数据与 teachers→employees 档案幂等回填
+  if (ensureHrData(db)) {
+    changed = true;
+  }
+
   return changed;
+}
+
+// 数据层驱动（第二阶段 M1）：
+// - json（默认）：本地 JSON 文件，开发与一阶段试运行沿用；
+// - postgres：PostgreSQL 持久化，生产目标形态；
+// - dual：双写核对模式，迁移窗口使用——读优先 PostgreSQL，写同时落两边。
+export const DB_DRIVER = ["json", "postgres", "dual"].includes(
+  String(process.env.DB_DRIVER || "json").toLowerCase(),
+)
+  ? String(process.env.DB_DRIVER || "json").toLowerCase()
+  : "json";
+
+async function loadJsonDatabaseFile() {
+  try {
+    const raw = await fs.readFile(DATA_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  }
 }
 
 export async function ensureDatabase() {
   await fs.mkdir(DATA_DIR, { recursive: true });
 
-  try {
-    const raw = await fs.readFile(DATA_FILE, "utf-8");
-    const db = JSON.parse(raw);
+  if (DB_DRIVER === "postgres" || DB_DRIVER === "dual") {
+    let db = await loadDatabaseFromPostgres();
+    let bootstrapSource = "postgres";
+    if (!db) {
+      // 空库：优先吸收既有 JSON 数据（平滑迁移），否则生成种子
+      db = await loadJsonDatabaseFile();
+      bootstrapSource = db ? "json-file-migration" : "seed";
+      if (!db) db = createInitialData();
+    }
+    normalizeDatabase(db);
+    await saveDatabase(db);
+    console.log(`[storage] 数据层驱动 ${DB_DRIVER}，启动数据来源：${bootstrapSource}`);
+    return db;
+  }
+
+  const db = await loadJsonDatabaseFile();
+  if (db) {
     if (normalizeDatabase(db)) {
       await saveDatabase(db);
     }
     return db;
+  }
+  const seeded = createInitialData();
+  await saveDatabase(seeded);
+  return seeded;
+}
+
+// 默认写紧凑 JSON（体积约为缩进版的 1/3，明显降低高峰期磁盘压力）；
+// 需要人工排查数据文件时用 DB_PRETTY=1 启动。
+const PRETTY_DB_JSON = process.env.DB_PRETTY === "1";
+
+// 供 /api/health 暴露的存储健康状态：写失败不能被静默吞掉
+export const storageHealth = {
+  lastSaveAt: "",
+  lastSaveDurationMs: 0,
+  lastSaveError: "",
+  coalescedSaves: 0,
+  totalSaves: 0,
+};
+
+async function writeDatabaseFile(db) {
+  const startedAt = Date.now();
+  const tmpFile = `${DATA_FILE}.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await backupDatabaseFile();
+    await fs.writeFile(tmpFile, PRETTY_DB_JSON ? JSON.stringify(db, null, 2) : JSON.stringify(db));
+    await fs.rename(tmpFile, DATA_FILE);
+    storageHealth.lastSaveAt = new Date().toISOString();
+    storageHealth.lastSaveDurationMs = Date.now() - startedAt;
+    storageHealth.lastSaveError = "";
+    storageHealth.totalSaves += 1;
   } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    const db = createInitialData();
-    await saveDatabase(db);
-    return db;
+    storageHealth.lastSaveError = `${new Date().toISOString()} ${error.message}`;
+    console.error("[storage] 数据文件写入失败:", error.message);
+    await fs.rm(tmpFile, { force: true }).catch(() => {});
+    throw error;
   }
 }
 
-async function writeDatabaseFile(db) {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await backupDatabaseFile();
-  const tmpFile = `${DATA_FILE}.${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`;
-  await fs.writeFile(tmpFile, JSON.stringify(db, null, 2));
-  await fs.rename(tmpFile, DATA_FILE);
+// 按驱动路由持久化目标。dual 模式先写 PostgreSQL 再写 JSON 文件：
+// SQL 侧失败会抛错阻断（迁移期以 SQL 为准绳），JSON 侧作为回滚兜底。
+async function persistDatabase(db) {
+  if (DB_DRIVER === "postgres") {
+    const stats = await persistDatabaseToPostgres(db);
+    storageHealth.lastSaveAt = new Date().toISOString();
+    storageHealth.lastSaveDurationMs = stats.ms;
+    storageHealth.lastSaveError = "";
+    storageHealth.totalSaves += 1;
+    return;
+  }
+  if (DB_DRIVER === "dual") {
+    await persistDatabaseToPostgres(db);
+    await writeDatabaseFile(db);
+    return;
+  }
+  await writeDatabaseFile(db);
 }
 
-export async function saveDatabase(db) {
-  const writeTask = databaseSaveQueue.then(() => writeDatabaseFile(db));
-  databaseSaveQueue = writeTask.catch(() => {});
-  return writeTask;
+// 写合并：并发写请求（例如上下课高峰批量签到）只保留“一个进行中的写 + 一个收尾写”。
+// 内存中的 db 永远是最新状态，收尾写落盘时自然包含之前所有修改；
+// 每个调用方 await 的 Promise 都在自己的修改已持久化之后才 resolve，写失败会抛给调用方。
+const databaseWriteStates = new WeakMap();
+
+export function saveDatabase(db) {
+  let writeState = databaseWriteStates.get(db);
+  if (!writeState) {
+    writeState = { active: null, queued: null };
+    databaseWriteStates.set(db, writeState);
+  }
+  if (!writeState.active) {
+    writeState.active = persistDatabase(db).finally(() => {
+      writeState.active = null;
+    });
+    return writeState.active;
+  }
+  if (!writeState.queued) {
+    writeState.queued = writeState.active
+      .catch(() => {})
+      .then(() => {
+        writeState.queued = null;
+        return saveDatabase(db);
+      });
+  } else {
+    storageHealth.coalescedSaves += 1;
+  }
+  return writeState.queued;
 }
 
 async function backupDatabaseFile() {
@@ -840,6 +1024,11 @@ async function backupDatabaseFile() {
 }
 
 export async function resetDatabase(options = {}) {
+  // 种子语义是“完全替换”：postgres/dual 驱动下必须先清空存量表，
+  // 否则新进程影子快照为空、旧行不会进入删除集，会残留脏数据。
+  if (DB_DRIVER === "postgres" || DB_DRIVER === "dual") {
+    await resetPostgresStore();
+  }
   const db = createInitialData(options);
   await saveDatabase(db);
   return db;
@@ -876,7 +1065,42 @@ function appendAuditLog(db, entry = {}) {
   db.meta.updatedAt = now;
 }
 
+// 会话按 tokenHash 建立 O(1) 索引：3000 人同时在线时每个请求都要做会话校验，
+// 不能再对 sessions 数组做线性扫描。索引只保存未撤销会话。
+const sessionIndexes = new WeakMap();
+
+function sessionIndexFor(db) {
+  let index = sessionIndexes.get(db);
+  if (!index) {
+    index = new Map();
+    ensureSessions(db).forEach((session) => {
+      if (!session.revokedAt) index.set(session.tokenHash, session);
+    });
+    sessionIndexes.set(db, index);
+  }
+  return index;
+}
+
+const SESSION_PRUNE_THRESHOLD = 5000;
+const SESSION_RETAIN_REVOKED_MS = 24 * 60 * 60 * 1000;
+
+// 已撤销/已过期超过 24 小时的会话没有业务价值，堆积会拖慢序列化和占用内存。
+// 在登录时按阈值触发，摊薄清理成本。
+function pruneSessions(db) {
+  const sessions = ensureSessions(db);
+  if (sessions.length < SESSION_PRUNE_THRESHOLD) return;
+  const now = Date.now();
+  const kept = sessions.filter((session) => {
+    if (session.revokedAt) return now - new Date(session.revokedAt).getTime() < SESSION_RETAIN_REVOKED_MS;
+    return new Date(session.expiresAt).getTime() > now - SESSION_RETAIN_REVOKED_MS;
+  });
+  if (kept.length === sessions.length) return;
+  db.sessions = kept;
+  sessionIndexes.delete(db);
+}
+
 export function createSession(db, account, token, context = {}) {
+  pruneSessions(db);
   const now = new Date();
   const session = {
     id: `SES-${Date.now()}-${ensureSessions(db).length + 1}`,
@@ -889,6 +1113,7 @@ export function createSession(db, account, token, context = {}) {
     userAgent: context.userAgent || "",
   };
   ensureSessions(db).push(session);
+  sessionIndexFor(db).set(session.tokenHash, session);
   appendAuditLog(db, {
     action: "auth_login",
     actorAccountId: account.id,
@@ -1263,12 +1488,15 @@ export function deleteAcademicTerm(db, termId = "", actorAccount = null) {
 
 export function findActiveSession(db, token = "") {
   const tokenHashValue = hashToken(token);
-  const session = ensureSessions(db).find(
-    (item) => item.tokenHash === tokenHashValue && !item.revokedAt,
-  );
-  if (!session) return null;
+  const index = sessionIndexFor(db);
+  const session = index.get(tokenHashValue);
+  if (!session || session.revokedAt) {
+    if (session?.revokedAt) index.delete(tokenHashValue);
+    return null;
+  }
   if (new Date(session.expiresAt).getTime() <= Date.now()) {
     session.revokedAt = new Date().toISOString();
+    index.delete(tokenHashValue);
     return null;
   }
   session.lastSeenAt = new Date().toISOString();
@@ -1277,9 +1505,11 @@ export function findActiveSession(db, token = "") {
 
 export function revokeSession(db, token = "", actorAccount = null) {
   const tokenHashValue = hashToken(token);
-  const session = ensureSessions(db).find((item) => item.tokenHash === tokenHashValue && !item.revokedAt);
-  if (!session) return false;
+  const index = sessionIndexFor(db);
+  const session = index.get(tokenHashValue);
+  if (!session || session.revokedAt) return false;
   session.revokedAt = new Date().toISOString();
+  index.delete(tokenHashValue);
   appendAuditLog(db, {
     action: "auth_logout",
     actorAccountId: actorAccount?.id || session.accountId,
@@ -1291,11 +1521,13 @@ export function revokeSession(db, token = "", actorAccount = null) {
 
 function revokeAccountSessions(db, accountId, reason = "account_security_update") {
   const now = new Date().toISOString();
+  const index = sessionIndexFor(db);
   ensureSessions(db)
     .filter((session) => session.accountId === accountId && !session.revokedAt)
     .forEach((session) => {
       session.revokedAt = now;
       session.revokedReason = reason;
+      index.delete(session.tokenHash);
     });
 }
 
@@ -1970,6 +2202,8 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
   return queryTeacherAssignments(db, { termId: term.id, stageId, grade, subjectId })[0];
 }
 
+const financeSummaryCaches = new WeakMap();
+
 export function queryTeachers(db, query = {}, options = {}) {
   const page = Math.max(Number.parseInt(query.page || "1", 10), 1);
   const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || "20", 10), 1), 100);
@@ -2020,7 +2254,19 @@ export function queryTeachers(db, query = {}, options = {}) {
       grade: {},
     },
   };
-  const financeSummary = includeFinance
+  // 汇总只依赖过滤条件和数据版本，与分页无关；财务端翻页时直接复用缓存，
+  // 避免每页请求都对全部命中老师重算工资试算。
+  const financeSummaryKey = [month, status, stageId, grade, subjectId, search, strictGrade].join("|");
+  const financeSummaryVersion = db.meta?.updatedAt || "";
+  let financeSummaryCacheEntry = financeSummaryCaches.get(db);
+  if (!financeSummaryCacheEntry || financeSummaryCacheEntry.version !== financeSummaryVersion) {
+    financeSummaryCacheEntry = { version: financeSummaryVersion, byKey: new Map() };
+    financeSummaryCaches.set(db, financeSummaryCacheEntry);
+  }
+  const cachedFinanceSummary = includeFinance ? financeSummaryCacheEntry.byKey.get(financeSummaryKey) : null;
+  const financeSummary = cachedFinanceSummary
+    ? cachedFinanceSummary
+    : includeFinance
     ? filtered.reduce((summary, teacher) => {
         const lessonSummary = teacherLessonSummary(db, teacher.id, month);
         const payroll = teacherPayrollPreview(db, teacher.id, month);
@@ -2064,6 +2310,9 @@ export function queryTeachers(db, query = {}, options = {}) {
         return summary;
       }, emptyFinanceSummary)
     : emptyFinanceSummary;
+  if (includeFinance && !cachedFinanceSummary) {
+    financeSummaryCacheEntry.byKey.set(financeSummaryKey, financeSummary);
+  }
   const toSortedGroupRows = (bucket) =>
     Object.values(bucket).sort((a, b) => String(a.key).localeCompare(String(b.key), "zh-CN"));
 
@@ -2129,10 +2378,33 @@ export function queryTeachers(db, query = {}, options = {}) {
 	  };
 	}
 
+// (db, month) → Map(teacherId → lessons[]) 索引缓存。财务教师列表一页请求要为几百名
+// 老师取当月课次，逐人全表扫描是 O(老师数 × 课次数)，索引化后整月只扫一遍。
+// 失效依据 db.meta.updatedAt（所有增删课次的写路径都会更新它）；
+// 索引存课节对象引用，签到等原地状态修改无需失效即可见。
+const monthLessonIndexCache = new WeakMap();
+
+function lessonsByTeacherForMonth(db, month) {
+  const version = db.meta?.updatedAt || "";
+  let cache = monthLessonIndexCache.get(db);
+  if (!cache || cache.version !== version) {
+    cache = { version, byMonth: new Map() };
+    monthLessonIndexCache.set(db, cache);
+  }
+  if (!cache.byMonth.has(month)) {
+    const index = new Map();
+    (db.lessonInstances || []).forEach((lesson) => {
+      if (!lesson.date || !lesson.date.startsWith(month)) return;
+      if (!index.has(lesson.teacherId)) index.set(lesson.teacherId, []);
+      index.get(lesson.teacherId).push(lesson);
+    });
+    cache.byMonth.set(month, index);
+  }
+  return cache.byMonth.get(month);
+}
+
 export function teacherLessonSummary(db, teacherId, month = "2026-06") {
-  const lessons = db.lessonInstances.filter(
-    (lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month),
-  );
+  const lessons = lessonsByTeacherForMonth(db, month).get(teacherId) || [];
   return lessons.reduce(
     (summary, lesson) => {
       summary.total += 1;
@@ -2253,20 +2525,61 @@ export function queryTeacherAttendanceRecords(db, teacherId, month = "2026-06") 
   };
 }
 
+// 人事联动（M4）：按人事状态给出计薪口径。preview 只降额不拦截（保证只读视图可用），
+// 生成/发布工资时用 assertPayrollEligible 硬拦截。
+export function payrollProrationFor(db, teacherId, month = "2026-06") {
+  const eligibility = teacherEligibility(db, teacherId);
+  if (eligibility.payroll === "until-left" && eligibility.leftAt) {
+    const leftMonth = eligibility.leftAt.slice(0, 7);
+    if (month === leftMonth) {
+      const [year, monthNumber] = month.split("-").map(Number);
+      const daysInMonth = new Date(year, monthNumber, 0).getDate();
+      const leftDay = Math.min(Number(eligibility.leftAt.slice(8, 10)) || daysInMonth, daysInMonth);
+      return {
+        factor: leftDay / daysInMonth,
+        note: `离职生效日 ${eligibility.leftAt}，固定项按 ${leftDay}/${daysInMonth} 天折算`,
+      };
+    }
+  }
+  return { factor: 1, note: "" };
+}
+
+export function assertPayrollEligible(db, teacherId, month = "2026-06") {
+  const eligibility = teacherEligibility(db, teacherId);
+  if (eligibility.payroll === "frozen") {
+    const error = new Error("该人员处于停用状态，计薪冻结，需人事恢复或总校裁定后再结算");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (eligibility.payroll === "blocked") {
+    const error = new Error("该人员尚未完成入职流程，不能生成工资");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (eligibility.payroll === "until-left" && eligibility.leftAt && month > eligibility.leftAt.slice(0, 7)) {
+    const error = new Error(`该人员已于 ${eligibility.leftAt} 离职，离职后的月份不能再生成工资`);
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
 export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   const teacher = findTeacher(db, teacherId);
   if (!teacher) return null;
   const term = termForMonth(db, month);
 
-  const lessons = db.lessonInstances
-    .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
-    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const lessons = [...(lessonsByTeacherForMonth(db, month).get(teacherId) || [])].sort((a, b) =>
+    `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
+  );
+  const proration = payrollProrationFor(db, teacherId, month);
   const payroll = calculateDedicatedTeacherPayroll({
     teacher,
     lessons,
     month,
     payrollRules: db.payrollRules,
     getRoomName: (lesson) => lessonRoomName(db, lesson),
+    fixedProrationFactor: proration.factor,
+    prorationNote: proration.note,
   });
   return {
     ...payroll,
@@ -2411,6 +2724,7 @@ export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
 export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", actorAccount = null, options = {}) {
   const targetStatus = options.status === "generated" ? "generated" : "saved";
   assertMonthTermEditable(db, month, targetStatus === "generated" ? "发布薪资" : "保存薪资");
+  assertPayrollEligible(db, teacherId, month);
   const detail = teacherPayrollDetail(db, teacherId, month);
   if (!detail) {
     const error = new Error("教师不存在");
@@ -3140,9 +3454,9 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
   if (!teacher) return null;
   const term = termForMonth(db, month);
 
-  const lessons = db.lessonInstances
-    .filter((lesson) => lesson.teacherId === teacherId && lesson.date.startsWith(month))
-    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+  const lessons = [...(lessonsByTeacherForMonth(db, month).get(teacherId) || [])].sort((a, b) =>
+    `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
+  );
   const payroll = teacherPayrollPreview(db, teacherId, month);
   const categories = payrollLineCategories(payroll?.lines || []);
 

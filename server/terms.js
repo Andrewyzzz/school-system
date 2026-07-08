@@ -112,9 +112,28 @@ export function termForDate(db, dateKey = "") {
   );
 }
 
+// 月份归属学期：取与该月重叠天数最多的学期（并列时取开始日期更晚的）。
+// 不能只看月份第一天——学期常在月中开始（如 6 月 15 日开学），
+// 否则“当前学期”切换后，历史月份的工作量和工资会被错误归到新学期。
 export function termForMonth(db, month = "") {
-  const date = `${String(month || "").slice(0, 7) || "2026-06"}-01`;
-  return termForDate(db, date);
+  ensureTerms(db);
+  const monthKey = String(month || "").slice(0, 7) || "2026-06";
+  const [year, monthNumber] = monthKey.split("-").map(Number);
+  if (!Number.isFinite(year) || !Number.isFinite(monthNumber)) return currentTerm(db);
+  const monthStartMs = Date.UTC(year, monthNumber - 1, 1);
+  const monthEndMs = Date.UTC(year, monthNumber, 0);
+  const overlapping = db.terms
+    .map((term) => {
+      const termStartMs = Date.parse(`${term.startDate}T00:00:00Z`);
+      const termEndMs = Date.parse(`${term.endDate}T00:00:00Z`);
+      const overlapMs = Math.min(monthEndMs, termEndMs) - Math.max(monthStartMs, termStartMs);
+      return { term, overlapMs };
+    })
+    .filter((item) => Number.isFinite(item.overlapMs) && item.overlapMs >= 0)
+    .sort(
+      (a, b) => b.overlapMs - a.overlapMs || String(b.term.startDate).localeCompare(String(a.term.startDate)),
+    );
+  return overlapping[0]?.term || currentTerm(db);
 }
 
 export function weekStartForDivision(term, division) {

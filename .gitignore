@@ -1,7 +1,11 @@
 .DS_Store
 publish/
+.venv-solver/
+.claude/launch.json
 *.zip
 server/data/*.json
 server/data/*.tmp
 server/data/
 database/postgres/generated/
+.hr-dev-key
+node_modules/

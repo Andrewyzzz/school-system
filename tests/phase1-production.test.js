@@ -115,33 +115,39 @@ function maxConsecutiveRun(periods = []) {
   return best;
 }
 
-function findChangeRequestCandidate(db, config, lesson) {
+function createFirstValidChangeRequest(db, config, lessons, actorAccount, reason) {
   const weekDates = Array.from({ length: 5 }, (_, index) => addDays(config.weekStart, index));
   const periods = config.periods || [];
-  const currentLessons = db.lessonInstances.filter(
-    (item) =>
-      item.source === "backend-scheduling" &&
-      item.divisionId === lesson.divisionId &&
-      item.gradeId === lesson.gradeId &&
-      item.id !== lesson.id &&
-      item.status !== "cancelled",
-  );
-  for (const date of weekDates) {
-    for (const period of periods) {
-      if (date === lesson.date && Number(period.period) === Number(lesson.period)) continue;
-      const occupied = currentLessons.some(
-        (item) =>
-          item.date === date &&
-          Number(item.period) === Number(period.period) &&
-          (item.classId === lesson.classId || item.teacherId === lesson.teacherId || item.roomId === lesson.roomId),
-      );
-      if (!occupied) {
-        return {
-          teacherId: lesson.teacherId,
-          date,
-          period: period.period,
-          roomId: lesson.roomId,
-        };
+  const rooms = config.rooms || [];
+  for (const lesson of lessons) {
+    const candidateRooms = [
+      ...rooms.filter((room) => room.id === lesson.roomId),
+      ...rooms.filter((room) => room.id !== lesson.roomId && room.roomType === lesson.roomType),
+    ];
+    for (const date of weekDates) {
+      for (const period of periods) {
+        if (date === lesson.date && Number(period.period) === Number(lesson.period)) continue;
+        for (const room of candidateRooms) {
+          try {
+            const result = createScheduleChangeRequest(
+              db,
+              {
+                divisionId: lesson.divisionId,
+                gradeId: lesson.gradeId,
+                assignmentId: lesson.scheduleAssignmentId,
+                teacherId: lesson.teacherId,
+                date,
+                period: period.period,
+                roomId: room.id,
+                reason,
+              },
+              actorAccount,
+            );
+            return { lesson, result };
+          } catch {
+            // 该组合不满足生产校验（冲突/硬约束/课程分布规则），继续尝试下一个组合
+          }
+        }
       }
     }
   }
@@ -666,30 +672,26 @@ assert.ok(
     .every((lesson) => lesson.scheduleVersionId === firstPublishedVersionId),
   "回滚后老师端课表、签到和薪资数据源应切换到目标版本",
 );
-const lessonForChange = db.lessonInstances.find(
+const lessonsForChange = db.lessonInstances.filter(
   (lesson) => lesson.source === "backend-scheduling" && lesson.divisionId === "elementary" && lesson.gradeId === "elementary-g1",
 );
-assert.ok(lessonForChange, "expected current published lesson for schedule change request");
-const changeCandidate = findChangeRequestCandidate(db, rolledBack.config, lessonForChange);
-assert.ok(changeCandidate, "expected a free slot for schedule change request");
-const changeRequestResult = createScheduleChangeRequest(
+assert.ok(lessonsForChange.length > 0, "expected current published lessons for schedule change request");
+const changeAttempt = createFirstValidChangeRequest(
   db,
-  {
-    divisionId: "elementary",
-    gradeId: "elementary-g1",
-    assignmentId: lessonForChange.scheduleAssignmentId,
-    ...changeCandidate,
-    reason: "生产验收：回滚后调课审批链路",
-  },
+  rolledBack.config,
+  lessonsForChange,
   admin,
+  "生产验收：回滚后调课审批链路",
 );
+assert.ok(changeAttempt, "expected at least one lesson to have a valid schedule change candidate");
+const { lesson: lessonForChange, result: changeRequestResult } = changeAttempt;
 assert.equal(changeRequestResult.request.status, "pending");
 assert.equal(changeRequestResult.request.from.date, lessonForChange.date);
 const approvedChange = approveScheduleChangeRequest(db, { requestId: changeRequestResult.request.id }, admin);
 assert.equal(approvedChange.request.status, "approved");
 assert.equal(approvedChange.lesson.changeRequestId, changeRequestResult.request.id);
-assert.equal(approvedChange.lesson.date, changeCandidate.date);
-assert.equal(approvedChange.lesson.period, changeCandidate.period);
+assert.equal(approvedChange.lesson.date, changeRequestResult.request.to.date);
+assert.equal(approvedChange.lesson.period, changeRequestResult.request.to.period);
 assert.ok(db.auditLogs.some((entry) => entry.action === "schedule_change_request_approve" && entry.requestId === changeRequestResult.request.id));
 
 const token = "phase1-production-session-token";

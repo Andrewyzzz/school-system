@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { currentTerm, ensureEditableTerm, weekStartForDivision } from "./terms.js";
+import { teacherEligibility } from "./hr.js";
+import { updateTeacherAssignment } from "./storage.js";
 
 const ORTOOLS_SOLVER_PATH = fileURLToPath(new URL("./solver/ortools_scheduler.py", import.meta.url));
 
@@ -456,7 +458,9 @@ function activeSubjectTeachers(db, stageId, subjectId) {
       (teacher) =>
         teacher.status === "active" &&
         teacher.stageId === stageId &&
-        teacher.primarySubjectId === subjectId,
+        teacher.primarySubjectId === subjectId &&
+        // 人事联动（PRD 4.5）：离职中冻结新增排课，待入职/已离职/停用不进任课池
+        teacherEligibility(db, teacher.id).inTeachingPool,
     )
     .sort((a, b) => a.employeeNo.localeCompare(b.employeeNo, "zh-CN"));
 }
@@ -1790,6 +1794,187 @@ function assertTeacherAssignmentsComplete(config) {
   throw error;
 }
 
+// 同学期内各年级“已规划”的老师周课量（按任课关系 × 该年级课程周课时估算）。
+// 老师是全校共享资源，自动分配时必须把他在其他年级承担的课量一起计入。
+function plannedTeacherLoadForTerm(db, term, options = {}) {
+  const excludeScope = options.excludeScope || null;
+  const load = new Map();
+  const weeklyLessonsCache = new Map();
+  const weeklyLessonsFor = (stageId, grade, subjectId) => {
+    const cacheKey = `${stageId}:${grade}`;
+    if (!weeklyLessonsCache.has(cacheKey)) {
+      const division = divisionByStageId(stageId);
+      if (!division) {
+        weeklyLessonsCache.set(cacheKey, new Map());
+      } else {
+        weeklyLessonsCache.set(
+          cacheKey,
+          new Map(
+            schedulingCourseRules(db, division, { grade }, term)
+              .filter((rule) => rule.enabled)
+              .map((rule) => [rule.subjectId, Number(rule.weeklyLessons || 0)]),
+          ),
+        );
+      }
+    }
+    return weeklyLessonsCache.get(cacheKey).get(subjectId) || 0;
+  };
+
+  // 同一 (学部, 年级, 科目) 维度优先取本学期配置行，没有时才回退无学期的历史行
+  const rowsByScope = new Map();
+  (db.teacherAssignments || []).forEach((row) => {
+    const scopeKey = `${row.stageId}:${row.grade}:${row.subjectId}`;
+    const existing = rowsByScope.get(scopeKey);
+    if (row.termId === term.id) {
+      rowsByScope.set(scopeKey, row);
+    } else if (!row.termId && (!existing || existing.termId !== term.id)) {
+      rowsByScope.set(scopeKey, row);
+    }
+  });
+
+  rowsByScope.forEach((row) => {
+    if (
+      excludeScope &&
+      row.stageId === excludeScope.stageId &&
+      Number(row.grade) === Number(excludeScope.grade) &&
+      (!excludeScope.subjectId || row.subjectId === excludeScope.subjectId)
+    ) {
+      return;
+    }
+    const weekly = weeklyLessonsFor(row.stageId, Number(row.grade), row.subjectId);
+    if (!weekly) return;
+    Object.values(row.classTeacherIds || {}).forEach((teacherIds) => {
+      (Array.isArray(teacherIds) ? teacherIds : [teacherIds]).forEach((teacherId) => {
+        if (!teacherId) return;
+        load.set(teacherId, (load.get(teacherId) || 0) + weekly);
+      });
+    });
+  });
+  return load;
+}
+
+// 一键均衡分配当前年级任课老师：
+// - 按科目取本学部该学科的在职老师池；
+// - 负载 = 同学期所有年级任课关系折算的周课时，跨年级共享老师会被均衡；
+// - 每次把班级分给“剩余容量足够且当前负载最小”的老师，超容量时仍分配但给出提醒；
+// - overwrite=false 时只补空缺格子，保留行政已手工指定的任课老师。
+export function autoAssignGradeTeachers(db, options = {}, actorAccount = null) {
+  const config = buildSchedulingConfig(db, options);
+  assertEditableScheduleTerm(config, "自动分配任课老师");
+  const term = currentTerm(db, config.termId);
+  const overwrite = options.overwrite === true;
+  const subjectFilter =
+    Array.isArray(options.subjectIds) && options.subjectIds.length
+      ? new Set(options.subjectIds.map(String))
+      : null;
+
+  const summary = [];
+  const subjects = (config.subjects || []).filter(
+    (subject) => Number(subject.weeklyLessons || 0) > 0 && (!subjectFilter || subjectFilter.has(subject.id)),
+  );
+
+  subjects.forEach((subject) => {
+    const pool = (config.teachers || []).filter((teacher) => teacher.subjectId === subject.id);
+    if (!pool.length) {
+      summary.push({
+        subjectId: subject.id,
+        subjectName: subject.name,
+        status: "skipped",
+        reason: `本学部没有 ${subject.name} 在职老师，无法自动分配`,
+      });
+      return;
+    }
+
+    // 负载基线：排除本年级本科目（即将重算的部分）；overwrite=false 时把保留的格子加回去
+    const load = plannedTeacherLoadForTerm(db, term, {
+      excludeScope: { stageId: config.stageId, grade: config.grade, subjectId: subject.id },
+    });
+    pool.forEach((teacher) => {
+      if (!load.has(teacher.id)) load.set(teacher.id, 0);
+    });
+    const weekly = Number(subject.weeklyLessons || 0);
+    const classTeacherIds = {};
+    let keptCount = 0;
+    (config.classes || []).forEach((schoolClass) => {
+      const current = Array.isArray(subject.classTeacherIds?.[schoolClass.id])
+        ? subject.classTeacherIds[schoolClass.id].filter(Boolean)
+        : [];
+      if (!overwrite && current.length) {
+        classTeacherIds[schoolClass.id] = current;
+        keptCount += 1;
+        current.forEach((teacherId) => load.set(teacherId, (load.get(teacherId) || 0) + weekly));
+      }
+    });
+
+    const overloadedPicks = [];
+    (config.classes || []).forEach((schoolClass) => {
+      if (classTeacherIds[schoolClass.id]?.length) return;
+      const ranked = [...pool].sort(
+        (a, b) => (load.get(a.id) || 0) - (load.get(b.id) || 0) || a.id.localeCompare(b.id),
+      );
+      const withinCapacity = ranked.find(
+        (teacher) => (load.get(teacher.id) || 0) + weekly <= teacherWeeklyCapacity(config, teacher.id),
+      );
+      const picked = withinCapacity || ranked[0];
+      if (!withinCapacity) {
+        overloadedPicks.push({ className: schoolClass.name, teacherName: picked.name });
+      }
+      classTeacherIds[schoolClass.id] = [picked.id];
+      load.set(picked.id, (load.get(picked.id) || 0) + weekly);
+    });
+
+    updateTeacherAssignment(
+      db,
+      {
+        termId: term.id,
+        stageId: config.stageId,
+        grade: config.grade,
+        subjectId: subject.id,
+        classTeacherIds,
+      },
+      actorAccount,
+    );
+
+    const distribution = new Map();
+    Object.values(classTeacherIds).forEach((teacherIds) => {
+      teacherIds.forEach((teacherId) => distribution.set(teacherId, (distribution.get(teacherId) || 0) + 1));
+    });
+    summary.push({
+      subjectId: subject.id,
+      subjectName: subject.name,
+      status: "assigned",
+      classCount: (config.classes || []).length,
+      keptCount,
+      filledCount: (config.classes || []).length - keptCount,
+      teacherCount: distribution.size,
+      warnings: overloadedPicks.length
+        ? [
+            `${overloadedPicks.length} 个班级分配后老师周课量超出容量估算（跨年级课量较高），请人工复核：${overloadedPicks
+              .slice(0, 3)
+              .map((item) => `${item.className}→${item.teacherName}`)
+              .join("、")}${overloadedPicks.length > 3 ? " 等" : ""}`,
+          ]
+        : [],
+    });
+  });
+
+  db.auditLogs.push({
+    action: "teacher_assignment_auto_assign",
+    termId: term.id,
+    stageId: config.stageId,
+    grade: config.grade,
+    overwrite,
+    subjects: summary.map((item) => `${item.subjectId}:${item.status}`),
+    actorAccountId: actorAccount?.id || "",
+    createdAt: new Date().toISOString(),
+  });
+
+  return {
+    summary,
+    config: buildSchedulingConfig(db, options),
+  };
+}
+
 function buildSubjectQueueFromCounters(config, classIndex, counters) {
   const targetCount = Array.from(counters.values()).reduce((sum, count) => sum + Math.max(count, 0), 0);
   const queue = [];
@@ -3026,6 +3211,21 @@ export function buildSchedulePrecheck(config, options = {}) {
   const slots = schedulingSlots(config);
   const checks = [];
 
+  if (options.skipSolverProbe !== true) {
+    const solverProbe = checkSolverAvailability();
+    if (!solverProbe.available) {
+      checks.push(
+        precheckItem(
+          "warning",
+          "solver_unavailable",
+          "OR-Tools CP-SAT 求解器不可用",
+          `${solverProbe.message}。当前会使用内置启发式算法排课：小年级可用，全校规模可能出现课程排不满或质量分偏低。生产环境必须安装 OR-Tools。`,
+          { pythonBin: solverProbe.pythonBin },
+        ),
+      );
+    }
+  }
+
   if (!(config.classes || []).length) {
     checks.push(
       precheckItem(
@@ -3201,28 +3401,37 @@ export function buildSchedulePrecheck(config, options = {}) {
       );
     }
 
-    const weeklyCapacity = Array.from(new Set(subject.teacherIds)).reduce(
+    const subjectTeacherIds = Array.from(new Set(subject.teacherIds));
+    const rawWeeklyCapacity = subjectTeacherIds.reduce(
       (sum, teacherId) => sum + teacherWeeklyCapacity(config, teacherId),
       0,
     );
-    if (weeklyCapacity > 0 && demand > weeklyCapacity) {
+    const externalTeacherLoad = subjectTeacherIds.reduce(
+      (sum, teacherId) =>
+        sum + externalAssignments.filter((assignment) => assignment.teacherId === teacherId).length,
+      0,
+    );
+    // 老师是全校共享资源：估算容量时扣除同学期其他年级已发布/锁定课节
+    const weeklyCapacity = Math.max(rawWeeklyCapacity - externalTeacherLoad, 0);
+    const crossGradeNote = externalTeacherLoad > 0 ? `（已扣除其他年级本周 ${externalTeacherLoad} 节占用）` : "";
+    if (rawWeeklyCapacity > 0 && demand > weeklyCapacity) {
       checks.push(
         precheckItem(
           "error",
           `subject_teacher_capacity_${subject.id}`,
           `${subject.name} 任课老师容量不足`,
-          `本年级需要 ${demand} 节，当前任课老师按每日上限估算最多 ${weeklyCapacity} 节，请增加老师或放宽课量上限。`,
-          { subjectId: subject.id, demand, weeklyCapacity },
+          `本年级需要 ${demand} 节，当前任课老师按每日上限估算最多 ${weeklyCapacity} 节${crossGradeNote}，请增加老师或放宽课量上限。`,
+          { subjectId: subject.id, demand, weeklyCapacity, externalTeacherLoad },
         ),
       );
-    } else if (weeklyCapacity > 0 && demand > weeklyCapacity * 0.85) {
+    } else if (rawWeeklyCapacity > 0 && demand > weeklyCapacity * 0.85) {
       checks.push(
         precheckItem(
           "warning",
           `subject_teacher_capacity_tight_${subject.id}`,
           `${subject.name} 任课老师容量偏紧`,
-          `本年级需要 ${demand} 节，当前任课老师容量约 ${weeklyCapacity} 节，排课可能较慢且质量分偏低。`,
-          { subjectId: subject.id, demand, weeklyCapacity },
+          `本年级需要 ${demand} 节，当前任课老师容量约 ${weeklyCapacity} 节${crossGradeNote}，排课可能较慢且质量分偏低。`,
+          { subjectId: subject.id, demand, weeklyCapacity, externalTeacherLoad },
         ),
       );
     }
@@ -3240,7 +3449,12 @@ export function buildSchedulePrecheck(config, options = {}) {
     const candidateRooms = (config.rooms || []).filter(
       (room) => normalizeRoomType(room.roomType || room.type, "homeroom") === requiredRoomType,
     );
-    const capacity = candidateRooms.length * slots.length;
+    // 专用教室（操场、实验室等）按学部共享：容量扣除其他年级本周已占用的课位
+    const candidateRoomIds = new Set(candidateRooms.map((room) => room.id));
+    const externalRoomLoad = externalAssignments.filter((assignment) =>
+      candidateRoomIds.has(assignment.roomId),
+    ).length;
+    const capacity = Math.max(candidateRooms.length * slots.length - externalRoomLoad, 0);
     if (demand > capacity) {
       checks.push(
         precheckItem(
@@ -3491,6 +3705,44 @@ function generateHeuristicScheduleSolution(config, options = {}) {
       timeoutMs: Date.now() - startedAt,
     },
   };
+}
+
+// 探测本身是同步 spawn（约 1~2 秒），靠长缓存 + 服务启动预热避免阻塞请求处理
+const SOLVER_PROBE_TTL_MS = 30 * 60 * 1000;
+let solverProbeCache = null;
+
+// 探测 OR-Tools CP-SAT 是否可用。生产环境必须安装（见 server/solver/requirements.txt），
+// 否则排课回退内置启发式：小年级可用，全校规模会出现排不满。结果缓存 5 分钟。
+export function checkSolverAvailability(options = {}) {
+  const now = Date.now();
+  if (!options.force && solverProbeCache && now - solverProbeCache.probedAtMs < SOLVER_PROBE_TTL_MS) {
+    return solverProbeCache;
+  }
+  const pythonBin = process.env.SCHEDULER_PYTHON || "python3";
+  const result = spawnSync(pythonBin, ["-c", "import ortools.sat.python.cp_model"], {
+    encoding: "utf8",
+    timeout: 15000,
+  });
+  let probe;
+  if (result.error) {
+    probe = {
+      available: false,
+      pythonBin,
+      message: `无法执行 ${pythonBin}：${result.error.message}`,
+    };
+  } else if (result.status !== 0) {
+    probe = {
+      available: false,
+      pythonBin,
+      message: `${pythonBin} 缺少 ortools 依赖，请执行 pip install -r server/solver/requirements.txt，或用 SCHEDULER_PYTHON 指向已安装 ortools 的 Python`,
+    };
+  } else {
+    probe = { available: true, pythonBin, message: "OR-Tools CP-SAT 求解器可用" };
+  }
+  probe.probedAtMs = now;
+  probe.probedAt = new Date(now).toISOString();
+  solverProbeCache = probe;
+  return probe;
 }
 
 function solveScheduleWithOrTools(config, options = {}) {
@@ -3761,6 +4013,13 @@ export function validateScheduleConflicts(assignments, options = {}) {
     if (!teacherDayItems.has(teacherDay)) teacherDayItems.set(teacherDay, []);
     teacherDayItems.get(teacherDay).push(assignment);
 
+    // 教室是全校/学部共享资源（操场、实验室等），外部课节也必须参与教室占用冲突判定
+    if (assignment.roomId || assignment.room) {
+      const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
+      if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
+      roomSlots.get(roomKey).push(assignment);
+    }
+
     if (assignment.external) return;
 
     const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
@@ -3770,10 +4029,6 @@ export function validateScheduleConflicts(assignments, options = {}) {
     const classSubjectDateKey = `${assignment.classId}:${assignment.subjectId}:${assignment.date}`;
     if (!classSubjectDateItems.has(classSubjectDateKey)) classSubjectDateItems.set(classSubjectDateKey, []);
     classSubjectDateItems.get(classSubjectDateKey).push(assignment);
-
-    const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
-    if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
-    roomSlots.get(roomKey).push(assignment);
 
     if (config) {
       const dayIndex = Number.isFinite(Number(assignment.dayIndex))

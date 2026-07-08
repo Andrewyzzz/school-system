@@ -14,7 +14,7 @@ assert.ok(sql.includes("INSERT INTO payroll_rules"), "payroll rules should be ex
 assert.ok(sql.endsWith("COMMIT;\n"), "export should be transaction wrapped");
 
 assert.equal(summary.teachers, 30);
-assert.equal(summary.accounts, 35);
+assert.equal(summary.accounts, 39);
 assert.ok(summary.statements > summary.teachers + summary.accounts, "export should include reference and payroll statements");
 
 const duplicateTeacherAccountMatches = sql.match(/'T0003'/g) || [];

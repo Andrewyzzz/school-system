@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAttendance } from "./attendance.js";
-import { createToken, verifyPassword } from "./auth.js";
+import { createToken, verifyPasswordAsync } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import {
   cancelScheduleGenerationJob,
@@ -14,6 +14,8 @@ import {
 import {
   approveScheduleChangeRequest,
   adjustScheduleAssignment,
+  autoAssignGradeTeachers,
+  checkSolverAvailability,
   createScheduleChangeRequest,
   createScheduleConstraint,
   createGradeCourse,
@@ -79,7 +81,48 @@ import {
   updateTeacherSalaryProfile,
   updateTeacherAssignment,
   validatePhase1Readiness,
+  storageHealth,
+  DB_DRIVER,
 } from "./storage.js";
+import { postgresHealth, postgresPing } from "./db/postgresStore.js";
+import { piiEncryptionReady } from "./security/pii.js";
+import {
+  addEmployeeContract,
+  addSalaryTemplateVersion,
+  applySalaryTemplate,
+  createEmployee,
+  createOrgUnit,
+  createPosition,
+  createProfileChangeRequest,
+  createSalaryTemplate,
+  ensureHrData,
+  exportEmployeesCsv,
+  getEmployeeDetail,
+  getMyHrProfile,
+  queryEmployees,
+  queryHrAuditLogs,
+  queryOrgUnits,
+  queryPositions,
+  queryProfileChangeRequests,
+  querySalaryTemplates,
+  reviewProfileChangeRequest,
+  revealSensitiveField,
+  approveHrFlowStep,
+  countHrTodos,
+  createHrFlow,
+  hrScopeFor,
+  assertEmployeeInScope,
+  queryHrFlows,
+  scanHrFlowTimeouts,
+  withdrawHrFlow,
+  setEmployeeStatus,
+  setOrgUnitStatus,
+  updateEmployee,
+  updateEmployeeContract,
+  updateOrgUnit,
+  updatePosition,
+  withdrawProfileChangeRequest,
+} from "./hr.js";
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -159,12 +202,75 @@ function roomsForTerm(db, termId = "") {
   return (db.rooms || []).filter((room) => !room.termId);
 }
 
+// 请求体上限：教师 CSV 导入约几百 KB，5MB 足够；无上限时恶意大包会直接把进程内存打爆
+const MAX_JSON_BODY_BYTES = 5 * 1024 * 1024;
+
 async function readJsonBody(req) {
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      req.destroy();
+      const error = new Error("请求体过大，最大支持 5MB");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
   if (!chunks.length) return {};
   const raw = Buffer.concat(chunks).toString("utf-8");
   return JSON.parse(raw);
+}
+
+// 登录保护：
+// - 按用户名限“失败”次数（防口令爆破，成功登录不占额度）；
+// - 按来源 IP 设高水位总量上限（防单源洪泛）。上限必须放得足够高：
+//   全校师生在校园网 NAT 后共享同一个出口 IP，早高峰 3000 人集中登录是正常流量。
+// 部署在反向代理后时设 TRUST_PROXY=1，用 X-Forwarded-For 还原真实来源。
+const LOGIN_RATE_WINDOW_MS = 60 * 1000;
+const LOGIN_FAIL_MAX_PER_USERNAME = 10;
+const LOGIN_MAX_PER_IP = 3000;
+const loginFailBuckets = new Map();
+const loginIpBuckets = new Map();
+
+function slidingWindowHit(map, key, windowMs, increment = 1) {
+  const now = Date.now();
+  if (map.size > 20000) {
+    map.forEach((bucket, bucketKey) => {
+      if (now - bucket.windowStart > windowMs) map.delete(bucketKey);
+    });
+  }
+  const bucket = map.get(key);
+  if (!bucket || now - bucket.windowStart > windowMs) {
+    map.set(key, { windowStart: now, count: increment });
+    return increment;
+  }
+  bucket.count += increment;
+  return bucket.count;
+}
+
+function clientIpFor(req) {
+  if (process.env.TRUST_PROXY === "1") {
+    const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function loginIpLimited(ip) {
+  return slidingWindowHit(loginIpBuckets, ip, LOGIN_RATE_WINDOW_MS) > LOGIN_MAX_PER_IP;
+}
+
+function loginUsernameLocked(username) {
+  const bucket = loginFailBuckets.get(username);
+  if (!bucket) return false;
+  if (Date.now() - bucket.windowStart > LOGIN_RATE_WINDOW_MS) return false;
+  return bucket.count >= LOGIN_FAIL_MAX_PER_USERNAME;
+}
+
+function recordLoginFailure(username) {
+  slidingWindowHit(loginFailBuckets, username, LOGIN_RATE_WINDOW_MS);
 }
 
 function bearerToken(req) {
@@ -340,17 +446,47 @@ async function handleApi(req, res, db, url) {
         teacherCount: db.teachers.length,
         accountCount: db.accounts.length,
         seedVersion: db.meta.seedVersion,
+        schedulingSolver: checkSolverAvailability().available ? "ortools-cp-sat" : "fallback-heuristic",
+        storage: {
+          driver: DB_DRIVER,
+          lastSaveAt: storageHealth.lastSaveAt,
+          lastSaveDurationMs: storageHealth.lastSaveDurationMs,
+          lastSaveError: storageHealth.lastSaveError || null,
+          coalescedSaves: storageHealth.coalescedSaves,
+          totalSaves: storageHealth.totalSaves,
+          ...(DB_DRIVER !== "json"
+            ? {
+                postgres: {
+                  connected: postgresHealth.connected,
+                  lastPersistAt: postgresHealth.lastPersistAt,
+                  lastPersistMs: postgresHealth.lastPersistMs,
+                  lastPersistUpserts: postgresHealth.lastPersistUpserts,
+                  lastError: postgresHealth.lastError || null,
+                },
+              }
+            : {}),
+        },
       });
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
+      const clientIp = clientIpFor(req);
+      if (loginIpLimited(clientIp)) {
+        sendError(res, 429, "登录请求过于频繁，请 1 分钟后再试");
+        return;
+      }
       const body = await readJsonBody(req);
       const username = String(body.username || "").trim();
       const password = String(body.password || "");
+      if (loginUsernameLocked(username)) {
+        sendError(res, 429, "该账号短时间内失败次数过多，请 1 分钟后再试");
+        return;
+      }
       const account = findAccountByUsername(db, username);
 
-      if (!account || account.status !== "active" || !verifyPassword(password, account.passwordHash)) {
+      if (!account || account.status !== "active" || !(await verifyPasswordAsync(password, account.passwordHash))) {
+        recordLoginFailure(username);
         sendError(res, 401, "用户名或密码错误");
         return;
       }
@@ -603,6 +739,16 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/scheduling/teacher-assignments/auto") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = autoAssignGradeTeachers(db, body, auth.account);
+      await saveDatabase(db);
+      sendJson(res, 200, attachSchedulingPrecheck(db, result));
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/scheduling/course-rules") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
@@ -733,6 +879,16 @@ async function handleApi(req, res, db, url) {
     if (req.method === "POST" && url.pathname === "/api/scheduling/generate") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
+      // 同步生成会在主事件循环内阻塞式运行 CP-SAT（最长 90 秒），期间所有请求都会被卡住。
+      // 正式页面走 /api/scheduling/generate-jobs（Worker 线程）；此接口仅保留给开发调试。
+      if (process.env.ALLOW_SYNC_SCHEDULING !== "1") {
+        sendError(
+          res,
+          410,
+          "同步排课接口已停用：请改用 POST /api/scheduling/generate-jobs 异步生成（开发调试可用 ALLOW_SYNC_SCHEDULING=1 临时开启）",
+        );
+        return;
+      }
       const body = await readJsonBody(req);
       const result = generateScheduleDraft(db, body, auth.account);
       await saveDatabase(db);
@@ -890,6 +1046,8 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const csvText = String(body.csvText || "");
       const result = commitTeacherImport(db, csvText, auth.account);
+      // 新导入教师自动补建人事档案，避免教学侧与档案侧人数漂移
+      ensureHrData(db);
       await saveDatabase(db);
       sendJson(res, 200, result);
       return;
@@ -1160,10 +1318,337 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    // ---- 第二阶段：人事管控 /api/hr/* ----
+
+    if (url.pathname.startsWith("/api/hr/")) {
+      const hrContext = { clientIp: clientIpFor(req), userAgent: req.headers["user-agent"] || "" };
+
+      if (req.method === "GET" && url.pathname === "/api/hr/org-units") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, { units: queryOrgUnits(db) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/org-units") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const unit = createOrgUnit(db, body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { unit });
+        return;
+      }
+
+      const orgUnitMatch = url.pathname.match(/^\/api\/hr\/org-units\/([^/]+)(?:\/(status))?$/);
+      if (orgUnitMatch) {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        if (req.method === "POST" && orgUnitMatch[2] === "status") {
+          const unit = setOrgUnitStatus(db, orgUnitMatch[1], String(body.status || ""), body.reason, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { unit });
+          return;
+        }
+        if (req.method === "PATCH" && !orgUnitMatch[2]) {
+          const unit = updateOrgUnit(db, orgUnitMatch[1], body, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { unit });
+          return;
+        }
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/positions") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, { positions: queryPositions(db, Object.fromEntries(url.searchParams)) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/positions") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const position = createPosition(db, body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { position });
+        return;
+      }
+
+      const positionMatch = url.pathname.match(/^\/api\/hr\/positions\/([^/]+)$/);
+      if (positionMatch && req.method === "PATCH") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const position = updatePosition(db, positionMatch[1], body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { position });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/employees") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, queryEmployees(db, Object.fromEntries(url.searchParams), hrScopeFor(db, auth.account)));
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/employees") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const employee = createEmployee(db, body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { employee });
+        return;
+      }
+
+      // export 必须先于 /:id 匹配
+      if (req.method === "GET" && url.pathname === "/api/hr/employees/export") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const result = exportEmployeesCsv(db, Object.fromEntries(url.searchParams), auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      const employeeMatch = url.pathname.match(
+        /^\/api\/hr\/employees\/([^/]+)(?:\/(status|sensitive-view|contracts))?$/,
+      );
+      if (employeeMatch) {
+        const employeeId = employeeMatch[1];
+        const subPath = employeeMatch[2] || "";
+        if (req.method === "GET" && !subPath) {
+          const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+          if (!auth) return;
+          const detail = getEmployeeDetail(db, employeeId);
+          assertEmployeeInScope(db, auth.account, db.employees.find((item) => item.id === employeeId));
+          sendJson(res, 200, detail);
+          return;
+        }
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        if (req.method === "PATCH" && !subPath) {
+          const employee = updateEmployee(db, employeeId, body, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { employee });
+          return;
+        }
+        if (req.method === "POST" && subPath === "status") {
+          const employee = setEmployeeStatus(db, employeeId, String(body.status || ""), body.reason, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { employee });
+          return;
+        }
+        if (req.method === "POST" && subPath === "sensitive-view") {
+          const result = revealSensitiveField(db, employeeId, String(body.field || ""), body.reason, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, result);
+          return;
+        }
+        if (req.method === "POST" && subPath === "contracts") {
+          const contract = addEmployeeContract(db, employeeId, body, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { contract });
+          return;
+        }
+      }
+
+      const contractMatch = url.pathname.match(/^\/api\/hr\/contracts\/([^/]+)$/);
+      if (contractMatch && req.method === "PATCH") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const contract = updateEmployeeContract(db, contractMatch[1], body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { contract });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/salary-templates") {
+        const auth = requireAuth(req, res, db, ["hr", "finance", "system_admin"]);
+        if (!auth) return;
+        // 金额权限：hr 只能看到绑定关系与版本号，payload 只发给财务与总校
+        const includePayload = auth.account.role === "finance" || auth.account.role === "system_admin";
+        sendJson(res, 200, { templates: querySalaryTemplates(db, { includePayload }) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/salary-templates") {
+        const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const result = createSalaryTemplate(db, body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      const templateMatch = url.pathname.match(/^\/api\/hr\/salary-templates\/([^/]+)\/(versions|apply)$/);
+      if (templateMatch && req.method === "POST") {
+        const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        if (templateMatch[2] === "versions") {
+          const version = addSalaryTemplateVersion(db, templateMatch[1], body, auth.account, hrContext);
+          await saveDatabase(db);
+          sendJson(res, 200, { version });
+          return;
+        }
+        const result = applySalaryTemplate(db, templateMatch[1], body, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/my-profile") {
+        const auth = requireAuth(req, res, db, ["teacher"]);
+        if (!auth) return;
+        sendJson(res, 200, getMyHrProfile(db, auth.account));
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/profile-change-requests") {
+        const auth = requireAuth(req, res, db, ["teacher"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const flow = createProfileChangeRequest(db, auth.account, body.changes || {}, body.reason);
+        await saveDatabase(db);
+        sendJson(res, 200, { request: flow });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/profile-change-requests") {
+        const auth = requireAuth(req, res, db, ["teacher", "hr", "system_admin"]);
+        if (!auth) return;
+        sendJson(res, 200, {
+          requests: queryProfileChangeRequests(db, Object.fromEntries(url.searchParams), auth.account),
+        });
+        return;
+      }
+
+      const changeRequestMatch = url.pathname.match(
+        /^\/api\/hr\/profile-change-requests\/([^/]+)\/(approve|reject|withdraw)$/,
+      );
+      if (changeRequestMatch && req.method === "POST") {
+        const action = changeRequestMatch[2];
+        if (action === "withdraw") {
+          const auth = requireAuth(req, res, db, ["teacher"]);
+          if (!auth) return;
+          const flow = withdrawProfileChangeRequest(db, changeRequestMatch[1], auth.account);
+          await saveDatabase(db);
+          sendJson(res, 200, { request: flow });
+          return;
+        }
+        const auth = requireAuth(req, res, db, ["hr", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const flow = reviewProfileChangeRequest(db, changeRequestMatch[1], action, body.comment, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { request: flow });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/audit-logs") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, queryHrAuditLogs(db, Object.fromEntries(url.searchParams), hrScopeFor(db, auth.account)));
+        return;
+      }
+
+      // ---- M3 审批流 ----
+
+      if (req.method === "GET" && url.pathname === "/api/hr/todos") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, { count: countHrTodos(db, auth.account) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/flows") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const flow = createHrFlow(db, auth.account, body, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { flow });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/flows") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, { flows: queryHrFlows(db, Object.fromEntries(url.searchParams), auth.account) });
+        return;
+      }
+
+      const flowMatch = url.pathname.match(/^\/api\/hr\/flows\/([^/]+)\/(approve|reject|withdraw)$/);
+      if (flowMatch && req.method === "POST") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const action = flowMatch[2];
+        const flow =
+          action === "withdraw"
+            ? withdrawHrFlow(db, flowMatch[1], auth.account)
+            : approveHrFlowStep(db, flowMatch[1], action, body.comment, auth.account, hrContext);
+        await saveDatabase(db);
+        sendJson(res, 200, { flow });
+        return;
+      }
+    }
+
     if (req.method === "GET" && url.pathname === "/api/phase1/readiness") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, validatePhase1Readiness(db));
+      const readiness = validatePhase1Readiness(db);
+      const solverProbe = checkSolverAvailability();
+      readiness.checks.push({
+        key: "scheduling_solver",
+        label: "OR-Tools CP-SAT 排课求解器可用（生产必装）",
+        passed: solverProbe.available,
+        detail: `${solverProbe.message}（python: ${solverProbe.pythonBin}）`,
+      });
+      if (DB_DRIVER !== "json") {
+        const pgReachable = await postgresPing();
+        readiness.checks.push({
+          key: "postgres_connection",
+          label: `PostgreSQL 数据层可用（当前驱动 ${DB_DRIVER}）`,
+          passed: pgReachable && !postgresHealth.lastError.includes("persist:"),
+          detail: pgReachable
+            ? `连接正常，最近持久化 ${postgresHealth.lastPersistAt || "尚未发生"}（${postgresHealth.lastPersistMs}ms）`
+            : `连接失败：${postgresHealth.lastError}`,
+        });
+      }
+      // 第二阶段检查组
+      readiness.checks.push({
+        key: "hr_encryption_key",
+        label: "人事敏感字段加密密钥已配置（HR_ENCRYPTION_KEY）",
+        passed: piiEncryptionReady(),
+        detail: piiEncryptionReady()
+          ? "密钥格式正确，证件/银行卡将加密落库"
+          : "未配置或格式错误：人事敏感字段的写入与完整读取会被拒绝（不会明文落库）",
+      });
+      readiness.checks.push({
+        key: "hr_timeout_scanner",
+        label: "人事审批超时扫描任务存活",
+        passed: Boolean(db.meta.hrTimeoutScanAt),
+        detail: db.meta.hrTimeoutScanAt
+          ? `最近扫描 ${db.meta.hrTimeoutScanAt}`
+          : "尚未执行过扫描（服务启动后每小时一次）",
+      });
+      readiness.checks.push({
+        key: "hr_backfill",
+        label: "全员档案与教师数量一致",
+        passed:
+          (db.employees || []).filter((employee) => employee.teacherId).length >= (db.teachers || []).length,
+        detail: `教师 ${(db.teachers || []).length} 人，教师档案 ${(db.employees || []).filter((employee) => employee.teacherId).length} 份`,
+      });
+      readiness.passed = readiness.checks.every((check) => check.passed);
+      sendJson(res, 200, readiness);
       return;
     }
 
@@ -1213,6 +1698,19 @@ async function serveStatic(req, res, url) {
 export async function createServer() {
   const db = await ensureDatabase();
 
+  // M3：人事审批超时扫描（每小时一次，停留超 3 个工作日提醒；启动即扫一次）
+  const runHrTimeoutScan = async () => {
+    try {
+      const notified = scanHrFlowTimeouts(db);
+      db.meta.hrTimeoutScanAt = new Date().toISOString();
+      if (notified) await saveDatabase(db);
+    } catch (error) {
+      console.error("[hr] 审批超时扫描失败:", error.message);
+    }
+  };
+  runHrTimeoutScan();
+  setInterval(runHrTimeoutScan, 60 * 60 * 1000).unref();
+
   return http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
 
@@ -1229,9 +1727,19 @@ const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.r
 
 if (isDirectRun) {
   const server = await createServer();
+  server.on("error", (error) => {
+    console.error("[server] HTTP 服务错误:", error.message);
+    if (error.code === "EADDRINUSE") process.exit(1);
+  });
   server.listen(PORT, HOST, () => {
+    const solverProbe = checkSolverAvailability();
     console.log(`School system demo running at http://${HOST}:${PORT}/`);
     console.log(`Local URL: http://127.0.0.1:${PORT}/`);
     console.log(`API health: http://127.0.0.1:${PORT}/api/health`);
+    console.log(
+      solverProbe.available
+        ? `[scheduler] OR-Tools CP-SAT 可用（${solverProbe.pythonBin}）`
+        : `[scheduler] 警告：${solverProbe.message}，排课将回退内置启发式算法`,
+    );
   });
 }
