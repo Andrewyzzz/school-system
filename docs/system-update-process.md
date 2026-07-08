@@ -49,6 +49,39 @@ npm run seed
 npm run dev
 ```
 
+5. 确认排课求解器依赖（生产必装）
+
+排课系统的正式求解器是 Google OR-Tools CP-SAT（Python）。没有它时后端会自动回退到内置启发式算法：小年级可用，全校规模会出现课程排不满、质量分偏低，`test:phase1` 和 `test:benchmark` 也无法完整通过。
+
+```bash
+# 建议使用独立 venv，避免污染系统 Python
+python3 -m venv .venv-solver
+.venv-solver/bin/pip install -r server/solver/requirements.txt
+
+# 启动服务时指定求解器 Python
+SCHEDULER_PYTHON=.venv-solver/bin/python npm run dev
+
+# 跑测试时同样指定
+SCHEDULER_PYTHON=.venv-solver/bin/python npm run test:phase1
+```
+
+验证方式：
+
+- `GET /api/health` 返回 `schedulingSolver: "ortools-cp-sat"`（回退时为 `fallback-heuristic`）。
+- `GET /api/phase1/readiness` 中 `scheduling_solver` 检查项必须通过。
+- 行政排课预检面板：求解器不可用时会出现 “OR-Tools CP-SAT 求解器不可用” 提醒项。
+
+生产服务器部署时，`SCHEDULER_PYTHON` 需要写入服务的环境变量（systemd unit 或启动脚本），并在每次服务器迁移后重新验证。
+
+6. 第二阶段新增环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `DB_DRIVER` | 数据层驱动：`json`（默认）/ `postgres` / `dual`（迁移双写观察） |
+| `DATABASE_URL` | PostgreSQL 连接串（默认 `postgresql://localhost:5432/school_system_dev`） |
+| `HR_ENCRYPTION_KEY` | 人事敏感字段 AES-256-GCM 密钥（32 字节 base64，可用 `node -e "import('./server/security/pii.js').then(m=>console.log(m.generateEncryptionKey()))"` 生成）。**丢失密钥 = 已加密的证件/银行卡永久无法解密**，生产密钥必须离线备份；未配置时系统拒绝写入/读取敏感字段（不会明文落库），其余功能不受影响。 |
+
+
 打开：
 
 ```text

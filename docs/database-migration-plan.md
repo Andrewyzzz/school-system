@@ -1,8 +1,34 @@
-# 第一阶段数据库迁移方案
+# 数据库迁移方案
 
-更新时间：2026-06-26
+更新时间：2026-07-08
 
-## 当前状态
+## 2026-07-08 重大更新：PostgreSQL 运行时持久层已落地（第二阶段 M1）
+
+后端运行时已支持三种数据层驱动（`DB_DRIVER` 环境变量）：
+
+| 驱动 | 行为 | 用途 |
+| --- | --- | --- |
+| `json`（默认） | 本地 JSON 文件，与一阶段一致 | 开发、一阶段试运行 |
+| `postgres` | PostgreSQL 持久化（差量行级写） | 生产目标形态 |
+| `dual` | 双写：先 PostgreSQL 后 JSON 文件 | 迁移观察窗口 |
+
+架构：业务逻辑继续操作内存域模型（一阶段已验证 3000 在线），持久层按集合建文档表
+`app_<collection>`（id/seq/data JSONB），保存时与影子快照逐行 diff，只把变更行 upsert/delete
+进事务（实测常态写 1~3 行、约 70~90ms）。数组顺序经 `seq` 列还原；重复主键持久化时显式拒绝。
+列级规范化可后续按表推进，`001/002_*.sql` 是关系投影与报表口径。
+
+关键文件与命令：
+
+- 引擎：`server/db/postgresStore.js`；驱动路由：`server/storage.js`（ensureDatabase/saveDatabase/resetDatabase）
+- 迁移：`npm run migrate:postgres`（试跑核对）/ `npm run migrate:postgres -- --commit`（正式迁移 + 逐行核对报告）
+- 测试：`npm run test:postgres-store`、`npm run test:pii`
+- 连接：`DATABASE_URL`（默认 `postgresql://localhost:5432/school_system_dev`）；HR 敏感字段密钥 `HR_ENCRYPTION_KEY`
+
+生产切换步骤：停服 → `--commit` 迁移并确认核对全绿 → `DB_DRIVER=dual` 双写观察 → 稳定后切 `DB_DRIVER=postgres`，JSON 文件保留为回滚兜底。
+
+已验证：postgres 驱动下登录→服务重启→会话仍有效；3000 并发压测 0 错误、稳态 447 req/s、登录 P50 305ms。
+
+## 当前状态（2026-06-26 记录，运行时部分已被上节取代）
 
 第一阶段当前使用 Node 原生服务 + 本地 JSON 数据文件作为开发期数据仓库：
 

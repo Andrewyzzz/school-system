@@ -38,6 +38,16 @@ node server/seed.js
 node server/server.js
 ```
 
+排课正式求解器是 OR-Tools CP-SAT（生产必装，未安装时回退内置启发式，全校规模会排不满）：
+
+```bash
+python3 -m venv .venv-solver
+.venv-solver/bin/pip install -r server/solver/requirements.txt
+SCHEDULER_PYTHON=.venv-solver/bin/python npm run dev
+```
+
+求解器状态可通过 `GET /api/health` 的 `schedulingSolver` 字段、readiness 的 `scheduling_solver` 检查项和行政排课预检面板确认。
+
 然后打开：
 
 ```text
@@ -67,6 +77,7 @@ http://127.0.0.1:4173/api/health
 - `POST /api/teachers/import/preview`：行政预览并校验教师导入 CSV
 - `POST /api/teachers/import/commit`：行政确认导入教师档案和老师账号
 - `GET /api/scheduling/teacher-assignments` / `POST /api/scheduling/teacher-assignments`：读取和保存任课关系配置
+- `POST /api/scheduling/teacher-assignments/auto`：行政一键均衡分配当前年级任课老师，按老师同学期全校课量排序补空缺，`overwrite=true` 时全部重新分配
 - `GET /api/scheduling/config`：行政读取当前学期下的排课学部、年级、班级、科目、老师和当前草稿
 - `GET /api/scheduling/precheck`：行政执行生成前排课预检，返回阻塞项、提醒项和修复建议
 - `POST /api/scheduling/course-rules`：行政保存年级课程、周课时、每节时长和课程级排课限制
@@ -111,13 +122,16 @@ http://127.0.0.1:4173/api/health
 - 老师端“总薪资”已接入后端，只展示本人月度总薪资，不展示逐课时核算和薪资项目拆分。
 - 财务端“看记录”已接入单个老师后端工作内容明细，“薪资结算”页会调用后端生成任课老师薪资明细快照。
 - 财务端已支持薪资规则配置、批量生成薪资、单人复核、单人锁定和 CSV 导出。
-- 正式网页摄像头扫码需要 HTTPS 安全上下文和用户授权，权限失败时保留手动输入/上传识别兜底；后续小程序版本改用微信原生扫码入口复用同一套后端考勤接口。
+- 正式网页摄像头扫码需要 HTTPS 安全上下文和用户授权；签到只支持实时摄像头扫码，手动输入和图片上传识别已移除（防照片代打卡）。后续小程序版本改用微信原生扫码入口复用同一套后端考勤接口。
 
 第一阶段文档和模板：
 
 - 系统更新流程：`docs/system-update-process.md`
 - 更新日志：`CHANGELOG.md`
 - 第一阶段 PRD：`docs/学校教学薪资管理系统-第一阶段PRD.md`
+- 第二阶段 PRD（人事管控）：`docs/学校人事管控系统-第二阶段PRD.md`
+- 第二阶段开发计划：`PHASE2_TODO.md`
+- 第三阶段 PRD（全员薪资与 OA，3A~3E 批次）：`docs/全员薪资与OA扩展-第三阶段PRD.md`
 - 排课系统最高标准 TODO：`docs/scheduling-high-standard-todo.md`
 - 数据库迁移方案：`docs/database-migration-plan.md`
 - 第一阶段 PostgreSQL schema：`database/postgres/001_phase1_schema.sql`

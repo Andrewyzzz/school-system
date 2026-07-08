@@ -7,12 +7,12 @@
 ## 当前仓库状态
 
 - 仓库：`Andrewyzzz/school-system`
-- 本地工作分支：`codex-remote-collab-onboarding`
-- 基线提交：`650b0d0 Compact teacher mobile schedule`
-- 当前工作区：创建本文档前为干净状态
-- 最近验证：
+- 本地工作分支：`main`（2026-07-07 完成生产化加固，改动未提交，详见 CHANGELOG 顶部条目）
+- 最近验证（2026-07-07）：
   - `npm run check` 通过
-  - `npm run test:phase1` 通过，输出 `phase1 production checks passed`
+  - `SCHEDULER_PYTHON=.venv-solver/bin/python npm run test:phase1 / test:benchmark / test:cross-grade / test:term-lifecycle / test:scheduling-jobs / test:postgres-export` 全部通过
+  - `node scripts/load-test.js http://127.0.0.1:4173 3000 30`：3000 在线用户稳态约 448 req/s，P99 ≤ 131ms
+- 环境注意：`test:phase1` 与 `test:benchmark` 需要 OR-Tools（`python3 -m venv .venv-solver && .venv-solver/bin/pip install -r server/solver/requirements.txt`），运行时用 `SCHEDULER_PYTHON` 指定。
 
 ## 项目概览
 

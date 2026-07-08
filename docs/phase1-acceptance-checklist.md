@@ -1,5 +1,6 @@
 # 第一阶段上线验收清单
 
+- [ ] 生产环境已安装 OR-Tools CP-SAT 求解器（`pip install -r server/solver/requirements.txt`），服务环境变量已配置 `SCHEDULER_PYTHON`，`/api/health` 返回 `schedulingSolver: "ortools-cp-sat"`。
 - [x] 老师账号 `teacher0001` 至 `teacher1000` 可登录。
 - [x] 老师账号只能查看本人课表、考勤、工作量和薪资。
 - [x] 财务和行政可分页查看教师列表。
