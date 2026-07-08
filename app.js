@@ -903,14 +903,39 @@ const views = {
     title: "教师导入",
     el: document.querySelector("#teacherImportView"),
   },
+  hrEmployees: {
+    role: "hr,system_admin,division_head",
+    title: "人员档案",
+    el: document.querySelector("#hrEmployeesView"),
+  },
+  hrOrg: {
+    role: "hr,finance,system_admin",
+    title: "组织与岗位",
+    el: document.querySelector("#hrOrgView"),
+  },
+  hrFlows: {
+    role: "hr,system_admin,division_head",
+    title: "人事审批",
+    el: document.querySelector("#hrFlowsView"),
+  },
+  hrAudit: {
+    role: "hr,system_admin,division_head",
+    title: "人事审计",
+    el: document.querySelector("#hrAuditView"),
+  },
+  myHrProfile: {
+    role: "teacher",
+    title: "我的档案",
+    el: document.querySelector("#myHrProfileView"),
+  },
   notifications: {
-    role: "teacher,finance,admin,system_admin",
+    role: "teacher,finance,admin,system_admin,hr",
     title: "通知中心",
     el: document.querySelector("#notificationsView"),
   },
   scanner: {
     role: "teacher",
-    title: "签入/签出入口",
+    title: "扫码签到",
     el: document.querySelector("#scannerView"),
   },
   records: {
@@ -971,6 +996,8 @@ const defaultViewByRole = {
   admin: "adminScheduling",
   system_admin: "personnel",
   classroom: "classroomScreens",
+  hr: "hrEmployees",
+  division_head: "hrFlows",
 };
 
 const lessonTypeLabel = {
@@ -1245,6 +1272,8 @@ function roleTitle(role) {
   if (role === "admin") return "行政账号";
   if (role === "system_admin") return "系统管理员";
   if (role === "classroom") return "教室屏账号";
+  if (role === "hr") return "人事账号";
+  if (role === "division_head") return "学部负责人";
   return "系统账号";
 }
 
@@ -1555,6 +1584,17 @@ function renderEnvironmentLabels() {
   document.querySelectorAll("#loginEnvironmentLabel, #appEnvironmentLabel").forEach((node) => {
     node.textContent = label;
   });
+}
+
+// 交付环境收敛：正式环境隐藏演示账号区、排课老师快捷登录、重置数据按钮，
+// 并清空登录页预填的演示账号。样式侧通过 body[data-env] 控制。
+function applyEnvironmentMode() {
+  const isLocal = runtimeEnvironmentName() === "本地开发";
+  document.body.dataset.env = isLocal ? "local" : "production";
+  if (!isLocal) {
+    const username = document.querySelector("#loginUsername");
+    if (username && username.value.startsWith("teacher0")) username.value = "";
+  }
 }
 
 function addDays(date, days) {
@@ -6680,6 +6720,11 @@ function render() {
   renderStep("课表总览", renderAdminScheduleOverview);
   renderStep("人员列表", renderPersonnelList);
   renderStep("教师导入", renderTeacherImport);
+  renderStep("人员档案", renderHrEmployees);
+  renderStep("组织与岗位", renderHrOrg);
+  renderStep("人事审批", renderHrFlows);
+  renderStep("人事审计", renderHrAudit);
+  renderStep("我的档案", renderMyHrProfile);
   renderStep("签入签出", renderScanner);
   renderStep("考勤记录", renderRecords);
   renderStep("月度确认", renderConfirmation);
@@ -6739,7 +6784,11 @@ function renderShell() {
           ? `${account.department} · 账号管理`
         : role === "classroom"
           ? `${account.department} · 动态二维码`
-          : `${account.department} · 排课管理`;
+          : role === "hr"
+            ? `${account.department} · 档案管理`
+            : role === "division_head"
+              ? `${account.department} · 人事审批`
+              : `${account.department} · 排课管理`;
   document.querySelector("#accountSummaryTitle").textContent = account.title;
   document.querySelector("#accountSummaryMeta").textContent =
     role === "teacher"
@@ -7573,6 +7622,11 @@ function renderAdminScheduling() {
   document.querySelectorAll("[data-save-teacher-assignment-matrix]").forEach((button) => {
     button.disabled = termReadOnly || schedulingBackendState.loading;
   });
+  document
+    .querySelectorAll("[data-auto-assign-teachers], [data-auto-assign-teachers-overwrite]")
+    .forEach((button) => {
+      button.disabled = termReadOnly || schedulingBackendState.loading;
+    });
   document.querySelectorAll("[data-delete-schedule-period]").forEach((button) => {
     button.disabled = termReadOnly || schedulingBackendState.loading;
   });
@@ -8518,6 +8572,40 @@ function collectClassSubjectTeacherAssignments() {
   }));
 }
 
+async function autoAssignClassSubjectTeachers(overwrite = false) {
+  if (!backendMode() || currentRole() !== "admin") {
+    showToast("请使用后端行政账号执行自动分配");
+    return;
+  }
+  if (
+    overwrite &&
+    !window.confirm("全部重新分配会覆盖当前已保存的任课老师配置（含手工指定），确定继续吗？")
+  ) {
+    return;
+  }
+  try {
+    const result = await apiRequest("/api/scheduling/teacher-assignments/auto", {
+      method: "POST",
+      body: {
+        termId: currentSchedulingTermId(),
+        divisionId: state.schedulingConfig.divisionId,
+        gradeId: state.schedulingConfig.gradeId,
+        overwrite,
+      },
+    });
+    const assigned = (result.summary || []).filter((item) => item.status === "assigned");
+    const skipped = (result.summary || []).filter((item) => item.status === "skipped");
+    const warnings = (result.summary || []).flatMap((item) => item.warnings || []);
+    const parts = [`已自动分配 ${assigned.length} 门课程的任课老师`];
+    if (skipped.length) parts.push(`${skipped.length} 门课程缺老师池被跳过`);
+    if (warnings.length) parts.push(warnings[0]);
+    showToast(parts.join("；"));
+    await loadBackendSchedulingContext();
+  } catch (error) {
+    showToast(error.message || "自动分配任课老师失败");
+  }
+}
+
 async function saveClassSubjectTeacherAssignments() {
   if (!backendMode() || currentRole() !== "admin") {
     showToast("请使用后端行政账号保存任课配置");
@@ -8991,8 +9079,10 @@ function adminSubjectConfigItem(config) {
         </table>
       </div>
       <div class="subject-config-actions">
-        <span>排课时只使用每个格子里保存的老师；空格子会阻止生成，避免系统自动替你分配。</span>
+        <span>排课时只使用每个格子里保存的老师；空格子会阻止生成。可先“自动分配”补齐空格子（按老师全校课量均衡），再手工微调。</span>
         <div class="subject-config-buttons">
+          <button class="mini-button" data-auto-assign-teachers type="button">自动分配空缺</button>
+          <button class="mini-button" data-auto-assign-teachers-overwrite type="button">全部重新分配</button>
           <button class="mini-button primary" data-save-teacher-assignment-matrix type="button">保存班级老师</button>
         </div>
       </div>
@@ -9557,17 +9647,19 @@ function renderScanner() {
   const lessonCard = document.querySelector("#scannerLessonCard");
   const startButton = document.querySelector("#startScanner");
 
+  const scanIconSvg =
+    '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/></svg>';
   if (!lesson) {
     lessonCard.innerHTML = `<div class="empty-state">暂无可扫码处理的课时</div>`;
     if (startButton) {
       startButton.disabled = true;
-      startButton.innerHTML = `<span aria-hidden="true">✓</span>签入`;
+      startButton.innerHTML = `${scanIconSvg}扫码签入`;
     }
   } else {
     const action = actionForLesson(lesson);
     if (startButton) {
       startButton.disabled = Boolean(qrScanner);
-      startButton.innerHTML = `<span aria-hidden="true">✓</span>${escapeHtml(actionLabel(action))}`;
+      startButton.innerHTML = `${scanIconSvg}扫码${escapeHtml(actionLabel(action))}`;
     }
     lessonCard.innerHTML = `
       <strong>${escapeHtml(actionLabel(action))} · ${escapeHtml(lesson.className)} · ${escapeHtml(lesson.course)}</strong>
@@ -9580,11 +9672,11 @@ function renderScanner() {
     `;
   }
 
-  document.querySelector("#lastScanResult").textContent = state.lastScanText || "暂无";
-  document.querySelector("#scannerStatus").textContent = qrScanner ? "识别中" : "未启动";
+  document.querySelector("#scannerStatus").textContent = qrScanner ? "扫码中" : "待扫码";
   document.querySelector("#scannerStatus").className = qrScanner ? "status-pill done" : "status-pill";
   if (startButton && lesson) startButton.disabled = Boolean(qrScanner);
-  document.querySelector("#stopScanner").disabled = !qrScanner;
+  // 停止按钮只在扫码进行中出现，避免闲置状态多余控件
+  document.querySelector("#stopScanner").classList.toggle("is-hidden", !qrScanner);
   renderSecurityChecks();
 }
 
@@ -11880,7 +11972,7 @@ function renderSecurityChecks() {
   if (!state.lastSecurityChecks.length) {
     summary.textContent = "等待扫码";
     summary.className = "status-pill";
-    list.innerHTML = `<div class="empty-state">扫码后会显示格式、动态教室码防伪、有效期、老师账号、绑定设备、签入/签出时间窗口、课时状态、重复计薪拦截等校验结果。</div>`;
+    list.innerHTML = `<div class="empty-state">完成扫码后，这里会显示每一项校验结果</div>`;
     return;
   }
 
@@ -12250,13 +12342,12 @@ function startCameraScanner() {
     showToast("暂无可签入或签出的课程任务");
     return;
   }
-  document.querySelector(".scanner-tools")?.setAttribute("open", "");
   if (typeof Html5QrcodeScanner !== "function") {
     showToast("扫码库未加载，无法启动摄像头");
     return;
   }
   if (!window.isSecureContext && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") {
-    showToast("摄像头需要 HTTPS 或 localhost，请使用授权输入");
+    showToast("摄像头需要 HTTPS 安全环境，请联系管理员检查系统访问地址");
     document.querySelector("#scannerStatus").textContent = "需要 HTTPS";
     document.querySelector("#scannerStatus").className = "status-pill warning";
     return;
@@ -12269,10 +12360,8 @@ function startCameraScanner() {
   };
 
   if (typeof Html5QrcodeScanType === "object") {
-    scannerConfig.supportedScanTypes = [
-      Html5QrcodeScanType.SCAN_TYPE_CAMERA,
-      Html5QrcodeScanType.SCAN_TYPE_FILE,
-    ];
+    // 只允许实时摄像头扫码：图片上传识别和手动输入一样可以用照片代打卡，一并关闭
+    scannerConfig.supportedScanTypes = [Html5QrcodeScanType.SCAN_TYPE_CAMERA];
   }
 
   qrScanner = new Html5QrcodeScanner("reader", scannerConfig, false);
@@ -12316,6 +12405,7 @@ function loginAccount(accountId) {
   resetAttendanceRecordState();
   resetTeacherPayrollState();
   resetFinanceTeacherDetailState();
+  resetHrFrontendStates();
   sessionAccountId = accountId;
   state.currentAccountId = accountId;
   state.activeView = defaultViewByRole[account.role];
@@ -12652,6 +12742,16 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  if (event.target.closest("[data-auto-assign-teachers]")) {
+    await autoAssignClassSubjectTeachers(false);
+    return;
+  }
+
+  if (event.target.closest("[data-auto-assign-teachers-overwrite]")) {
+    await autoAssignClassSubjectTeachers(true);
+    return;
+  }
+
   if (event.target.closest("#toggleCourseEditMode")) {
     courseRulesEditMode = !courseRulesEditMode;
     renderAdminScheduling();
@@ -12770,6 +12870,1432 @@ document.querySelector("#refreshNotificationRecipients").addEventListener("click
   loadNotificationRecipientTeachers({ force: true, keepSelection: true });
 });
 
+// 导航图标：按 data-view 注入线性 SVG（16px / stroke currentColor），
+// 替换原先的 ASCII 占位字符，桌面侧边栏和移动端底部导航共用。
+const NAV_ICON_PATHS = {
+  dashboard: '<path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
+  tasks: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+  schedule: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  adminScheduling: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15l2 2 4-4"/>',
+  adminScheduleOverview: '<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/>',
+  personnel: '<circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16.5 4.9a3.5 3.5 0 0 1 0 6.2M17.8 14.3c2 .8 3.2 2.6 3.2 5.7"/>',
+  teacherImport: '<path d="M12 15V4m0 0 4 4m-4-4L8 8"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+  notifications: '<path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 20a2 2 0 0 0 4 0"/>',
+  scanner: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/>',
+  records: '<path d="M5 4h14a1 1 0 0 1 1 1v15l-3-2-3 2-3-2-3 2-3-2V5a1 1 0 0 1 1-1z"/><path d="M9 9h6M9 13h4"/>',
+  confirm: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/>',
+  teacherPayroll: '<rect x="3" y="6" width="18" height="13" rx="3"/><path d="M3 10h18M7 15h4"/>',
+  finance: '<path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/>',
+  financeRecords: '<path d="M6 3h9l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+  settlement: '<rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>',
+  payrollHistory: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"/>',
+  payrollConfig: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.1-1.3L14 3h-4l-.5 2.6a7 7 0 0 0-2.1 1.3l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.1 1.3L10 21h4l.5-2.6a7 7 0 0 0 2.1-1.3l2.3 1 2-3.4-2-1.5c.06-.4.1-.8.1-1.2z"/>',
+  warnings: '<path d="M12 3 2.5 19.5a1 1 0 0 0 .9 1.5h17.2a1 1 0 0 0 .9-1.5z"/><path d="M12 10v4M12 17.5h.01"/>',
+  hrEmployees: '<circle cx="12" cy="7.5" r="3.5"/><path d="M5 20c0-3.9 3.1-7 7-7s7 3.1 7 7"/><path d="M17 10.5h4M19 8.5v4"/>',
+  hrOrg: '<rect x="9" y="3" width="6" height="5" rx="1.5"/><rect x="3" y="16" width="6" height="5" rx="1.5"/><rect x="15" y="16" width="6" height="5" rx="1.5"/><path d="M12 8v4M12 12H6v4M12 12h6v4"/>',
+  hrAudit: '<path d="M6 3h9l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><circle cx="11" cy="14" r="2.5"/><path d="m13 16 2.5 2.5"/>',
+  myHrProfile: '<rect x="4" y="4" width="16" height="17" rx="3"/><circle cx="12" cy="10" r="2.5"/><path d="M7.5 17.5c.8-2 2.5-3 4.5-3s3.7 1 4.5 3"/>',
+  hrFlows: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="m3 5.5 1.2 1.2L6.5 4.4M3 11.5l1.2 1.2 2.3-2.3M3 17.5l1.2 1.2 2.3-2.3"/>',
+  classroomScreens: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+};
+
+function applyNavIcons() {
+  document.querySelectorAll(".nav-item[data-view]").forEach((button) => {
+    const paths = NAV_ICON_PATHS[button.dataset.view];
+    const span = button.querySelector("span");
+    if (!paths || !span) return;
+    span.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+  });
+}
+
+// ===========================================================================
+// 第二阶段 M2：人事管控前端（人员档案 / 组织与岗位 / 人事审计 / 我的档案）
+// ===========================================================================
+
+const HR_STATUS_OPTIONS = [
+  ["pending_onboard", "待入职"],
+  ["probation", "试用期"],
+  ["active", "在职"],
+  ["transferring", "调岗中"],
+  ["offboarding", "离职中"],
+  ["left", "已离职"],
+  ["suspended", "停用"],
+];
+
+const HR_ACTION_LABELS = {
+  org_unit_create: "新增组织节点",
+  org_unit_update: "修改组织节点",
+  org_unit_status: "组织节点启停",
+  position_create: "新增岗位",
+  position_update: "修改岗位",
+  employee_create: "新建档案",
+  employee_update: "修改档案",
+  employee_status: "人事状态变更",
+  contract_create: "新增合同",
+  contract_update: "修改合同",
+  sensitive_view: "查看敏感信息",
+  roster_export: "导出花名册",
+  salary_template_create: "新建薪资模板",
+  salary_template_version: "发布模板版本",
+  salary_template_apply: "批量应用模板",
+  profile_change_submit: "提交变更申请",
+  profile_change_approve: "变更申请通过",
+  profile_change_reject: "变更申请拒绝",
+  profile_change_withdraw: "变更申请撤回",
+};
+
+function hrStatusPillClass(status) {
+  if (status === "active" || status === "probation") return "status-pill done";
+  if (status === "left" || status === "suspended") return "status-pill warning";
+  return "status-pill";
+}
+
+function isHrManagerRole() {
+  return currentRole() === "hr" || currentRole() === "system_admin";
+}
+
+let hrEmployeePage = {
+  items: [],
+  summary: null,
+  meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
+  page: 1,
+  pageSize: 20,
+  search: "",
+  orgUnitId: "",
+  status: "",
+  loaded: false,
+  loading: false,
+  error: "",
+};
+let hrEmployeeDetailState = { id: "", detail: null, loading: false, error: "", creating: false };
+let hrOrgState = { units: [], positions: [], templates: [], loaded: false, loading: false, error: "" };
+let hrAuditPage = {
+  items: [],
+  meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
+  page: 1,
+  action: "",
+  search: "",
+  loaded: false,
+  loading: false,
+  error: "",
+};
+let myHrProfileState = { data: null, loaded: false, loading: false, error: "" };
+
+async function loadHrEmployeePage(overrides = {}) {
+  hrEmployeePage = { ...hrEmployeePage, ...overrides, loading: true, error: "" };
+  render();
+  try {
+    const params = new URLSearchParams({
+      page: String(hrEmployeePage.page),
+      pageSize: String(hrEmployeePage.pageSize),
+    });
+    if (hrEmployeePage.search) params.set("search", hrEmployeePage.search);
+    if (hrEmployeePage.orgUnitId) params.set("orgUnitId", hrEmployeePage.orgUnitId);
+    if (hrEmployeePage.status) params.set("status", hrEmployeePage.status);
+    const result = await apiRequest(`/api/hr/employees?${params.toString()}`);
+    hrEmployeePage = {
+      ...hrEmployeePage,
+      items: result.items,
+      summary: result.summary,
+      meta: result.meta,
+      loaded: true,
+      loading: false,
+    };
+  } catch (error) {
+    hrEmployeePage = { ...hrEmployeePage, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+async function loadHrEmployeeDetail(employeeId) {
+  hrEmployeeDetailState = { id: employeeId, detail: null, loading: true, error: "", creating: false };
+  render();
+  try {
+    const detail = await apiRequest(`/api/hr/employees/${employeeId}`);
+    hrEmployeeDetailState = { id: employeeId, detail, loading: false, error: "", creating: false };
+  } catch (error) {
+    hrEmployeeDetailState = { id: employeeId, detail: null, loading: false, error: error.message || "加载失败", creating: false };
+  }
+  render();
+}
+
+async function loadHrOrgData() {
+  hrOrgState = { ...hrOrgState, loading: true, error: "" };
+  render();
+  try {
+    // 学部负责人无薪资模板权限，避免 403 拖垮整个组织数据加载
+    const canSeeTemplates = ["hr", "finance", "system_admin"].includes(currentRole());
+    const [unitsResult, positionsResult, templatesResult] = await Promise.all([
+      apiRequest("/api/hr/org-units"),
+      apiRequest("/api/hr/positions"),
+      canSeeTemplates ? apiRequest("/api/hr/salary-templates") : Promise.resolve({ templates: [] }),
+    ]);
+    hrOrgState = {
+      units: unitsResult.units,
+      positions: positionsResult.positions,
+      templates: templatesResult.templates,
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    hrOrgState = { ...hrOrgState, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+async function loadHrAuditPage(overrides = {}) {
+  hrAuditPage = { ...hrAuditPage, ...overrides, loading: true, error: "" };
+  render();
+  try {
+    const params = new URLSearchParams({ page: String(hrAuditPage.page), pageSize: "20" });
+    if (hrAuditPage.action) params.set("action", hrAuditPage.action);
+    if (hrAuditPage.search) params.set("search", hrAuditPage.search);
+    const result = await apiRequest(`/api/hr/audit-logs?${params.toString()}`);
+    hrAuditPage = { ...hrAuditPage, items: result.items, meta: result.meta, loaded: true, loading: false };
+  } catch (error) {
+    hrAuditPage = { ...hrAuditPage, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+async function loadMyHrProfile() {
+  myHrProfileState = { ...myHrProfileState, loading: true, error: "" };
+  render();
+  try {
+    const data = await apiRequest("/api/hr/my-profile");
+    myHrProfileState = { data, loaded: true, loading: false, error: "" };
+  } catch (error) {
+    myHrProfileState = { data: null, loaded: true, loading: false, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+function hrOrgUnitOptions(selected = "", { activeOnly = true } = {}) {
+  return hrOrgState.units
+    .filter((unit) => !activeOnly || unit.status === "active")
+    .map(
+      (unit) =>
+        `<option value="${escapeHtml(unit.id)}" ${unit.id === selected ? "selected" : ""}>${escapeHtml(unit.name)}</option>`,
+    )
+    .join("");
+}
+
+function hrPositionOptions(selected = "") {
+  return hrOrgState.positions
+    .filter((position) => position.status === "active")
+    .map(
+      (position) =>
+        `<option value="${escapeHtml(position.id)}" ${position.id === selected ? "selected" : ""}>${escapeHtml(position.name)}</option>`,
+    )
+    .join("");
+}
+
+function hrCanViewEmployees() {
+  return isHrManagerRole() || currentRole() === "division_head";
+}
+
+function renderHrEmployees() {
+  if (state.activeView !== "hrEmployees" || !hrCanViewEmployees()) return;
+  if (!backendMode()) return;
+  if (!hrEmployeePage.loaded && !hrEmployeePage.loading) {
+    loadHrEmployeePage();
+    return;
+  }
+  if (!hrOrgState.loaded && !hrOrgState.loading) loadHrOrgData();
+
+  const readOnly = !isHrManagerRole();
+  document.querySelector("#hrExportRoster").classList.toggle("is-hidden", readOnly);
+  document.querySelector("#hrCreateEmployee").classList.toggle("is-hidden", readOnly);
+
+  const summaryEl = document.querySelector("#hrEmployeeSummary");
+  const summary = hrEmployeePage.summary || {};
+  summaryEl.innerHTML = [
+    ["在职", summary.active || 0],
+    ["试用期", summary.probation || 0],
+    ["已离职", summary.left || 0],
+    ["停用", summary.suspended || 0],
+  ]
+    .map(
+      ([label, count]) => `
+        <article class="metric">
+          <span>${label}</span>
+          <strong>${count}</strong>
+          <small>共 ${summary.total || 0} 份档案</small>
+        </article>
+      `,
+    )
+    .join("");
+
+  document.querySelector("#hrEmployeeToolbar").innerHTML = `
+    <input id="hrEmpSearch" type="search" placeholder="搜索姓名 / 工号 / 电话" value="${escapeHtml(hrEmployeePage.search)}" />
+    <select id="hrEmpOrgFilter">
+      <option value="">全部组织</option>
+      ${hrOrgUnitOptions(hrEmployeePage.orgUnitId, { activeOnly: false })}
+    </select>
+    <select id="hrEmpStatusFilter">
+      <option value="">全部状态</option>
+      ${HR_STATUS_OPTIONS.map(([value, label]) => `<option value="${value}" ${hrEmployeePage.status === value ? "selected" : ""}>${label}</option>`).join("")}
+    </select>
+    <button class="ghost-button compact-button" id="hrEmpQuery" type="button">查询</button>
+  `;
+
+  const listEl = document.querySelector("#hrEmployeeList");
+  if (hrEmployeePage.error) {
+    listEl.innerHTML = `<div class="empty-state">${escapeHtml(hrEmployeePage.error)}</div>`;
+  } else if (hrEmployeePage.loading && !hrEmployeePage.items.length) {
+    listEl.innerHTML = `<div class="empty-state">加载中…</div>`;
+  } else if (!hrEmployeePage.items.length) {
+    listEl.innerHTML = `<div class="empty-state">没有匹配的档案</div>`;
+  } else {
+    listEl.innerHTML = hrEmployeePage.items
+      .map(
+        (employee) => `
+          <button class="hr-employee-row ${employee.id === hrEmployeeDetailState.id ? "active" : ""}" data-hr-employee="${escapeHtml(employee.id)}" type="button">
+            <div>
+              <strong>${escapeHtml(employee.personName)}</strong>
+              <span>${escapeHtml(employee.employeeNo)} · ${escapeHtml(employee.orgUnitName || "未分配")} · ${escapeHtml(employee.positionName || "未定岗")}</span>
+            </div>
+            <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
+          </button>
+        `,
+      )
+      .join("");
+  }
+
+  const meta = hrEmployeePage.meta;
+  document.querySelector("#hrEmployeePagination").innerHTML = `
+    <button class="mini-button" id="hrEmpPrevPage" type="button" ${meta.page <= 1 ? "disabled" : ""}>上一页</button>
+    <span>第 ${meta.page} / ${meta.totalPages} 页 · 共 ${meta.total} 人</span>
+    <button class="mini-button" id="hrEmpNextPage" type="button" ${meta.page >= meta.totalPages ? "disabled" : ""}>下一页</button>
+  `;
+
+  renderHrEmployeeDetail();
+}
+
+function hrSensitiveRow(label, masked, has, field) {
+  return `
+    <div class="hr-field">
+      <span>${label}</span>
+      <div class="hr-sensitive-line">
+        <strong>${has ? escapeHtml(masked) : "未录入"}</strong>
+        ${has ? `<button class="mini-button" data-hr-sensitive="${field}" type="button">查看完整</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderHrEmployeeDetail() {
+  const detailEl = document.querySelector("#hrEmployeeDetail");
+  if (hrEmployeeDetailState.creating) {
+    detailEl.innerHTML = `
+      <div class="hr-detail-card">
+        <h3>新建档案</h3>
+        <div class="hr-form-grid">
+          <label class="field-label">姓名<input id="hrNew-personName" /></label>
+          <label class="field-label">工号（留空自动生成）<input id="hrNew-employeeNo" /></label>
+          <label class="field-label">组织<select id="hrNew-orgUnitId">${hrOrgUnitOptions()}</select></label>
+          <label class="field-label">岗位<select id="hrNew-positionId">${hrPositionOptions()}</select></label>
+          <label class="field-label">入职日期<input id="hrNew-hiredAt" type="date" /></label>
+          <label class="field-label">电话<input id="hrNew-phone" /></label>
+          <label class="field-label">证件号（可选，加密存储）<input id="hrNew-idCard" /></label>
+          <label class="field-label">初始状态<select id="hrNew-status">${HR_STATUS_OPTIONS.slice(0, 3).map(([value, label]) => `<option value="${value}" ${value === "probation" ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        </div>
+        <label class="field-label">建档原因（必填）<input id="hrNew-reason" placeholder="例如 2026 秋季入职批次" /></label>
+        <div class="action-row">
+          <button class="primary-button compact-button" id="hrNewSubmit" type="button">创建档案</button>
+          <button class="ghost-button compact-button" id="hrNewCancel" type="button">取消</button>
+        </div>
+      </div>
+    `;
+    return;
+  }
+  if (hrEmployeeDetailState.loading) {
+    detailEl.innerHTML = `<div class="empty-state">档案加载中…</div>`;
+    return;
+  }
+  if (hrEmployeeDetailState.error) {
+    detailEl.innerHTML = `<div class="empty-state">${escapeHtml(hrEmployeeDetailState.error)}</div>`;
+    return;
+  }
+  const detail = hrEmployeeDetailState.detail;
+  if (!detail) {
+    detailEl.innerHTML = `<div class="empty-state">从左侧选择一份档案查看${isHrManagerRole() ? "和编辑" : ""}</div>`;
+    return;
+  }
+  const employee = detail.employee;
+  if (!isHrManagerRole()) {
+    // 学部负责人只读视图（不含敏感完整值与编辑操作）
+    detailEl.innerHTML = `
+      <div class="hr-detail-card">
+        <div class="hr-detail-head">
+          <div>
+            <h3>${escapeHtml(employee.personName)}</h3>
+            <span>${escapeHtml(employee.employeeNo)} · ${escapeHtml(employee.orgUnitName || "未分配")} · ${escapeHtml(employee.positionName || "未定岗")}</span>
+          </div>
+          <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
+        </div>
+        <div class="hr-form-grid readonly">
+          <div class="hr-field"><span>电话</span><strong>${escapeHtml(employee.phone || "—")}</strong></div>
+          <div class="hr-field"><span>入职日期</span><strong>${escapeHtml(employee.hiredAt || "—")}</strong></div>
+          <div class="hr-field"><span>证件号</span><strong>${escapeHtml(employee.idCardMasked || "未录入")}</strong></div>
+          <div class="hr-field"><span>合同数量</span><strong>${detail.contracts.length}</strong></div>
+        </div>
+        <p class="action-hint">学部负责人为只读视图；档案编辑与敏感信息查看请联系人事专员。</p>
+      </div>
+    `;
+    return;
+  }
+  detailEl.innerHTML = `
+    <div class="hr-detail-card">
+      <div class="hr-detail-head">
+        <div>
+          <h3>${escapeHtml(employee.personName)}</h3>
+          <span>${escapeHtml(employee.employeeNo)} · ${escapeHtml(employee.orgUnitName || "未分配")} · ${escapeHtml(employee.positionName || "未定岗")}</span>
+        </div>
+        <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
+      </div>
+
+      <div class="hr-form-grid">
+        <label class="field-label">姓名<input id="hrEmp-personName" value="${escapeHtml(employee.personName)}" /></label>
+        <label class="field-label">性别<input id="hrEmp-gender" value="${escapeHtml(employee.gender)}" /></label>
+        <label class="field-label">电话<input id="hrEmp-phone" value="${escapeHtml(employee.phone)}" /></label>
+        <label class="field-label">紧急联系人<input id="hrEmp-emergencyContact" value="${escapeHtml(employee.emergencyContact)}" /></label>
+        <label class="field-label">紧急联系电话<input id="hrEmp-emergencyPhone" value="${escapeHtml(employee.emergencyPhone)}" /></label>
+        <label class="field-label">入职日期<input id="hrEmp-hiredAt" type="date" value="${escapeHtml(employee.hiredAt)}" /></label>
+        <label class="field-label">组织<select id="hrEmp-orgUnitId">${hrOrgUnitOptions(employee.orgUnitId)}</select></label>
+        <label class="field-label">岗位<select id="hrEmp-positionId">${hrPositionOptions(employee.positionId)}</select></label>
+        <label class="field-label">证件号（填写即更新，加密存储）<input id="hrEmp-idCard" placeholder="${employee.hasIdCard ? "已录入，填写新值可替换" : "未录入"}" /></label>
+        <label class="field-label">银行卡号（填写即更新，加密存储）<input id="hrEmp-bankCard" placeholder="${employee.hasBankCard ? "已录入，填写新值可替换" : "未录入"}" /></label>
+      </div>
+
+      ${hrSensitiveRow("证件号", employee.idCardMasked, employee.hasIdCard, "idCard")}
+      ${hrSensitiveRow("银行卡号", employee.bankCardMasked, employee.hasBankCard, "bankCard")}
+      <p class="action-hint" id="hrSensitiveReveal"></p>
+
+      <label class="field-label">修改原因（必填）<input id="hrEmp-reason" placeholder="每次保存必须说明原因" /></label>
+      <div class="action-row">
+        <button class="primary-button compact-button" data-hr-emp-save type="button">保存档案</button>
+      </div>
+
+      <div class="hr-detail-section">
+        <h3>人事状态</h3>
+        <div class="hr-inline-form">
+          <select id="hrEmp-nextStatus">
+            ${HR_STATUS_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === employee.status ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <input id="hrEmp-statusReason" placeholder="状态变更原因（必填）" />
+          <button class="ghost-button compact-button" data-hr-emp-status type="button">变更状态</button>
+        </div>
+        <p class="action-hint">离职/停用会同步冻结教学侧账号资格；完整业务联动在 M4 交付。</p>
+      </div>
+
+      <div class="hr-detail-section">
+        <h3>合同（${detail.contracts.length}）</h3>
+        ${
+          detail.contracts.length
+            ? detail.contracts
+                .map(
+                  (contract) => `
+                    <div class="hr-contract-row">
+                      <strong>${contract.type === "fixed_term" ? "固定期限" : contract.type === "open_term" ? "无固定期限" : "实习"}</strong>
+                      <span>${escapeHtml(contract.startDate)} ~ ${escapeHtml(contract.endDate || "长期")}</span>
+                      <span>${escapeHtml(contract.fileRef || "无扫描件编号")}</span>
+                    </div>
+                  `,
+                )
+                .join("")
+            : `<div class="empty-state">暂无合同记录</div>`
+        }
+        <div class="hr-inline-form">
+          <select id="hrContract-type">
+            <option value="fixed_term">固定期限</option>
+            <option value="open_term">无固定期限</option>
+            <option value="internship">实习</option>
+          </select>
+          <input id="hrContract-start" type="date" />
+          <input id="hrContract-end" type="date" />
+          <input id="hrContract-reason" placeholder="登记原因（必填）" />
+          <button class="ghost-button compact-button" data-hr-contract-add type="button">登记合同</button>
+        </div>
+      </div>
+
+      ${
+        detail.pendingChangeRequests.length
+          ? `
+            <div class="hr-detail-section">
+              <h3>待审核变更申请</h3>
+              ${detail.pendingChangeRequests
+                .map(
+                  (flow) => `
+                    <div class="hr-request-row">
+                      <div>
+                        <strong>${Object.entries(flow.payload.changes)
+                          .map(([field, value]) => `${field === "phone" ? "电话" : field === "emergencyContact" ? "紧急联系人" : "紧急联系电话"} → ${escapeHtml(value)}`)
+                          .join("；")}</strong>
+                        <span>${escapeHtml(flow.payload.reason)}</span>
+                      </div>
+                      <div class="hr-inline-actions">
+                        <button class="mini-button primary" data-hr-pcr-approve="${escapeHtml(flow.id)}" type="button">通过</button>
+                        <button class="mini-button" data-hr-pcr-reject="${escapeHtml(flow.id)}" type="button">拒绝</button>
+                      </div>
+                    </div>
+                  `,
+                )
+                .join("")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
+function hrOrgTreeRows(units) {
+  const byParent = new Map();
+  units.forEach((unit) => {
+    const key = unit.parentId || "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(unit);
+  });
+  const rows = [];
+  const walk = (parentId, depth) => {
+    (byParent.get(parentId) || []).forEach((unit) => {
+      rows.push({ unit, depth });
+      walk(unit.id, depth + 1);
+    });
+  };
+  walk("", 0);
+  return rows;
+}
+
+const ORG_TYPE_LABELS = { school: "总校", division: "学部", department: "部门", grade_group: "年级组" };
+
+function renderHrOrg() {
+  if (state.activeView !== "hrOrg") return;
+  if (!backendMode()) return;
+  if (!hrOrgState.loaded && !hrOrgState.loading) {
+    loadHrOrgData();
+    return;
+  }
+  const manager = isHrManagerRole();
+
+  const treeEl = document.querySelector("#hrOrgTree");
+  if (hrOrgState.error) {
+    treeEl.innerHTML = `<div class="empty-state">${escapeHtml(hrOrgState.error)}</div>`;
+  } else {
+    treeEl.innerHTML = hrOrgTreeRows(hrOrgState.units)
+      .map(
+        ({ unit, depth }) => `
+          <div class="hr-org-node ${unit.status === "disabled" ? "disabled" : ""}" style="--depth: ${depth}">
+            <div class="hr-org-node-main">
+              <strong>${escapeHtml(unit.name)}</strong>
+              <span class="hr-badge">${ORG_TYPE_LABELS[unit.type] || unit.type}</span>
+              ${unit.stageId ? `<span class="hr-badge stage">排课:${escapeHtml(unit.stageId)}</span>` : ""}
+              <span class="hr-org-count">${unit.activeEmployeeCount} 人</span>
+            </div>
+            ${
+              manager && unit.type !== "school"
+                ? `
+                  <div class="hr-inline-actions">
+                    <button class="mini-button" data-hr-org-rename="${escapeHtml(unit.id)}" type="button">改名</button>
+                    <button class="mini-button" data-hr-org-status="${escapeHtml(unit.id)}" data-next-status="${unit.status === "active" ? "disabled" : "active"}" type="button">${unit.status === "active" ? "停用" : "启用"}</button>
+                  </div>
+                `
+                : ""
+            }
+          </div>
+        `,
+      )
+      .join("");
+  }
+
+  document.querySelector("#hrOrgForm").innerHTML = manager
+    ? `
+      <div class="hr-inline-form">
+        <input id="hrOrgNew-name" placeholder="新节点名称" />
+        <select id="hrOrgNew-type">
+          <option value="department">部门</option>
+          <option value="grade_group">年级组</option>
+          <option value="division">学部</option>
+        </select>
+        <select id="hrOrgNew-parent">${hrOrgUnitOptions()}</select>
+        <input id="hrOrgNew-reason" placeholder="新增原因（必填）" />
+        <button class="ghost-button compact-button" id="hrOrgNewSubmit" type="button">新增节点</button>
+      </div>
+    `
+    : "";
+
+  const positionEl = document.querySelector("#hrPositionTable");
+  positionEl.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>编码</th><th>岗位</th><th>序列</th><th>任职</th><th>状态</th></tr></thead>
+        <tbody>
+          ${hrOrgState.positions
+            .map(
+              (position) => `
+                <tr>
+                  <td>${escapeHtml(position.code)}</td>
+                  <td>${escapeHtml(position.name)}</td>
+                  <td>${escapeHtml(position.series)}</td>
+                  <td>${position.activeHolderCount}</td>
+                  <td><span class="${position.status === "active" ? "status-pill done" : "status-pill warning"}">${position.status === "active" ? "启用" : "停用"}</span></td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  const canSeePayload = currentRole() === "finance" || currentRole() === "system_admin";
+  document.querySelector("#hrTemplateList").innerHTML = hrOrgState.templates
+    .map(
+      (template) => `
+        <div class="hr-template-card">
+          <div class="hr-detail-head">
+            <div>
+              <strong>${escapeHtml(template.name)}</strong>
+              <span>绑定岗位：${escapeHtml(template.positionName || template.positionId)} · 最新 v${template.latestVersion}</span>
+            </div>
+            ${
+              canSeePayload
+                ? `<div class="hr-inline-actions">
+                    <button class="mini-button" data-hr-tpl-version="${escapeHtml(template.id)}" type="button">发布新版本</button>
+                    <button class="mini-button primary" data-hr-tpl-apply="${escapeHtml(template.id)}" type="button">批量应用</button>
+                  </div>`
+                : `<span class="hr-badge">金额仅财务可见</span>`
+            }
+          </div>
+          ${
+            canSeePayload && template.versions[0]?.payload
+              ? `<details class="hr-payload-details"><summary>v${template.versions[0].version} 内容（${escapeHtml(template.versions[0].effectiveFrom)} 生效）</summary><pre>${escapeHtml(JSON.stringify(template.versions[0].payload, null, 2))}</pre></details>`
+              : ""
+          }
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderHrAudit() {
+  if (state.activeView !== "hrAudit" || !isHrManagerRole()) return;
+  if (!backendMode()) return;
+  if (!hrAuditPage.loaded && !hrAuditPage.loading) {
+    loadHrAuditPage();
+    return;
+  }
+
+  document.querySelector("#hrAuditToolbar").innerHTML = `
+    <select id="hrAuditAction">
+      <option value="">全部操作</option>
+      ${Object.entries(HR_ACTION_LABELS)
+        .map(([value, label]) => `<option value="${value}" ${hrAuditPage.action === value ? "selected" : ""}>${label}</option>`)
+        .join("")}
+    </select>
+    <input id="hrAuditSearch" type="search" placeholder="搜索操作人 / 原因 / 目标" value="${escapeHtml(hrAuditPage.search)}" />
+    <button class="ghost-button compact-button" id="hrAuditQuery" type="button">查询</button>
+  `;
+
+  const listEl = document.querySelector("#hrAuditList");
+  if (hrAuditPage.error) {
+    listEl.innerHTML = `<div class="empty-state">${escapeHtml(hrAuditPage.error)}</div>`;
+  } else if (!hrAuditPage.items.length) {
+    listEl.innerHTML = `<div class="empty-state">暂无审计记录</div>`;
+  } else {
+    listEl.innerHTML = hrAuditPage.items
+      .map(
+        (entry) => `
+          <div class="hr-audit-row">
+            <div class="hr-audit-main">
+              <span class="hr-badge">${escapeHtml(HR_ACTION_LABELS[entry.action] || entry.action)}</span>
+              <strong>${escapeHtml(entry.actorName || entry.actorAccountId)}</strong>
+              <span>${escapeHtml(entry.createdAt.replace("T", " ").slice(0, 19))}</span>
+              ${entry.targetEmployeeId ? `<span>档案 ${escapeHtml(entry.targetEmployeeId)}</span>` : ""}
+            </div>
+            ${entry.reason ? `<p class="hr-audit-reason">${escapeHtml(entry.reason)}</p>` : ""}
+            ${
+              entry.fieldDiffs.length
+                ? `
+                  <details class="hr-diff-details">
+                    <summary>${entry.fieldDiffs.length} 个字段变化</summary>
+                    <table class="hr-diff-table">
+                      <thead><tr><th>字段</th><th>前值</th><th>后值</th></tr></thead>
+                      <tbody>
+                        ${entry.fieldDiffs
+                          .map(
+                            (diff) => `<tr><td>${escapeHtml(diff.field)}</td><td>${escapeHtml(diff.before || "（空）")}</td><td>${escapeHtml(diff.after || "（空）")}</td></tr>`,
+                          )
+                          .join("")}
+                      </tbody>
+                    </table>
+                  </details>
+                `
+                : ""
+            }
+          </div>
+        `,
+      )
+      .join("");
+  }
+
+  const meta = hrAuditPage.meta;
+  document.querySelector("#hrAuditPagination").innerHTML = `
+    <button class="mini-button" id="hrAuditPrevPage" type="button" ${meta.page <= 1 ? "disabled" : ""}>上一页</button>
+    <span>第 ${meta.page} / ${meta.totalPages} 页 · 共 ${meta.total} 条</span>
+    <button class="mini-button" id="hrAuditNextPage" type="button" ${meta.page >= meta.totalPages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
+const PROFILE_FIELD_LABELS = { phone: "电话", emergencyContact: "紧急联系人", emergencyPhone: "紧急联系电话" };
+const FLOW_STATUS_LABELS = { pending: "待审核", approved: "已通过", rejected: "已拒绝", withdrawn: "已撤回" };
+
+function renderMyHrProfile() {
+  if (state.activeView !== "myHrProfile" || currentRole() !== "teacher") return;
+  if (!backendMode()) {
+    document.querySelector("#myHrProfileCard").innerHTML = `<div class="empty-state">请使用后端模式登录查看人事档案</div>`;
+    return;
+  }
+  if (!myHrProfileState.loaded && !myHrProfileState.loading) {
+    loadMyHrProfile();
+    return;
+  }
+  const cardEl = document.querySelector("#myHrProfileCard");
+  if (myHrProfileState.error) {
+    cardEl.innerHTML = `<div class="empty-state">${escapeHtml(myHrProfileState.error)}</div>`;
+    document.querySelector("#myHrChangeForm").innerHTML = "";
+    document.querySelector("#myHrRequestList").innerHTML = "";
+    return;
+  }
+  const employee = myHrProfileState.data.employee;
+  cardEl.innerHTML = `
+    <div class="hr-form-grid readonly">
+      <div class="hr-field"><span>姓名</span><strong>${escapeHtml(employee.personName)}</strong></div>
+      <div class="hr-field"><span>工号</span><strong>${escapeHtml(employee.employeeNo)}</strong></div>
+      <div class="hr-field"><span>组织</span><strong>${escapeHtml(employee.orgUnitName || "未分配")}</strong></div>
+      <div class="hr-field"><span>岗位</span><strong>${escapeHtml(employee.positionName || "未定岗")}</strong></div>
+      <div class="hr-field"><span>人事状态</span><strong>${escapeHtml(employee.statusLabel)}</strong></div>
+      <div class="hr-field"><span>入职日期</span><strong>${escapeHtml(employee.hiredAt || "—")}</strong></div>
+      <div class="hr-field"><span>电话</span><strong>${escapeHtml(employee.phone || "—")}</strong></div>
+      <div class="hr-field"><span>证件号</span><strong>${escapeHtml(employee.idCardMasked || "未录入")}</strong></div>
+    </div>
+  `;
+  document.querySelector("#myHrChangeForm").innerHTML = `
+    <h3>申请修改联系方式</h3>
+    <div class="hr-form-grid">
+      <label class="field-label">电话<input id="myHr-phone" placeholder="${escapeHtml(employee.phone || "未录入")}" /></label>
+      <label class="field-label">紧急联系人<input id="myHr-emergencyContact" placeholder="${escapeHtml(employee.emergencyContact || "未录入")}" /></label>
+      <label class="field-label">紧急联系电话<input id="myHr-emergencyPhone" placeholder="${escapeHtml(employee.emergencyPhone || "未录入")}" /></label>
+    </div>
+    <label class="field-label">申请原因（必填）<input id="myHr-reason" placeholder="例如 更换手机号" /></label>
+    <div class="action-row">
+      <button class="primary-button compact-button" id="myHrSubmitChange" type="button">提交申请</button>
+    </div>
+    <p class="action-hint">只填写需要修改的项，其余留空；人事专员审核通过后生效。</p>
+  `;
+  const requests = myHrProfileState.data.changeRequests || [];
+  document.querySelector("#myHrRequestList").innerHTML = `
+    <h3>我的申请</h3>
+    ${
+      requests.length
+        ? requests
+            .map(
+              (flow) => `
+                <div class="hr-request-row">
+                  <div>
+                    <strong>${Object.entries(flow.payload.changes)
+                      .map(([field, value]) => `${PROFILE_FIELD_LABELS[field] || field} → ${escapeHtml(value)}`)
+                      .join("；")}</strong>
+                    <span>${escapeHtml(flow.createdAt.replace("T", " ").slice(0, 16))} · ${escapeHtml(flow.payload.reason)}</span>
+                  </div>
+                  <div class="hr-inline-actions">
+                    <span class="${flow.status === "approved" ? "status-pill done" : flow.status === "pending" ? "status-pill" : "status-pill warning"}">${FLOW_STATUS_LABELS[flow.status]}</span>
+                    ${flow.status === "pending" ? `<button class="mini-button" data-hr-pcr-withdraw="${escapeHtml(flow.id)}" type="button">撤回</button>` : ""}
+                  </div>
+                </div>
+              `,
+            )
+            .join("")
+        : `<div class="empty-state">暂无申请记录</div>`
+    }
+  `;
+}
+
+let hrFlowsState = {
+  flows: [],
+  todoCount: 0,
+  status: "",
+  todoOnly: true,
+  createType: "",
+  loaded: false,
+  loading: false,
+  error: "",
+};
+
+async function loadHrFlows(overrides = {}) {
+  hrFlowsState = { ...hrFlowsState, ...overrides, loading: true, error: "" };
+  render();
+  try {
+    const params = new URLSearchParams();
+    if (hrFlowsState.todoOnly) params.set("todo", "1");
+    if (hrFlowsState.status) params.set("status", hrFlowsState.status);
+    const [flowsResult, todosResult] = await Promise.all([
+      apiRequest(`/api/hr/flows?${params.toString()}`),
+      apiRequest("/api/hr/todos"),
+    ]);
+    hrFlowsState = {
+      ...hrFlowsState,
+      flows: flowsResult.flows,
+      todoCount: todosResult.count,
+      loaded: true,
+      loading: false,
+    };
+  } catch (error) {
+    hrFlowsState = { ...hrFlowsState, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+const HR_FLOW_TYPE_LABELS = { onboard: "入职", transfer: "调岗", offboard: "离职" };
+
+function hrFlowCreateFormHtml() {
+  const type = hrFlowsState.createType;
+  if (!type) {
+    return `
+      <div class="hr-inline-form">
+        <span>发起流程：</span>
+        <button class="ghost-button compact-button" data-hr-flow-new="onboard" type="button">入职申请</button>
+        <button class="ghost-button compact-button" data-hr-flow-new="transfer" type="button">调岗申请</button>
+        <button class="ghost-button compact-button" data-hr-flow-new="offboard" type="button">离职申请</button>
+      </div>
+    `;
+  }
+  if (type === "onboard") {
+    const teacherSubjects = (hrOrgState.units.length ? "" : "");
+    return `
+      <div class="hr-detail-card">
+        <h3>发起入职</h3>
+        <div class="hr-form-grid">
+          <label class="field-label">姓名<input id="hrFlow-personName" /></label>
+          <label class="field-label">电话<input id="hrFlow-phone" /></label>
+          <label class="field-label">组织节点<select id="hrFlow-orgUnitId">${hrOrgUnitOptions()}</select></label>
+          <label class="field-label">岗位<select id="hrFlow-positionId">${hrPositionOptions()}</select></label>
+          <label class="field-label">任教学科（教师岗必填）<select id="hrFlow-subjectId"><option value="">—</option>${(state.schedulingConfig?.subjects?.length ? state.schedulingConfig.subjects : Object.values(state.subjects || {})).map((subject) => `<option value="${subject.id}">${escapeHtml(subject.name)}</option>`).join("")}</select></label>
+          <label class="field-label">拟入职日期<input id="hrFlow-hiredAt" type="date" /></label>
+        </div>
+        <label class="field-label">发起原因（必填）<input id="hrFlow-reason" placeholder="例如 高一扩班补充数学教师" /></label>
+        <div class="action-row">
+          <button class="primary-button compact-button" data-hr-flow-submit="onboard" type="button">提交入职申请</button>
+          <button class="ghost-button compact-button" data-hr-flow-cancel type="button">取消</button>
+        </div>
+      </div>
+    `;
+  }
+  const isTransfer = type === "transfer";
+  return `
+    <div class="hr-detail-card">
+      <h3>发起${isTransfer ? "调岗" : "离职"}</h3>
+      <div class="hr-form-grid">
+        <label class="field-label">员工工号<input id="hrFlow-employeeNo" placeholder="例如 FY0001" /></label>
+        <label class="field-label">生效日期<input id="hrFlow-effectiveDate" type="date" /></label>
+        ${
+          isTransfer
+            ? `
+              <label class="field-label">目标组织节点<select id="hrFlow-targetOrgUnitId">${hrOrgUnitOptions()}</select></label>
+              <label class="field-label">目标岗位<select id="hrFlow-targetPositionId">${hrPositionOptions()}</select></label>
+            `
+            : ""
+        }
+      </div>
+      <label class="field-label">${isTransfer ? "调岗" : "离职"}原因（必填）<input id="hrFlow-reason" /></label>
+      <div class="action-row">
+        <button class="primary-button compact-button" data-hr-flow-submit="${type}" type="button">提交申请</button>
+        <button class="ghost-button compact-button" data-hr-flow-cancel type="button">取消</button>
+      </div>
+    </div>
+  `;
+}
+
+function hrFlowRowHtml(flow) {
+  const statusPill =
+    flow.status === "approved"
+      ? "status-pill done"
+      : flow.status === "pending"
+        ? "status-pill"
+        : "status-pill warning";
+  const subject =
+    flow.flowType === "onboard"
+      ? `${flow.payload.personName} · ${flow.payload.orgUnitName} · ${flow.payload.positionName}`
+      : flow.flowType === "transfer"
+        ? `${flow.payload.employeeName} · ${flow.payload.fromOrgUnitName} → ${flow.payload.targetOrgUnitName}（${flow.payload.effectiveDate} 生效）`
+        : `${flow.payload.employeeName} · ${flow.payload.fromOrgUnitName}（${flow.payload.effectiveDate} 生效）`;
+  return `
+    <div class="hr-audit-row">
+      <div class="hr-audit-main">
+        <span class="hr-badge stage">${HR_FLOW_TYPE_LABELS[flow.flowType] || flow.flowType}</span>
+        <strong>${escapeHtml(subject)}</strong>
+        <span class="${statusPill}">${FLOW_STATUS_LABELS[flow.status] || flow.status}${flow.status === "pending" ? ` · ${escapeHtml(flow.currentStepName)}` : ""}</span>
+      </div>
+      <p class="hr-audit-reason">${escapeHtml(flow.payload.reason || "")} · ${escapeHtml(flow.createdByName || "")} ${escapeHtml(flow.createdAt.replace("T", " ").slice(0, 16))}</p>
+      ${
+        flow.payload.handover
+          ? `<p class="hr-audit-reason">交接：生效日后课程 ${flow.payload.handover.futureLessonCount ?? 0} 节${flow.payload.cancelledLessonCount ? `，已自动取消 ${flow.payload.cancelledLessonCount} 节` : ""}</p>`
+          : ""
+      }
+      ${
+        flow.payload.result?.username
+          ? `<p class="hr-audit-reason">已生成教师账号 ${escapeHtml(flow.payload.result.username)}（默认密码 123456，首登改密）</p>`
+          : ""
+      }
+      <details class="hr-diff-details">
+        <summary>审批链（${flow.steps.filter((step) => step.actedAt).length}/${flow.steps.length}）</summary>
+        <table class="hr-diff-table">
+          <thead><tr><th>步骤</th><th>处理</th><th>意见</th><th>时间</th></tr></thead>
+          <tbody>
+            ${flow.steps
+              .map(
+                (step) => `
+                  <tr>
+                    <td>${escapeHtml(step.stepName)}</td>
+                    <td>${step.action === "approve" ? "通过" : step.action === "reject" ? "拒绝" : "待处理"}</td>
+                    <td>${escapeHtml(step.comment || "—")}</td>
+                    <td>${step.actedAt ? escapeHtml(step.actedAt.replace("T", " ").slice(0, 16)) : "—"}</td>
+                  </tr>
+                `,
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </details>
+      <div class="hr-inline-actions">
+        ${flow.canAct ? `<button class="mini-button primary" data-hr-flow-approve="${escapeHtml(flow.id)}" type="button">通过</button><button class="mini-button" data-hr-flow-reject="${escapeHtml(flow.id)}" type="button">拒绝</button>` : ""}
+        ${flow.canWithdraw ? `<button class="mini-button" data-hr-flow-withdraw="${escapeHtml(flow.id)}" type="button">撤回</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderHrFlows() {
+  if (state.activeView !== "hrFlows") return;
+  if (!backendMode()) return;
+  if (!hrFlowsState.loaded && !hrFlowsState.loading) {
+    loadHrFlows();
+    return;
+  }
+  if (!hrOrgState.loaded && !hrOrgState.loading) loadHrOrgData();
+
+  document.querySelector("#hrTodoPill").textContent = `待办 ${hrFlowsState.todoCount}`;
+  document.querySelector("#hrTodoPill").className = hrFlowsState.todoCount ? "status-pill warning" : "status-pill done";
+  document.querySelector("#hrFlowCreate").innerHTML = hrFlowCreateFormHtml();
+  document.querySelector("#hrFlowToolbar").innerHTML = `
+    <select id="hrFlowScope">
+      <option value="todo" ${hrFlowsState.todoOnly ? "selected" : ""}>我的待办</option>
+      <option value="all" ${!hrFlowsState.todoOnly ? "selected" : ""}>全部流程</option>
+    </select>
+    <select id="hrFlowStatus">
+      <option value="">全部状态</option>
+      ${Object.entries(FLOW_STATUS_LABELS)
+        .map(([value, label]) => `<option value="${value}" ${hrFlowsState.status === value ? "selected" : ""}>${label}</option>`)
+        .join("")}
+    </select>
+    <button class="ghost-button compact-button" id="hrFlowQuery" type="button">刷新</button>
+  `;
+
+  const listEl = document.querySelector("#hrFlowList");
+  if (hrFlowsState.error) {
+    listEl.innerHTML = `<div class="empty-state">${escapeHtml(hrFlowsState.error)}</div>`;
+  } else if (!hrFlowsState.flows.length) {
+    listEl.innerHTML = `<div class="empty-state">${hrFlowsState.todoOnly ? "当前没有需要您处理的审批" : "暂无流程记录"}</div>`;
+  } else {
+    listEl.innerHTML = hrFlowsState.flows.map((flow) => hrFlowRowHtml(flow)).join("");
+  }
+}
+
+function resetHrFrontendStates() {
+  hrEmployeePage = { ...hrEmployeePage, loaded: false, error: "", page: 1 };
+  hrEmployeeDetailState = { id: "", detail: null, loading: false, error: "", creating: false };
+  hrOrgState = { ...hrOrgState, loaded: false, error: "" };
+  hrAuditPage = { ...hrAuditPage, loaded: false, error: "", page: 1 };
+  hrFlowsState = { ...hrFlowsState, loaded: false, error: "", createType: "", todoOnly: true, status: "" };
+  myHrProfileState = { data: null, loaded: false, loading: false, error: "" };
+}
+
+function hrRefreshAfterMutation() {
+  hrEmployeePage.loaded = false;
+  hrOrgState.loaded = false;
+  hrAuditPage.loaded = false;
+  hrFlowsState.loaded = false;
+  if (hrEmployeeDetailState.id) loadHrEmployeeDetail(hrEmployeeDetailState.id);
+  else render();
+}
+
+async function hrApiAction(fn, successText) {
+  try {
+    await fn();
+    if (successText) showToast(successText);
+    hrRefreshAfterMutation();
+  } catch (error) {
+    showToast(error.message || "操作失败");
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const employeeRow = event.target.closest("[data-hr-employee]");
+  if (employeeRow) {
+    loadHrEmployeeDetail(employeeRow.dataset.hrEmployee);
+    return;
+  }
+
+  if (event.target.closest("#hrEmpQuery")) {
+    loadHrEmployeePage({
+      page: 1,
+      search: document.querySelector("#hrEmpSearch").value.trim(),
+      orgUnitId: document.querySelector("#hrEmpOrgFilter").value,
+      status: document.querySelector("#hrEmpStatusFilter").value,
+    });
+    return;
+  }
+  if (event.target.closest("#hrEmpPrevPage")) {
+    loadHrEmployeePage({ page: Math.max(hrEmployeePage.meta.page - 1, 1) });
+    return;
+  }
+  if (event.target.closest("#hrEmpNextPage")) {
+    loadHrEmployeePage({ page: hrEmployeePage.meta.page + 1 });
+    return;
+  }
+
+  if (event.target.closest("#hrCreateEmployee")) {
+    hrEmployeeDetailState = { id: "", detail: null, loading: false, error: "", creating: true };
+    if (!hrOrgState.loaded) await loadHrOrgData();
+    render();
+    return;
+  }
+  if (event.target.closest("#hrNewCancel")) {
+    hrEmployeeDetailState = { id: "", detail: null, loading: false, error: "", creating: false };
+    render();
+    return;
+  }
+  if (event.target.closest("#hrNewSubmit")) {
+    await hrApiAction(async () => {
+      await apiRequest("/api/hr/employees", {
+        method: "POST",
+        body: {
+          personName: document.querySelector("#hrNew-personName").value.trim(),
+          employeeNo: document.querySelector("#hrNew-employeeNo").value.trim(),
+          orgUnitId: document.querySelector("#hrNew-orgUnitId").value,
+          positionId: document.querySelector("#hrNew-positionId").value,
+          hiredAt: document.querySelector("#hrNew-hiredAt").value,
+          phone: document.querySelector("#hrNew-phone").value.trim(),
+          idCard: document.querySelector("#hrNew-idCard").value.trim(),
+          status: document.querySelector("#hrNew-status").value,
+          reason: document.querySelector("#hrNew-reason").value.trim(),
+        },
+      });
+      hrEmployeeDetailState = { id: "", detail: null, loading: false, error: "", creating: false };
+    }, "档案已创建");
+    return;
+  }
+
+  if (event.target.closest("[data-hr-emp-save]")) {
+    const employeeId = hrEmployeeDetailState.id;
+    await hrApiAction(async () => {
+      const body = { reason: document.querySelector("#hrEmp-reason").value.trim() };
+      ["personName", "gender", "phone", "emergencyContact", "emergencyPhone", "hiredAt", "orgUnitId", "positionId"].forEach(
+        (field) => {
+          body[field] = document.querySelector(`#hrEmp-${field}`).value;
+        },
+      );
+      const idCard = document.querySelector("#hrEmp-idCard").value.trim();
+      const bankCard = document.querySelector("#hrEmp-bankCard").value.trim();
+      if (idCard) body.idCard = idCard;
+      if (bankCard) body.bankCard = bankCard;
+      await apiRequest(`/api/hr/employees/${employeeId}`, { method: "PATCH", body });
+    }, "档案已保存");
+    return;
+  }
+
+  const sensitiveButton = event.target.closest("[data-hr-sensitive]");
+  if (sensitiveButton) {
+    const field = sensitiveButton.dataset.hrSensitive;
+    const reason = window.prompt("查看完整敏感信息需要填写原因（将记入审计）：", "");
+    if (reason === null) return;
+    try {
+      const result = await apiRequest(`/api/hr/employees/${hrEmployeeDetailState.id}/sensitive-view`, {
+        method: "POST",
+        body: { field, reason },
+      });
+      const hint = document.querySelector("#hrSensitiveReveal");
+      if (hint) hint.textContent = `${result.label}：${result.value}（本次查看已记入审计）`;
+    } catch (error) {
+      showToast(error.message || "查看失败");
+    }
+    return;
+  }
+
+  if (event.target.closest("[data-hr-emp-status]")) {
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/employees/${hrEmployeeDetailState.id}/status`, {
+          method: "POST",
+          body: {
+            status: document.querySelector("#hrEmp-nextStatus").value,
+            reason: document.querySelector("#hrEmp-statusReason").value.trim(),
+          },
+        }),
+      "人事状态已变更",
+    );
+    return;
+  }
+
+  if (event.target.closest("[data-hr-contract-add]")) {
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/employees/${hrEmployeeDetailState.id}/contracts`, {
+          method: "POST",
+          body: {
+            type: document.querySelector("#hrContract-type").value,
+            startDate: document.querySelector("#hrContract-start").value,
+            endDate: document.querySelector("#hrContract-end").value,
+            reason: document.querySelector("#hrContract-reason").value.trim(),
+          },
+        }),
+      "合同已登记",
+    );
+    return;
+  }
+
+  if (event.target.closest("#hrExportRoster")) {
+    try {
+      const result = await apiRequest("/api/hr/employees/export");
+      downloadCsvResult(
+        { content: result.csv, total: result.rowCount, filename: result.filename },
+        result.filename,
+        { statusSelector: "#hrExportStatus" },
+      );
+      hrAuditPage.loaded = false;
+    } catch (error) {
+      showToast(error.message || "导出失败");
+    }
+    return;
+  }
+
+  const approveButton = event.target.closest("[data-hr-pcr-approve]");
+  if (approveButton) {
+    const comment = window.prompt("审核意见（可选）：", "核实通过");
+    if (comment === null) return;
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/profile-change-requests/${approveButton.dataset.hrPcrApprove}/approve`, {
+          method: "POST",
+          body: { comment },
+        }),
+      "已通过并生效",
+    );
+    return;
+  }
+  const rejectButton = event.target.closest("[data-hr-pcr-reject]");
+  if (rejectButton) {
+    const comment = window.prompt("拒绝原因（必填）：", "");
+    if (!comment) return;
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/profile-change-requests/${rejectButton.dataset.hrPcrReject}/reject`, {
+          method: "POST",
+          body: { comment },
+        }),
+      "已拒绝",
+    );
+    return;
+  }
+  const withdrawButton = event.target.closest("[data-hr-pcr-withdraw]");
+  if (withdrawButton) {
+    try {
+      await apiRequest(`/api/hr/profile-change-requests/${withdrawButton.dataset.hrPcrWithdraw}/withdraw`, {
+        method: "POST",
+        body: {},
+      });
+      showToast("已撤回");
+      myHrProfileState.loaded = false;
+      render();
+    } catch (error) {
+      showToast(error.message || "撤回失败");
+    }
+    return;
+  }
+
+  const renameButton = event.target.closest("[data-hr-org-rename]");
+  if (renameButton) {
+    const name = window.prompt("新的节点名称：", "");
+    if (!name) return;
+    const reason = window.prompt("修改原因（必填）：", "");
+    if (!reason) return;
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/org-units/${renameButton.dataset.hrOrgRename}`, {
+          method: "PATCH",
+          body: { name, reason },
+        }),
+      "节点已更新",
+    );
+    return;
+  }
+  const orgStatusButton = event.target.closest("[data-hr-org-status]");
+  if (orgStatusButton) {
+    const nextStatus = orgStatusButton.dataset.nextStatus;
+    const reason = window.prompt(`${nextStatus === "disabled" ? "停用" : "启用"}原因（必填）：`, "");
+    if (!reason) return;
+    await hrApiAction(
+      () =>
+        apiRequest(`/api/hr/org-units/${orgStatusButton.dataset.hrOrgStatus}/status`, {
+          method: "POST",
+          body: { status: nextStatus, reason },
+        }),
+      "节点状态已变更",
+    );
+    return;
+  }
+  if (event.target.closest("#hrOrgNewSubmit")) {
+    await hrApiAction(
+      () =>
+        apiRequest("/api/hr/org-units", {
+          method: "POST",
+          body: {
+            name: document.querySelector("#hrOrgNew-name").value.trim(),
+            type: document.querySelector("#hrOrgNew-type").value,
+            parentId: document.querySelector("#hrOrgNew-parent").value,
+            reason: document.querySelector("#hrOrgNew-reason").value.trim(),
+          },
+        }),
+      "节点已新增",
+    );
+    return;
+  }
+
+  const versionButton = event.target.closest("[data-hr-tpl-version]");
+  if (versionButton) {
+    const template = hrOrgState.templates.find((item) => item.id === versionButton.dataset.hrTplVersion);
+    const payloadText = window.prompt(
+      "新版本内容（JSON，基于最新版修改）：",
+      JSON.stringify(template?.versions?.[0]?.payload || {}),
+    );
+    if (!payloadText) return;
+    const reason = window.prompt("发布原因（必填）：", "");
+    if (!reason) return;
+    await hrApiAction(async () => {
+      let payload;
+      try {
+        payload = JSON.parse(payloadText);
+      } catch {
+        throw new Error("JSON 格式错误，未提交");
+      }
+      await apiRequest(`/api/hr/salary-templates/${versionButton.dataset.hrTplVersion}/versions`, {
+        method: "POST",
+        body: { payload, reason },
+      });
+    }, "新版本已发布");
+    return;
+  }
+  const applyButton = event.target.closest("[data-hr-tpl-apply]");
+  if (applyButton) {
+    const nos = window.prompt("要应用的员工工号（逗号分隔）：", "");
+    if (!nos) return;
+    const reason = window.prompt("应用原因（必填）：", "");
+    if (!reason) return;
+    await hrApiAction(async () => {
+      const result = await apiRequest(`/api/hr/salary-templates/${applyButton.dataset.hrTplApply}/apply`, {
+        method: "POST",
+        body: { employeeNos: nos.split(/[，,]/), reason },
+      });
+      showToast(`已应用 ${result.applied.length} 人，跳过 ${result.skipped.length} 人`);
+    });
+    return;
+  }
+
+  if (event.target.closest("#hrAuditQuery")) {
+    loadHrAuditPage({
+      page: 1,
+      action: document.querySelector("#hrAuditAction").value,
+      search: document.querySelector("#hrAuditSearch").value.trim(),
+    });
+    return;
+  }
+  if (event.target.closest("#hrAuditPrevPage")) {
+    loadHrAuditPage({ page: Math.max(hrAuditPage.meta.page - 1, 1) });
+    return;
+  }
+  if (event.target.closest("#hrAuditNextPage")) {
+    loadHrAuditPage({ page: hrAuditPage.meta.page + 1 });
+    return;
+  }
+
+  if (event.target.closest("#myHrSubmitChange")) {
+    try {
+      const changes = {};
+      ["phone", "emergencyContact", "emergencyPhone"].forEach((field) => {
+        const value = document.querySelector(`#myHr-${field}`).value.trim();
+        if (value) changes[field] = value;
+      });
+      await apiRequest("/api/hr/profile-change-requests", {
+        method: "POST",
+        body: { changes, reason: document.querySelector("#myHr-reason").value.trim() },
+      });
+      showToast("申请已提交，等待人事审核");
+      myHrProfileState.loaded = false;
+      render();
+    } catch (error) {
+      showToast(error.message || "提交失败");
+    }
+    return;
+  }
+});
+
+document.addEventListener("click", async (event) => {
+  const newFlowButton = event.target.closest("[data-hr-flow-new]");
+  if (newFlowButton) {
+    hrFlowsState.createType = newFlowButton.dataset.hrFlowNew;
+    if (!hrOrgState.loaded) await loadHrOrgData();
+    render();
+    return;
+  }
+  if (event.target.closest("[data-hr-flow-cancel]")) {
+    hrFlowsState.createType = "";
+    render();
+    return;
+  }
+  const submitButton = event.target.closest("[data-hr-flow-submit]");
+  if (submitButton) {
+    const flowType = submitButton.dataset.hrFlowSubmit;
+    try {
+      const body = { flowType, reason: document.querySelector("#hrFlow-reason").value.trim() };
+      if (flowType === "onboard") {
+        body.personName = document.querySelector("#hrFlow-personName").value.trim();
+        body.phone = document.querySelector("#hrFlow-phone").value.trim();
+        body.orgUnitId = document.querySelector("#hrFlow-orgUnitId").value;
+        body.positionId = document.querySelector("#hrFlow-positionId").value;
+        body.primarySubjectId = document.querySelector("#hrFlow-subjectId").value;
+        body.hiredAt = document.querySelector("#hrFlow-hiredAt").value;
+      } else {
+        body.employeeNo = document.querySelector("#hrFlow-employeeNo").value.trim();
+        body.effectiveDate = document.querySelector("#hrFlow-effectiveDate").value;
+        if (flowType === "transfer") {
+          body.targetOrgUnitId = document.querySelector("#hrFlow-targetOrgUnitId").value;
+          body.targetPositionId = document.querySelector("#hrFlow-targetPositionId").value;
+        }
+      }
+      await apiRequest("/api/hr/flows", { method: "POST", body });
+      showToast("流程已发起");
+      hrFlowsState.createType = "";
+      hrFlowsState.loaded = false;
+      hrEmployeePage.loaded = false;
+      render();
+    } catch (error) {
+      showToast(error.message || "发起失败");
+    }
+    return;
+  }
+  const approveFlow = event.target.closest("[data-hr-flow-approve]");
+  const rejectFlow = event.target.closest("[data-hr-flow-reject]");
+  if (approveFlow || rejectFlow) {
+    const isApprove = Boolean(approveFlow);
+    const comment = window.prompt(isApprove ? "审批意见（可选）：" : "拒绝原因（必填）：", isApprove ? "同意" : "");
+    if (comment === null || (!isApprove && !comment)) return;
+    try {
+      await apiRequest(
+        `/api/hr/flows/${(approveFlow || rejectFlow).dataset[isApprove ? "hrFlowApprove" : "hrFlowReject"]}/${isApprove ? "approve" : "reject"}`,
+        { method: "POST", body: { comment } },
+      );
+      showToast(isApprove ? "已通过" : "已拒绝");
+      hrRefreshAfterMutation();
+    } catch (error) {
+      showToast(error.message || "操作失败");
+    }
+    return;
+  }
+  const withdrawFlow = event.target.closest("[data-hr-flow-withdraw]");
+  if (withdrawFlow) {
+    try {
+      await apiRequest(`/api/hr/flows/${withdrawFlow.dataset.hrFlowWithdraw}/withdraw`, { method: "POST", body: {} });
+      showToast("已撤回");
+      hrRefreshAfterMutation();
+    } catch (error) {
+      showToast(error.message || "撤回失败");
+    }
+    return;
+  }
+  if (event.target.closest("#hrFlowQuery")) {
+    loadHrFlows({
+      todoOnly: document.querySelector("#hrFlowScope").value === "todo",
+      status: document.querySelector("#hrFlowStatus").value,
+    });
+    return;
+  }
+});
+
+applyNavIcons();
+applyEnvironmentMode();
+
+// 行政排课页是超长配置页：自动收集各 panel 的标题，生成吸顶分节导航，
+// 点击平滑滚动定位，滚动时高亮当前分节。
+function buildSectionNav(viewSelector) {
+  const view = document.querySelector(viewSelector);
+  if (!view || view.querySelector(".section-nav")) return;
+  const panels = [...view.querySelectorAll("section.panel")].filter((panel) =>
+    panel.querySelector(".panel-heading h2"),
+  );
+  if (panels.length < 4) return;
+  const nav = document.createElement("nav");
+  nav.className = "section-nav";
+  nav.setAttribute("aria-label", "页面分节导航");
+  panels.forEach((panel, index) => {
+    if (!panel.id) panel.id = `${view.id}-section-${index}`;
+    const title = panel.querySelector(".panel-heading h2").textContent.trim();
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "section-nav-chip";
+    chip.textContent = title;
+    chip.addEventListener("click", (event) => {
+      // 阻断全局点击委托，避免触发其它 handler 引起重渲染打断滚动
+      event.stopPropagation();
+      // 即时跳转：页面存在异步重渲染，平滑滚动动画期间布局变化会导致落点漂移
+      const stickyOffset = nav.getBoundingClientRect().height + (window.innerWidth <= 900 ? 72 : 24);
+      const targetY = window.scrollY + panel.getBoundingClientRect().top - stickyOffset;
+      window.scrollTo(0, Math.max(targetY, 0));
+      chips.forEach((item, itemIndex) => item.classList.toggle("active", itemIndex === index));
+    });
+    nav.appendChild(chip);
+  });
+  view.prepend(nav);
+
+  const chips = [...nav.children];
+  const highlight = () => {
+    if (!view.classList.contains("is-active")) return;
+    const anchorY = nav.getBoundingClientRect().bottom + 40;
+    let activeIndex = 0;
+    panels.forEach((panel, index) => {
+      if (panel.getBoundingClientRect().top <= anchorY) activeIndex = index;
+    });
+    chips.forEach((chip, index) => chip.classList.toggle("active", index === activeIndex));
+  };
+  let highlightScheduled = false;
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (highlightScheduled) return;
+      highlightScheduled = true;
+      requestAnimationFrame(() => {
+        highlightScheduled = false;
+        highlight();
+      });
+    },
+    { passive: true },
+  );
+  highlight();
+}
+
+buildSectionNav("#adminSchedulingView");
+
 document.querySelector("#logoutButton").addEventListener("click", logout);
 document.querySelector("#topLogoutButton").addEventListener("click", logout);
 
@@ -12808,6 +14334,7 @@ document.querySelector("#previewTeacherImport").addEventListener("click", previe
 document.querySelector("#commitTeacherImport").addEventListener("click", commitTeacherImportCsv);
 
 document.querySelector("#resetDemo").addEventListener("click", () => {
+  if (!window.confirm("确认重置本地演示数据？该操作会清空当前浏览器里的演示状态，不影响后端数据。")) return;
   if (qrScanner) stopCameraScanner();
   const activeAccountId = state.currentAccountId;
   state = clone(initialState);
@@ -12837,6 +14364,13 @@ document.querySelector("#confirmWorkload").addEventListener("click", async () =>
 });
 
 document.querySelector("#submitPayrollDispute").addEventListener("click", async () => {
+  // 渐进式交互：第一次点击先展开异议说明输入框，填写后再次点击才真正提交
+  const disputeField = document.querySelector(".dispute-field");
+  if (disputeField && !disputeField.classList.contains("is-open")) {
+    disputeField.classList.add("is-open");
+    document.querySelector("#payrollDisputeReason")?.focus();
+    return;
+  }
   if (backendMode() && currentRole() === "teacher") {
     await disputeBackendPayroll();
     return;
@@ -13265,15 +14799,6 @@ document.querySelector("#saveTeacherSalaryProfile").addEventListener("click", ha
 document.querySelector("#cancelTeacherSalaryProfileEdit")?.addEventListener("click", cancelTeacherSalaryProfileEdit);
 document.querySelector("#saveSalaryManualItems")?.addEventListener("click", saveBackendTeacherMonthlyAdjustments);
 document.querySelector("#salaryRoleHomeroom").addEventListener("change", syncHomeroomStudentField);
-
-document.querySelector("#submitManualQr").addEventListener("click", async () => {
-  const text = document.querySelector("#manualQrText").value.trim();
-  if (!text) {
-    showToast("请先粘贴二维码内容");
-    return;
-  }
-  await handleDecodedScan(text, selectedScannerActionContext());
-});
 
 render();
 

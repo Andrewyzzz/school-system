@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260626-schedule-flow-1" />
+    <link rel="stylesheet" href="styles.css?v=20260707-lark-refresh-9" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -32,6 +32,8 @@
           <button class="ghost-button" data-demo-login="finance" type="button">财务账号</button>
           <button class="ghost-button" data-demo-login="admin" type="button">行政账号</button>
           <button class="ghost-button" data-demo-login="sysadmin" type="button">系统管理员</button>
+          <button class="ghost-button" data-demo-login="hr" type="button">人事账号</button>
+          <button class="ghost-button" data-demo-login="head_primary" type="button">学部负责人</button>
           <button class="ghost-button" data-demo-login="classroom" type="button">教室屏账号</button>
         </div>
         <div class="scheduled-login-panel" aria-label="小学部排课老师账号">
@@ -90,13 +92,33 @@
             <span aria-hidden="true">⇧</span>
             教师导入
           </button>
-          <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin" type="button">
+          <button class="nav-item" data-view="hrEmployees" data-role="hr,system_admin,division_head" type="button">
+            <span aria-hidden="true">☷</span>
+            人员档案
+          </button>
+          <button class="nav-item" data-view="hrOrg" data-role="hr,finance,system_admin" type="button">
+            <span aria-hidden="true">▤</span>
+            组织与岗位
+          </button>
+          <button class="nav-item" data-view="hrFlows" data-role="hr,system_admin,division_head" type="button">
+            <span aria-hidden="true">✓</span>
+            人事审批
+          </button>
+          <button class="nav-item" data-view="hrAudit" data-role="hr,system_admin,division_head" type="button">
+            <span aria-hidden="true">≡</span>
+            人事审计
+          </button>
+          <button class="nav-item" data-view="myHrProfile" data-role="teacher" type="button">
+            <span aria-hidden="true">○</span>
+            我的档案
+          </button>
+          <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin,hr" type="button">
             <span aria-hidden="true">✉</span>
             通知中心
           </button>
           <button class="nav-item" data-view="scanner" data-role="teacher" type="button">
             <span aria-hidden="true">⌖</span>
-            签入/签出入口
+            扫码签到
           </button>
           <button class="nav-item" data-view="records" data-role="teacher" type="button">
             <span aria-hidden="true">≡</span>
@@ -1107,6 +1129,97 @@
           </section>
         </section>
 
+        <section class="view" id="hrEmployeesView" aria-labelledby="hrEmployeesTitle">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="hrEmployeesTitle">人员档案</h2>
+                <p>全员档案管理：证件与银行卡加密存储、掩码展示，所有修改必须填写原因并留字段级审计。</p>
+              </div>
+              <div class="panel-heading-actions">
+                <button class="ghost-button compact-button" id="hrExportRoster" type="button">导出花名册</button>
+                <button class="primary-button compact-button" id="hrCreateEmployee" type="button">新建档案</button>
+              </div>
+            </div>
+            <div class="summary-grid" id="hrEmployeeSummary"></div>
+            <div class="hr-toolbar" id="hrEmployeeToolbar"></div>
+            <div class="hr-employee-layout">
+              <div class="hr-employee-list" id="hrEmployeeList"></div>
+              <div class="hr-employee-detail" id="hrEmployeeDetail"></div>
+            </div>
+            <div class="table-pagination" id="hrEmployeePagination"></div>
+            <p class="action-hint" id="hrExportStatus"></p>
+          </section>
+        </section>
+
+        <section class="view" id="hrOrgView" aria-labelledby="hrOrgTitle">
+          <div class="hr-org-layout">
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2 id="hrOrgTitle">组织架构</h2>
+                  <p>总校 → 学部/部门 → 年级组；教学学部通过 stageId 与排课模型映射，节点变动全部留痕。</p>
+                </div>
+              </div>
+              <div class="hr-org-tree" id="hrOrgTree"></div>
+              <div class="hr-org-form" id="hrOrgForm"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading">
+                <div>
+                  <h2>岗位与薪资模板</h2>
+                  <p>岗位绑定薪资模板；模板按版本管理，只影响之后应用的人员。</p>
+                </div>
+              </div>
+              <div class="hr-position-table" id="hrPositionTable"></div>
+              <div class="hr-template-list" id="hrTemplateList"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="hrFlowsView" aria-labelledby="hrFlowsTitle">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="hrFlowsTitle">人事审批</h2>
+                <p>入职、调岗、离职流程：学部/人事发起，逐级审批，终审通过后系统自动执行建档、切换或离职生效。</p>
+              </div>
+              <span class="status-pill" id="hrTodoPill">待办 0</span>
+            </div>
+            <div class="hr-flow-create" id="hrFlowCreate"></div>
+            <div class="hr-toolbar" id="hrFlowToolbar"></div>
+            <div class="hr-flow-list" id="hrFlowList"></div>
+          </section>
+        </section>
+
+        <section class="view" id="hrAuditView" aria-labelledby="hrAuditTitle">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="hrAuditTitle">人事审计</h2>
+                <p>人事域全部操作只追加留痕：谁、何时、对谁、改了什么（前值/后值）、为什么；敏感字段只记掩码。</p>
+              </div>
+            </div>
+            <div class="hr-toolbar" id="hrAuditToolbar"></div>
+            <div class="hr-audit-list" id="hrAuditList"></div>
+            <div class="table-pagination" id="hrAuditPagination"></div>
+          </section>
+        </section>
+
+        <section class="view" id="myHrProfileView" aria-labelledby="myHrProfileTitle">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="myHrProfileTitle">我的档案</h2>
+                <p>档案信息以人事记录为准；联系方式变更可在这里提交申请，人事专员审核后生效。</p>
+              </div>
+            </div>
+            <div class="my-hr-profile" id="myHrProfileCard"></div>
+            <div class="my-hr-change" id="myHrChangeForm"></div>
+            <div class="my-hr-requests" id="myHrRequestList"></div>
+          </section>
+        </section>
+
         <section class="view" id="notificationsView" aria-labelledby="notificationsTitle">
           <section class="panel notification-center">
             <div class="panel-heading">
@@ -1195,43 +1308,25 @@
           <section class="panel scanner-action-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="scannerTitle">签入/签出</h2>
-                <p>选择本人课时后按当前状态签入或签出，系统会用教室屏动态码完成后台校验。</p>
+                <h2 id="scannerTitle">扫码签到</h2>
+                <p>选择本人课时，扫描教室屏上的动态二维码完成签入或签出。</p>
               </div>
-              <span class="status-pill" id="scannerStatus">未启动</span>
+              <span class="status-pill" id="scannerStatus">待扫码</span>
             </div>
             <label class="field-label" for="qrLessonSelect">选择本次课时</label>
             <select class="lesson-select" id="qrLessonSelect"></select>
             <div class="scan-lesson-card" id="scannerLessonCard"></div>
             <div class="scanner-primary-actions">
               <button class="primary-button" id="startScanner" type="button">
-                <span aria-hidden="true">✓</span>
-                签入
+                <span class="scan-icon" aria-hidden="true"></span>
+                扫码签入
               </button>
-              <button class="ghost-button" id="stopScanner" type="button" disabled>
-                停止识别
+              <button class="ghost-button is-hidden" id="stopScanner" type="button">
+                停止扫码
               </button>
             </div>
-            <details class="scanner-tools">
-              <summary>扫码识别与授权输入</summary>
-              <div class="reader-box" id="reader"></div>
-              <div class="scan-result">
-                <span>最近识别结果</span>
-                <strong id="lastScanResult">暂无</strong>
-              </div>
-              <div class="manual-scan-box">
-                <label class="field-label" for="manualQrText">授权输入</label>
-                <textarea
-                  class="manual-qr-input"
-                  id="manualQrText"
-                  rows="3"
-                  placeholder="摄像头权限失败且经管理员允许时，可粘贴教室电脑二维码内容"
-                ></textarea>
-                <button class="ghost-button" id="submitManualQr" type="button">
-                  提交二维码内容
-                </button>
-              </div>
-            </details>
+            <div class="reader-box" id="reader"></div>
+            <p class="scanner-help-hint">摄像头无法使用时，请检查浏览器相机权限或联系管理员，签到只支持扫码完成。</p>
           </section>
 
           <section class="panel security-panel" aria-label="系统校验结果">
@@ -1832,7 +1927,7 @@
                     <h3 id="payrollRuleTitle">全校薪资规则</h3>
                     <p>配置不同岗位、职级、考核档、校龄、住房和岗位津贴对应金额；这里不需要先选择老师。</p>
                   </div>
-                  <button class="ghost-button" id="savePayrollRules" type="button">保存规则</button>
+                  <button class="primary-button compact-button" id="savePayrollRules" type="button">保存规则</button>
                 </div>
                 <div class="payroll-scheme-editor" id="payrollSchemeEditor"></div>
                 <div class="payroll-rule-grid payroll-tax-grid">
@@ -1909,6 +2004,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260617-task-cleanup-6"></script>
+    <script src="app.js?v=20260707-lark-refresh-9"></script>
   </body>
 </html>
