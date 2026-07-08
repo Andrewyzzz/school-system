@@ -126,6 +126,7 @@ http://127.0.0.1:4173/api/health
 
 第一阶段文档和模板：
 
+- **部署与验收总手册（两阶段全流程）**：`docs/deployment-and-acceptance-guide.md`
 - 系统更新流程：`docs/system-update-process.md`
 - 更新日志：`CHANGELOG.md`
 - 第一阶段 PRD：`docs/学校教学薪资管理系统-第一阶段PRD.md`

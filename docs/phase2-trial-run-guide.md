@@ -2,7 +2,7 @@
 
 更新时间：2026-07-08
 适用版本：第二阶段 M1~M5 交付版
-配套文档：`docs/学校人事管控系统-第二阶段PRD.md`、`docs/system-update-process.md`（环境变量）
+配套文档：`docs/学校人事管控系统-第二阶段PRD.md`、`docs/deployment-and-acceptance-guide.md`（部署与验收总流程）
 
 ## 0. 试运行账号
 
