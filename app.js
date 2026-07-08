@@ -1569,13 +1569,32 @@ function currentSettlementMonth() {
 function runtimeEnvironmentName() {
   const host = window.location.hostname;
   if (host === "127.0.0.1" || host === "localhost" || host === "") return "本地开发";
+  // 私有网段（局域网调试、手机真机预览）也视为本地开发环境
+  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return "本地开发";
   return "正式环境";
+}
+
+let healthTermName = "";
+
+// 登录页（未认证）也能显示当前学期：从公开的 /api/health 读取
+async function loadHealthTermName() {
+  try {
+    const health = await apiRequest("/api/health");
+    healthTermName = health.currentTermName || "";
+    renderEnvironmentLabels();
+  } catch (error) {
+    // 后端不可用时保持默认文案
+  }
 }
 
 function runtimeContextLabel() {
   const term = termManagementState.currentTerm;
   const month = currentSettlementMonth();
-  if (!term?.name) return `${runtimeEnvironmentName()} · 等待读取学期`;
+  if (!term?.name) {
+    return healthTermName
+      ? `${runtimeEnvironmentName()} · ${healthTermName}`
+      : `${runtimeEnvironmentName()} · 等待读取学期`;
+  }
   return `${runtimeEnvironmentName()} · ${term.name} · 当前结算月：${formatMonthLabel(month)}`;
 }
 
@@ -12564,6 +12583,7 @@ document.addEventListener("click", async (event) => {
   if (demoLoginButton) {
     document.querySelector("#loginUsername").value = demoLoginButton.dataset.demoLogin;
     document.querySelector("#loginPassword").value = "123456";
+    await authenticate(demoLoginButton.dataset.demoLogin, "123456");
     return;
   }
 
@@ -14235,6 +14255,7 @@ document.addEventListener("click", async (event) => {
 
 applyNavIcons();
 applyEnvironmentMode();
+if (apiEnabled()) loadHealthTermName();
 
 // 行政排课页是超长配置页：自动收集各 panel 的标题，生成吸顶分节导航，
 // 点击平滑滚动定位，滚动时高亮当前分节。

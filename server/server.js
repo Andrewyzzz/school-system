@@ -446,6 +446,7 @@ async function handleApi(req, res, db, url) {
         teacherCount: db.teachers.length,
         accountCount: db.accounts.length,
         seedVersion: db.meta.seedVersion,
+        currentTermName: (db.terms || []).find((term) => term.current)?.name || "",
         schedulingSolver: checkSolverAvailability().available ? "ortools-cp-sat" : "fallback-heuristic",
         storage: {
           driver: DB_DRIVER,
