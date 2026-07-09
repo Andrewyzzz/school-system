@@ -187,6 +187,21 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+// SSE 实时推送（P1）：维护活跃连接，写操作后广播主题，客户端据此刷新
+// 单实例内广播；多实例部署需接 Redis pub/sub（见 docs/deployment-and-acceptance-guide 运维章节）
+const sseClients = new Set();
+
+function broadcastEvent(topic, payload = {}) {
+  const data = JSON.stringify({ topic, ...payload, at: Date.now() });
+  for (const client of sseClients) {
+    try {
+      client.write(`event: ${topic}\ndata: ${data}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
 function sendError(res, statusCode, message, details = null) {
   sendJson(res, statusCode, {
     error: {
@@ -471,6 +486,37 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    // SSE 事件流：EventSource 无法设置 Authorization 头，token 走查询参数
+    if (req.method === "GET" && url.pathname === "/api/events") {
+      const token = url.searchParams.get("token") || "";
+      const session = token ? findActiveSession(db, token) : null;
+      if (!session) {
+        sendError(res, 401, "请先登录");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+      });
+      res.write("retry: 5000\n\n");
+      res.write(`event: ready\ndata: {"topic":"ready"}\n\n`);
+      sseClients.add(res);
+      const keepAlive = setInterval(() => {
+        try {
+          res.write(": keep-alive\n\n");
+        } catch {
+          clearInterval(keepAlive);
+        }
+      }, 25000);
+      req.on("close", () => {
+        clearInterval(keepAlive);
+        sseClients.delete(res);
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
       const clientIp = clientIpFor(req);
       if (loginIpLimited(clientIp)) {
@@ -549,6 +595,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const notification = createNotification(db, body, auth.account);
       await saveDatabase(db);
+      broadcastEvent("notification");
       sendJson(res, 200, { notification });
       return;
     }
@@ -1518,6 +1565,7 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const flow = createProfileChangeRequest(db, auth.account, body.changes || {}, body.reason);
         await saveDatabase(db);
+        broadcastEvent("hr-flow");
         sendJson(res, 200, { request: flow });
         return;
       }
@@ -1575,6 +1623,8 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const flow = createHrFlow(db, auth.account, body, hrContext);
         await saveDatabase(db);
+        broadcastEvent("hr-flow");
+        broadcastEvent("notification");
         sendJson(res, 200, { flow });
         return;
       }
@@ -1597,6 +1647,8 @@ async function handleApi(req, res, db, url) {
             ? withdrawHrFlow(db, flowMatch[1], auth.account)
             : approveHrFlowStep(db, flowMatch[1], action, body.comment, auth.account, hrContext);
         await saveDatabase(db);
+        broadcastEvent("hr-flow");
+        broadcastEvent("notification");
         sendJson(res, 200, { flow });
         return;
       }

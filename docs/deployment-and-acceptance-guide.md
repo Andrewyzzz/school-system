@@ -213,6 +213,7 @@ systemctl start school-system
 | JSON 备份（json/dual 阶段） | 自动（滚动 50 份） | 确认 `server/data/backups/` 所在磁盘独立或有外部同步 |
 | 密钥审计 | 每季度 | 核对 HR_ENCRYPTION_KEY 离线备份完好；轮换需先解密重加密（专项操作，勿直接换） |
 | 审批超时 | 自动（小时级扫描） | readiness 的 hr_timeout_scanner 反映任务存活 |
+| SSE 实时推送 | 自动 | /api/events 单实例广播待办/通知；多实例部署需接 Redis pub/sub 转发广播，否则跨实例事件不通 |
 | 磁盘/连接数 | 监控系统 | LimitNOFILE=65535；磁盘 >80% 告警 |
 
 ## 9. 验收签字表（模板）

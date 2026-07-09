@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260707-lark-refresh-11" />
+    <link rel="stylesheet" href="styles.css?v=20260708-ux-p0p1-2" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -168,6 +168,11 @@
             <h1 id="viewTitle">任课老师工作台</h1>
           </div>
           <div class="top-actions">
+            <button class="ghost-button command-trigger" data-open-command type="button" title="全局搜索（⌘K）">
+              <span aria-hidden="true">🔍</span>
+              搜索
+              <kbd>⌘K</kbd>
+            </button>
             <button class="ghost-button" id="resetDemo" type="button" title="恢复试运行数据">
               <span aria-hidden="true">↻</span>
               重置数据
@@ -1965,6 +1970,8 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="dialog-root" id="dialogRoot" aria-hidden="true"></div>
+    <div class="command-root" id="commandRoot" aria-hidden="true"></div>
 
     <script
       src="vendor/qrcode.min.js"
@@ -1974,6 +1981,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260707-lark-refresh-11"></script>
+    <script src="app.js?v=20260708-ux-p0p1-2"></script>
   </body>
 </html>

@@ -719,6 +719,7 @@ const loginUsers = [
 let state = loadSavedState();
 let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
+let eventStream = null; // SSE 连接（在 saveBackendSession 中使用，需先于其声明避免 TDZ）
 let backendAuthExpiredHandled = false;
 let qrScanner = null;
 let courseRulesEditMode = false;
@@ -861,6 +862,7 @@ let draggedScheduleAssignmentId = "";
 if (backendSession?.account) {
   sessionAccountId = upsertBackendAccount(backendSession.account);
   state.currentAccountId = sessionAccountId;
+  connectEventStream();
 } else if (sessionAccountId && state.accounts.some((account) => account.id === sessionAccountId)) {
   state.currentAccountId = sessionAccountId;
 } else {
@@ -1138,14 +1140,73 @@ function saveBackendSession(session) {
   } catch (error) {
     // API session persistence is best-effort.
   }
+  connectEventStream();
 }
 
 function clearBackendSession() {
   backendSession = null;
+  disconnectEventStream();
   try {
     window.localStorage.removeItem(API_SESSION_KEY);
   } catch (error) {
     // Nothing else to do.
+  }
+}
+
+// SSE 实时推送（P1）：订阅后端事件，待办/通知无需刷新即时更新
+function connectEventStream() {
+  disconnectEventStream();
+  if (!backendSession?.token || typeof EventSource === "undefined") return;
+  try {
+    eventStream = new EventSource(`/api/events?token=${encodeURIComponent(backendSession.token)}`);
+  } catch (error) {
+    return;
+  }
+  // 审批流变化：刷新待办数（若在审批页则重载列表）
+  eventStream.addEventListener("hr-flow", () => {
+    if (!backendMode()) return;
+    if (["hr", "system_admin", "division_head"].includes(currentRole())) {
+      if (state.activeView === "hrFlows") {
+        loadHrFlows({ status: hrFlowsState.status, todoOnly: hrFlowsState.todoOnly });
+      } else {
+        refreshHrTodoBadge();
+      }
+    }
+  });
+  // 新通知：刷新通知中心与角标
+  eventStream.addEventListener("notification", () => {
+    if (backendMode()) loadBackendNotifications().then(render);
+  });
+  // 连接后先拉一次待办角标（HR 系角色）
+  if (["hr", "system_admin", "division_head"].includes(currentRole())) refreshHrTodoBadge();
+}
+
+function disconnectEventStream() {
+  if (eventStream) {
+    eventStream.close();
+    eventStream = null;
+  }
+}
+
+// 侧栏导航「人事审批」项的实时待办角标
+async function refreshHrTodoBadge() {
+  try {
+    const result = await apiRequest("/api/hr/todos");
+    const navBtn = document.querySelector('.nav-item[data-view="hrFlows"]');
+    if (!navBtn) return;
+    let badge = navBtn.querySelector(".nav-badge");
+    if (result.count > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "nav-badge";
+        navBtn.appendChild(badge);
+      }
+      badge.textContent = result.count > 99 ? "99+" : String(result.count);
+    } else if (badge) {
+      badge.remove();
+    }
+  } catch (error) {
+    // 角标刷新失败静默
   }
 }
 
@@ -2959,12 +3020,12 @@ function renderSettlementStatusBoard() {
   if (!board) return;
 
   if (financeTeacherPage.loading && !financeTeacherPage.items.length) {
-    board.innerHTML = `<div class="empty-state compact">正在加载老师结算状态...</div>`;
+    board.innerHTML = skeletonListHtml(5);
     return;
   }
 
   if (financeTeacherPage.error) {
-    board.innerHTML = `<div class="empty-state compact">${escapeHtml(financeTeacherPage.error)}</div>`;
+    board.innerHTML = loadErrorHtml(financeTeacherPage.error, "financeTeachers");
     return;
   }
 
@@ -3564,7 +3625,13 @@ async function unlockBackendPayroll() {
   const teacherId = state.selectedFinanceTeacherId;
   if (!backendMode() || !isFinanceRole() || !teacherId) return;
   const month = financeTeacherDetailState.month || currentSettlementMonth();
-  const reason = window.prompt("请输入解锁原因，系统会保留原锁定快照和操作记录。", "财务更正后重新核算");
+  const reason = await promptDialog("解锁工资明细", {
+    label: "解锁原因",
+    value: "财务更正后重新核算",
+    textarea: true,
+    description: "系统会保留原锁定快照和操作记录。",
+    confirmText: "确认解锁",
+  });
   if (reason === null) return;
   financeTeacherDetailState = { ...financeTeacherDetailState, loading: true, error: "" };
   renderSettlement();
@@ -3687,9 +3754,10 @@ async function saveBackendTeacherPayrollDraft() {
 async function batchGenerateBackendPayroll() {
   if (!backendMode() || !isFinanceRole()) return;
   const month = currentSettlementMonth();
-  const confirmed = window.confirm(
-    "发布本月工资明细会把所有在职老师的已保存工资单发布到老师端；未保存的老师会按当前规则自动生成并发布。确认继续吗？",
-  );
+  const confirmed = await confirmDialog("发布本月工资明细", {
+    description: "会把所有在职老师的已保存工资单发布到老师端；未保存的老师会按当前规则自动生成并发布。",
+    confirmText: "发布",
+  });
   if (!confirmed) return;
   try {
     const result = await apiRequest("/api/payroll/batch-generate", {
@@ -3708,9 +3776,10 @@ async function batchGenerateBackendPayroll() {
 async function batchLockBackendPayroll() {
   if (!backendMode() || !isFinanceRole()) return;
   const month = currentSettlementMonth();
-  const confirmed = window.confirm(
-    "批量锁定只会处理已由老师确认、财务处理完成、且没有待处理/异常课次的工资单；不符合条件的老师会保留失败原因。确认继续吗？",
-  );
+  const confirmed = await confirmDialog("批量锁定工资", {
+    description: "只处理已由老师确认、财务处理完成、且没有待处理/异常课次的工资单；不符合条件的老师会保留失败原因。",
+    confirmText: "批量锁定",
+  });
   if (!confirmed) return;
   try {
     const result = await apiRequest("/api/payroll/batch-lock", {
@@ -4122,7 +4191,11 @@ async function loadPersonnelPage(overrides = {}) {
 
 async function resetBackendAccountPassword(accountId) {
   if (!backendMode() || currentRole() !== "system_admin" || !accountId) return;
-  const confirmed = window.confirm("确认将该账号密码重置为 123456？账号下次登录后应立即修改密码。");
+  const confirmed = await confirmDialog("重置密码", {
+    description: "将该账号密码重置为 123456，账号下次登录后应立即修改密码。",
+    confirmText: "重置",
+    danger: true,
+  });
   if (!confirmed) return;
   try {
     const result = await apiRequest(`/api/accounts/${encodeURIComponent(accountId)}/reset-password`, {
@@ -4139,7 +4212,11 @@ async function resetBackendAccountPassword(accountId) {
 async function updateBackendAccountStatus(accountId, nextStatus) {
   if (!backendMode() || currentRole() !== "system_admin" || !accountId) return;
   const actionText = nextStatus === "disabled" ? "停用" : "启用";
-  const confirmed = window.confirm(`确认${actionText}该账号？`);
+  const confirmed = await confirmDialog(`${actionText}账号`, {
+    description: `确认${actionText}该账号？`,
+    confirmText: actionText,
+    danger: nextStatus === "disabled",
+  });
   if (!confirmed) return;
   try {
     const result = await apiRequest(`/api/accounts/${encodeURIComponent(accountId)}/status`, {
@@ -4341,7 +4418,11 @@ async function archiveBackendTerm(termId) {
   if (!backendMode() || currentRole() !== "admin") return;
   const term = termManagementState.terms.find((item) => item.id === termId);
   if (!term) return;
-  if (!window.confirm(`确认归档“${term.name}”？归档后该学期课表、调课和工资操作将只读。`)) return;
+  if (!(await confirmDialog("归档学期", {
+    description: `归档“${term.name}”后，该学期课表、调课和工资操作将只读。`,
+    confirmText: "归档",
+    danger: true,
+  }))) return;
   termManagementState = { ...termManagementState, loading: true, error: "" };
   renderAdminScheduling();
   try {
@@ -4364,7 +4445,11 @@ async function deleteBackendTerm(termId) {
   if (!backendMode() || currentRole() !== "admin") return;
   const term = termManagementState.terms.find((item) => item.id === termId);
   if (!term) return;
-  if (!window.confirm(`确认删除误建学期“${term.name}”？仅未投入使用的计划学期可以删除，已产生业务数据的学期会被系统拦截。`)) return;
+  if (!(await confirmDialog("删除学期", {
+    description: `删除误建学期“${term.name}”？仅未投入使用的计划学期可以删除，已产生业务数据的学期会被系统拦截。`,
+    confirmText: "删除",
+    danger: true,
+  }))) return;
   termManagementState = { ...termManagementState, loading: true, error: "" };
   renderAdminScheduling();
   try {
@@ -8594,7 +8679,11 @@ async function autoAssignClassSubjectTeachers(overwrite = false) {
   }
   if (
     overwrite &&
-    !window.confirm("全部重新分配会覆盖当前已保存的任课老师配置（含手工指定），确定继续吗？")
+    !(await confirmDialog("全部重新分配", {
+      description: "会覆盖当前已保存的任课老师配置（含手工指定），确定继续吗？",
+      confirmText: "重新分配",
+      danger: true,
+    }))
   ) {
     return;
   }
@@ -12559,6 +12648,330 @@ function showToast(text) {
   }, 2200);
 }
 
+// ===========================================================================
+// 通用弹层组件（P0）：promise-based，替代原生 window.prompt / window.confirm
+// openDialog({ title, description, fields, confirmText, cancelText, danger, onConfirm })
+//   fields: [{ name, label, type='text'|'textarea'|'select', value, placeholder,
+//              required, options:[{value,label}], rows, hint }]
+//   返回：确认时 resolve(valuesObject)；取消时 resolve(null)
+//   onConfirm(values) 可返回 Promise —— 期间确认按钮进入 loading，抛错则就地提示且不关闭
+// ===========================================================================
+let activeDialogClose = null;
+
+function openDialog(config = {}) {
+  const {
+    title = "",
+    description = "",
+    fields = [],
+    confirmText = "确认",
+    cancelText = "取消",
+    danger = false,
+    onConfirm = null,
+  } = config;
+
+  return new Promise((resolve) => {
+    const root = document.querySelector("#dialogRoot");
+    const fieldHtml = fields
+      .map((field) => {
+        const id = `dialogField-${field.name}`;
+        const required = field.required ? '<span class="dialog-required">*</span>' : "";
+        let control;
+        if (field.type === "textarea") {
+          control = `<textarea id="${id}" data-dialog-field="${escapeHtml(field.name)}" rows="${field.rows || 3}" placeholder="${escapeHtml(field.placeholder || "")}">${escapeHtml(field.value || "")}</textarea>`;
+        } else if (field.type === "select") {
+          control = `<select id="${id}" data-dialog-field="${escapeHtml(field.name)}">${(field.options || [])
+            .map((opt) => `<option value="${escapeHtml(opt.value)}" ${opt.value === field.value ? "selected" : ""}>${escapeHtml(opt.label)}</option>`)
+            .join("")}</select>`;
+        } else {
+          control = `<input id="${id}" data-dialog-field="${escapeHtml(field.name)}" type="${field.type || "text"}" value="${escapeHtml(field.value || "")}" placeholder="${escapeHtml(field.placeholder || "")}" />`;
+        }
+        return `
+          <label class="dialog-field">
+            <span>${escapeHtml(field.label || "")}${required}</span>
+            ${control}
+            ${field.hint ? `<small>${escapeHtml(field.hint)}</small>` : ""}
+          </label>
+        `;
+      })
+      .join("");
+
+    root.innerHTML = `
+      <div class="dialog-overlay" data-dialog-overlay>
+        <div class="dialog-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}">
+          <div class="dialog-head">
+            <h3>${escapeHtml(title)}</h3>
+            ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+          </div>
+          ${fieldHtml ? `<div class="dialog-body">${fieldHtml}</div>` : ""}
+          <p class="dialog-error" data-dialog-error></p>
+          <div class="dialog-actions">
+            <button class="ghost-button" data-dialog-cancel type="button">${escapeHtml(cancelText)}</button>
+            <button class="${danger ? "danger-button" : "primary-button"}" data-dialog-confirm type="button">${escapeHtml(confirmText)}</button>
+          </div>
+        </div>
+      </div>
+    `;
+    root.setAttribute("aria-hidden", "false");
+    document.body.classList.add("dialog-open");
+
+    const overlay = root.querySelector("[data-dialog-overlay]");
+    const confirmButton = root.querySelector("[data-dialog-confirm]");
+    const errorEl = root.querySelector("[data-dialog-error]");
+    const firstControl = root.querySelector("[data-dialog-field]");
+    (firstControl || confirmButton).focus();
+
+    let closed = false;
+    const cleanup = (result) => {
+      if (closed) return;
+      closed = true;
+      root.innerHTML = "";
+      root.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("dialog-open");
+      document.removeEventListener("keydown", onKey, true);
+      activeDialogClose = null;
+      resolve(result);
+    };
+    activeDialogClose = () => cleanup(null);
+
+    const collect = () => {
+      const values = {};
+      root.querySelectorAll("[data-dialog-field]").forEach((el) => {
+        values[el.dataset.dialogField] = el.value.trim();
+      });
+      return values;
+    };
+
+    const submit = async () => {
+      const values = collect();
+      const missing = fields.find((field) => field.required && !values[field.name]);
+      if (missing) {
+        errorEl.textContent = `请填写「${missing.label}」`;
+        root.querySelector(`[data-dialog-field="${missing.name}"]`)?.focus();
+        return;
+      }
+      if (!onConfirm) {
+        cleanup(values);
+        return;
+      }
+      confirmButton.disabled = true;
+      confirmButton.classList.add("is-loading");
+      errorEl.textContent = "";
+      try {
+        await onConfirm(values);
+        cleanup(values);
+      } catch (error) {
+        errorEl.textContent = error.message || "操作失败，请重试";
+        confirmButton.disabled = false;
+        confirmButton.classList.remove("is-loading");
+      }
+    };
+
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cleanup(null);
+      } else if (event.key === "Enter" && !event.shiftKey && event.target.tagName !== "TEXTAREA") {
+        event.preventDefault();
+        submit();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) cleanup(null);
+    });
+    root.querySelector("[data-dialog-cancel]").addEventListener("click", () => cleanup(null));
+    confirmButton.addEventListener("click", submit);
+  });
+}
+
+// ===========================================================================
+// 全局命令面板 / 搜索（P1）：⌘K / Ctrl+K 或顶栏搜索入口唤起
+//   - 功能页：按当前角色可见的视图，输入即过滤
+//   - 人员：hr 系角色搜档案、财务搜教师；键盘上下选择、回车直达
+// ===========================================================================
+let commandState = { open: false, query: "", items: [], activeIndex: 0, reqId: 0 };
+
+function commandNavItems() {
+  const items = [];
+  document.querySelectorAll(".nav-item[data-view]").forEach((btn) => {
+    const view = btn.dataset.view;
+    if (!views[view] || !viewAllowed(view)) return;
+    items.push({
+      kind: "page",
+      label: views[view].title || view,
+      sub: "功能页",
+      run: () => switchView(view),
+    });
+  });
+  return items;
+}
+
+function renderCommandResults() {
+  const root = document.querySelector("#commandRoot");
+  const results = root.querySelector("[data-command-results]");
+  if (!results) return;
+  if (!commandState.items.length) {
+    results.innerHTML = `<div class="command-empty">${commandState.query ? "没有匹配结果" : "输入关键词搜索功能或人员"}</div>`;
+    return;
+  }
+  results.innerHTML = commandState.items
+    .map(
+      (item, index) => `
+        <button class="command-item ${index === commandState.activeIndex ? "active" : ""}" data-command-index="${index}" type="button">
+          <span class="command-item-icon">${item.kind === "page" ? "▦" : "☷"}</span>
+          <span class="command-item-body">
+            <strong>${escapeHtml(item.label)}</strong>
+            <small>${escapeHtml(item.sub || "")}</small>
+          </span>
+        </button>
+      `,
+    )
+    .join("");
+  const active = results.querySelector(".command-item.active");
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+function computeCommandItems() {
+  const query = commandState.query.trim().toLowerCase();
+  const pages = commandNavItems().filter((item) => !query || item.label.toLowerCase().includes(query));
+  commandState.items = pages;
+  commandState.activeIndex = 0;
+  renderCommandResults();
+  if (query.length >= 1 && backendMode()) fetchCommandPeople(query);
+}
+
+async function fetchCommandPeople(query) {
+  const role = currentRole();
+  const reqId = ++commandState.reqId;
+  let people = [];
+  try {
+    if (["hr", "system_admin", "division_head"].includes(role)) {
+      const result = await apiRequest(`/api/hr/employees?search=${encodeURIComponent(query)}&pageSize=6`);
+      people = (result.items || []).map((emp) => ({
+        kind: "person",
+        label: emp.personName,
+        sub: `${emp.employeeNo} · ${emp.orgUnitName || "未分配"} · ${emp.statusLabel}`,
+        run: () => {
+          switchView("hrEmployees");
+          loadHrEmployeeDetail(emp.id);
+        },
+      }));
+    } else if (role === "finance") {
+      const result = await apiRequest(`/api/teachers?page=1&pageSize=6&search=${encodeURIComponent(query)}`);
+      people = (result.items || []).map((teacher) => ({
+        kind: "person",
+        label: teacher.name,
+        sub: `${teacher.employeeNo || teacher.id} · ${teacher.department || teacher.stageName || ""}`,
+        run: () => {
+          state.selectedFinanceTeacherId = teacher.id;
+          switchView("financeRecords");
+          if (typeof loadBackendAttendanceRecords === "function") loadBackendAttendanceRecords(teacher.id);
+        },
+      }));
+    }
+  } catch (error) {
+    // 搜人失败不影响功能页结果
+  }
+  if (reqId !== commandState.reqId || !commandState.open) return;
+  // 功能页在前、人员在后
+  commandState.items = [...commandNavItems().filter((item) => item.label.toLowerCase().includes(query)), ...people];
+  if (commandState.activeIndex >= commandState.items.length) commandState.activeIndex = 0;
+  renderCommandResults();
+}
+
+function closeCommandPalette() {
+  const root = document.querySelector("#commandRoot");
+  root.innerHTML = "";
+  root.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("command-open");
+  commandState.open = false;
+}
+
+function openCommandPalette() {
+  if (commandState.open) return;
+  if (document.querySelector("#appShell").classList.contains("is-hidden")) return; // 未登录不开
+  commandState = { open: true, query: "", items: [], activeIndex: 0, reqId: 0 };
+  const root = document.querySelector("#commandRoot");
+  root.innerHTML = `
+    <div class="command-overlay" data-command-overlay>
+      <div class="command-panel" role="dialog" aria-modal="true" aria-label="全局搜索">
+        <input class="command-input" data-command-input type="text" placeholder="搜索功能页、人员…" autocomplete="off" />
+        <div class="command-results" data-command-results></div>
+        <div class="command-hint">↑↓ 选择 · ↵ 打开 · Esc 关闭</div>
+      </div>
+    </div>
+  `;
+  root.setAttribute("aria-hidden", "false");
+  document.body.classList.add("command-open");
+  const input = root.querySelector("[data-command-input]");
+  input.focus();
+  computeCommandItems();
+
+  input.addEventListener("input", () => {
+    commandState.query = input.value;
+    computeCommandItems();
+  });
+  root.querySelector("[data-command-overlay]").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeCommandPalette();
+  });
+  root.querySelector("[data-command-results]").addEventListener("click", (event) => {
+    const item = event.target.closest("[data-command-index]");
+    if (!item) return;
+    const chosen = commandState.items[Number(item.dataset.commandIndex)];
+    closeCommandPalette();
+    chosen?.run();
+  });
+}
+
+// 骨架屏：加载态占位，替代"加载中…"文字
+function skeletonListHtml(rows = 4) {
+  return `<div class="skeleton-list">${Array.from({ length: rows }, () => `<div class="skeleton-row"></div>`).join("")}</div>`;
+}
+
+// 加载失败态：常驻 + 重试按钮（data-retry-action 由委托捕获）
+function loadErrorHtml(message, retryKey) {
+  return `
+    <div class="load-error">
+      <p>${escapeHtml(message || "加载失败")}</p>
+      <button class="ghost-button compact-button" data-retry-action="${escapeHtml(retryKey)}" type="button">重试</button>
+    </div>
+  `;
+}
+
+// 便捷封装：确认框（危险操作用 danger:true）
+function confirmDialog(title, options = {}) {
+  return openDialog({
+    title,
+    description: options.description || "",
+    confirmText: options.confirmText || "确认",
+    cancelText: options.cancelText || "取消",
+    danger: options.danger || false,
+  }).then((result) => result !== null);
+}
+
+// 便捷封装：单字段输入框，返回 string 或 null（取消）
+function promptDialog(title, options = {}) {
+  return openDialog({
+    title,
+    description: options.description || "",
+    confirmText: options.confirmText || "提交",
+    danger: options.danger || false,
+    fields: [
+      {
+        name: "value",
+        label: options.label || title,
+        type: options.textarea ? "textarea" : "text",
+        value: options.value || "",
+        placeholder: options.placeholder || "",
+        required: options.required !== false,
+        rows: options.rows,
+        hint: options.hint,
+      },
+    ],
+  }).then((result) => (result === null ? null : result.value));
+}
+
 document.addEventListener("input", (event) => {
   const assignmentInput = event.target.closest("[data-class-subject-teacher-input]");
   if (assignmentInput) {
@@ -13158,9 +13571,9 @@ function renderHrEmployees() {
 
   const listEl = document.querySelector("#hrEmployeeList");
   if (hrEmployeePage.error) {
-    listEl.innerHTML = `<div class="empty-state">${escapeHtml(hrEmployeePage.error)}</div>`;
+    listEl.innerHTML = loadErrorHtml(hrEmployeePage.error, "hrEmployees");
   } else if (hrEmployeePage.loading && !hrEmployeePage.items.length) {
-    listEl.innerHTML = `<div class="empty-state">加载中…</div>`;
+    listEl.innerHTML = skeletonListHtml(5);
   } else if (!hrEmployeePage.items.length) {
     listEl.innerHTML = `<div class="empty-state">没有匹配的档案</div>`;
   } else {
@@ -13851,7 +14264,9 @@ function renderHrFlows() {
 
   const listEl = document.querySelector("#hrFlowList");
   if (hrFlowsState.error) {
-    listEl.innerHTML = `<div class="empty-state">${escapeHtml(hrFlowsState.error)}</div>`;
+    listEl.innerHTML = loadErrorHtml(hrFlowsState.error, "hrFlows");
+  } else if (hrFlowsState.loading && !hrFlowsState.flows.length) {
+    listEl.innerHTML = skeletonListHtml(4);
   } else if (!hrFlowsState.flows.length) {
     listEl.innerHTML = `<div class="empty-state">${hrFlowsState.todoOnly ? "当前没有需要您处理的审批" : "暂无流程记录"}</div>`;
   } else {
@@ -13888,6 +14303,18 @@ async function hrApiAction(fn, successText) {
 }
 
 document.addEventListener("click", async (event) => {
+  // 加载失败重试（骨架屏错误态）
+  const retryButton = event.target.closest("[data-retry-action]");
+  if (retryButton) {
+    const key = retryButton.dataset.retryAction;
+    if (key === "hrEmployees") loadHrEmployeePage();
+    else if (key === "hrFlows") loadHrFlows();
+    else if (key === "hrOrg") loadHrOrgData();
+    else if (key === "hrAudit") loadHrAuditPage();
+    else if (key === "financeTeachers") loadFinanceTeacherPage({ page: financeTeacherPage.page });
+    return;
+  }
+
   const employeeRow = event.target.closest("[data-hr-employee]");
   if (employeeRow) {
     loadHrEmployeeDetail(employeeRow.dataset.hrEmployee);
@@ -13965,7 +14392,12 @@ document.addEventListener("click", async (event) => {
   const sensitiveButton = event.target.closest("[data-hr-sensitive]");
   if (sensitiveButton) {
     const field = sensitiveButton.dataset.hrSensitive;
-    const reason = window.prompt("查看完整敏感信息需要填写原因（将记入审计）：", "");
+    const reason = await promptDialog("查看完整敏感信息", {
+      label: "查看原因",
+      placeholder: "将记入人事审计",
+      description: "本次查看会记入审计（含操作人、时间和 IP）。",
+      confirmText: "查看",
+    });
     if (reason === null) return;
     try {
       const result = await apiRequest(`/api/hr/employees/${hrEmployeeDetailState.id}/sensitive-view`, {
@@ -14029,7 +14461,12 @@ document.addEventListener("click", async (event) => {
 
   const approveButton = event.target.closest("[data-hr-pcr-approve]");
   if (approveButton) {
-    const comment = window.prompt("审核意见（可选）：", "核实通过");
+    const comment = await promptDialog("通过变更申请", {
+      label: "审核意见",
+      value: "核实通过",
+      required: false,
+      confirmText: "通过",
+    });
     if (comment === null) return;
     await hrApiAction(
       () =>
@@ -14043,7 +14480,12 @@ document.addEventListener("click", async (event) => {
   }
   const rejectButton = event.target.closest("[data-hr-pcr-reject]");
   if (rejectButton) {
-    const comment = window.prompt("拒绝原因（必填）：", "");
+    const comment = await promptDialog("拒绝变更申请", {
+      label: "拒绝原因",
+      placeholder: "请说明拒绝理由",
+      confirmText: "拒绝",
+      danger: true,
+    });
     if (!comment) return;
     await hrApiAction(
       () =>
@@ -14073,15 +14515,20 @@ document.addEventListener("click", async (event) => {
 
   const renameButton = event.target.closest("[data-hr-org-rename]");
   if (renameButton) {
-    const name = window.prompt("新的节点名称：", "");
-    if (!name) return;
-    const reason = window.prompt("修改原因（必填）：", "");
-    if (!reason) return;
+    const result = await openDialog({
+      title: "重命名节点",
+      confirmText: "保存",
+      fields: [
+        { name: "name", label: "新的节点名称", required: true },
+        { name: "reason", label: "修改原因", required: true },
+      ],
+    });
+    if (!result) return;
     await hrApiAction(
       () =>
         apiRequest(`/api/hr/org-units/${renameButton.dataset.hrOrgRename}`, {
           method: "PATCH",
-          body: { name, reason },
+          body: { name: result.name, reason: result.reason },
         }),
       "节点已更新",
     );
@@ -14090,7 +14537,12 @@ document.addEventListener("click", async (event) => {
   const orgStatusButton = event.target.closest("[data-hr-org-status]");
   if (orgStatusButton) {
     const nextStatus = orgStatusButton.dataset.nextStatus;
-    const reason = window.prompt(`${nextStatus === "disabled" ? "停用" : "启用"}原因（必填）：`, "");
+    const reason = await promptDialog(`${nextStatus === "disabled" ? "停用" : "启用"}节点`, {
+      label: "原因",
+      required: true,
+      confirmText: nextStatus === "disabled" ? "停用" : "启用",
+      danger: nextStatus === "disabled",
+    });
     if (!reason) return;
     await hrApiAction(
       () =>
@@ -14122,37 +14574,51 @@ document.addEventListener("click", async (event) => {
   const versionButton = event.target.closest("[data-hr-tpl-version]");
   if (versionButton) {
     const template = hrOrgState.templates.find((item) => item.id === versionButton.dataset.hrTplVersion);
-    const payloadText = window.prompt(
-      "新版本内容（JSON，基于最新版修改）：",
-      JSON.stringify(template?.versions?.[0]?.payload || {}),
-    );
-    if (!payloadText) return;
-    const reason = window.prompt("发布原因（必填）：", "");
-    if (!reason) return;
+    const result = await openDialog({
+      title: "发布模板新版本",
+      confirmText: "发布",
+      fields: [
+        {
+          name: "payloadText",
+          label: "新版本内容（JSON，基于最新版修改）",
+          type: "textarea",
+          rows: 6,
+          value: JSON.stringify(template?.versions?.[0]?.payload || {}, null, 2),
+          required: true,
+        },
+        { name: "reason", label: "发布原因", required: true },
+      ],
+    });
+    if (!result) return;
     await hrApiAction(async () => {
       let payload;
       try {
-        payload = JSON.parse(payloadText);
+        payload = JSON.parse(result.payloadText);
       } catch {
         throw new Error("JSON 格式错误，未提交");
       }
       await apiRequest(`/api/hr/salary-templates/${versionButton.dataset.hrTplVersion}/versions`, {
         method: "POST",
-        body: { payload, reason },
+        body: { payload, reason: result.reason },
       });
     }, "新版本已发布");
     return;
   }
   const applyButton = event.target.closest("[data-hr-tpl-apply]");
   if (applyButton) {
-    const nos = window.prompt("要应用的员工工号（逗号分隔）：", "");
-    if (!nos) return;
-    const reason = window.prompt("应用原因（必填）：", "");
-    if (!reason) return;
+    const dialogResult = await openDialog({
+      title: "批量应用模板",
+      confirmText: "应用",
+      fields: [
+        { name: "nos", label: "员工工号（逗号分隔）", placeholder: "如 FY0001,FY0002", required: true },
+        { name: "reason", label: "应用原因", required: true },
+      ],
+    });
+    if (!dialogResult) return;
     await hrApiAction(async () => {
       const result = await apiRequest(`/api/hr/salary-templates/${applyButton.dataset.hrTplApply}/apply`, {
         method: "POST",
-        body: { employeeNos: nos.split(/[，,]/), reason },
+        body: { employeeNos: dialogResult.nos.split(/[，,]/), reason: dialogResult.reason },
       });
       showToast(`已应用 ${result.applied.length} 人，跳过 ${result.skipped.length} 人`);
     });
@@ -14264,7 +14730,9 @@ document.addEventListener("click", async (event) => {
   const rejectFlow = event.target.closest("[data-hr-flow-reject]");
   if (approveFlow || rejectFlow) {
     const isApprove = Boolean(approveFlow);
-    const comment = window.prompt(isApprove ? "审批意见（可选）：" : "拒绝原因（必填）：", isApprove ? "同意" : "");
+    const comment = isApprove
+      ? await promptDialog("通过审批", { label: "审批意见", value: "同意", required: false, confirmText: "通过" })
+      : await promptDialog("拒绝审批", { label: "拒绝原因", placeholder: "请说明拒绝理由", confirmText: "拒绝", danger: true });
     if (comment === null || (!isApprove && !comment)) return;
     try {
       await apiRequest(
@@ -14296,6 +14764,45 @@ document.addEventListener("click", async (event) => {
     });
     return;
   }
+});
+
+// 全局快捷键：⌘K / Ctrl+K 唤起命令面板；面板内上下选择、回车打开、Esc 关闭
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && (event.key === "k" || event.key === "K")) {
+    event.preventDefault();
+    if (commandState.open) closeCommandPalette();
+    else openCommandPalette();
+    return;
+  }
+  if (!commandState.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (commandState.items.length) {
+      commandState.activeIndex = (commandState.activeIndex + 1) % commandState.items.length;
+      renderCommandResults();
+    }
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (commandState.items.length) {
+      commandState.activeIndex = (commandState.activeIndex - 1 + commandState.items.length) % commandState.items.length;
+      renderCommandResults();
+    }
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    const chosen = commandState.items[commandState.activeIndex];
+    if (chosen) {
+      closeCommandPalette();
+      chosen.run();
+    }
+  }
+});
+
+// 顶栏搜索入口
+document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-open-command]")) openCommandPalette();
 });
 
 applyNavIcons();
@@ -14421,8 +14928,12 @@ document.querySelector("#teacherImportCsv").addEventListener("input", () => {
 document.querySelector("#previewTeacherImport").addEventListener("click", previewTeacherImportCsv);
 document.querySelector("#commitTeacherImport").addEventListener("click", commitTeacherImportCsv);
 
-document.querySelector("#resetDemo").addEventListener("click", () => {
-  if (!window.confirm("确认重置本地演示数据？该操作会清空当前浏览器里的演示状态，不影响后端数据。")) return;
+document.querySelector("#resetDemo").addEventListener("click", async () => {
+  if (!(await confirmDialog("重置演示数据", {
+    description: "会清空当前浏览器里的演示状态，不影响后端数据。",
+    confirmText: "重置",
+    danger: true,
+  }))) return;
   if (qrScanner) stopCameraScanner();
   const activeAccountId = state.currentAccountId;
   state = clone(initialState);
