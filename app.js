@@ -12505,6 +12505,9 @@ function loginAccount(accountId) {
   const account = state.accounts.find((item) => item.id === accountId);
   if (!account) return;
   if (qrScanner) stopCameraScanner();
+  // 切换账号时强制收起弹层与命令面板，避免残留到新账号界面
+  if (activeDialogClose) activeDialogClose();
+  if (commandState.open) closeCommandPalette();
   resetTeacherWorkloadState();
   resetAttendanceRecordState();
   resetTeacherPayrollState();
