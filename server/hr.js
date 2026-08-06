@@ -69,7 +69,65 @@ const EMPLOYEE_EDITABLE_FIELDS = [
   "reportsTo",
   "hiredAt",
   "regularizedAt",
+  // 职称与学历是人事评定/证书事实，归人事维护；薪资引擎只读取它们去套标准，
+  // 财务不能改（否则改一下职称就等于直接改基本工资档，失去制衡）
+  "titleGrade",
+  "degree",
 ];
+
+// 职称档（对应薪资方案 baseSalaryByQualification 的键）
+export const TITLE_GRADES = [
+  { value: "seniorProfessor", label: "正高级教师" },
+  { value: "seniorTeacher", label: "高级教师" },
+  { value: "first", label: "一级教师" },
+  { value: "second", label: "二级教师" },
+  { value: "third", label: "三级教师" },
+  { value: "ungraded", label: "未评级" },
+];
+
+// 学历（对应薪资方案 degreeAllowance 的键）
+export const DEGREE_OPTIONS = [
+  { value: "", label: "本科及以下" },
+  { value: "master", label: "硕士" },
+  { value: "doctor", label: "博士" },
+];
+
+// 兼岗任命：属于"这个人担任什么职务"的人事事实，由人事维护，财务只读
+export const TEACHER_ROLE_FIELDS = [
+  { key: "homeroom", label: "班主任", type: "boolean" },
+  { key: "homeroomStudentCount", label: "班级学生数", type: "number" },
+  { key: "gradeHead", label: "年级主任", type: "boolean" },
+  { key: "gradeClassCount", label: "年级管辖班级数", type: "number" },
+  { key: "teachingResearchLeader", label: "教研组长", type: "boolean" },
+  { key: "teachingResearchDeputy", label: "教研副组长", type: "boolean" },
+  { key: "lessonPrepLeader", label: "备课组长", type: "boolean" },
+  { key: "lessonPrepLargeGroup", label: "备课组长(语数外)", type: "boolean" },
+  { key: "lessonPrepStandardizedGrade", label: "备课组长(统考年级)", type: "boolean" },
+  { key: "graduatingClass", label: "毕业班任课", type: "boolean" },
+  { key: "eliteClass", label: "特优班任课", type: "boolean" },
+  { key: "qingbeiClass", label: "清北班任课", type: "boolean" },
+  { key: "firstGrade", label: "一年级任课", type: "boolean" },
+  { key: "doubleChinese", label: "双班语文", type: "boolean" },
+  { key: "standardizedExam", label: "统考科目", type: "boolean" },
+  { key: "olympiadHomeroom", label: "奥数班主任", type: "boolean" },
+  { key: "busDuty", label: "跟车老师", type: "boolean" },
+];
+
+// 兼岗任命归一化：布尔项转布尔、数量项转非负整数，未知键忽略
+export function normalizeTeacherRoles(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const roles = {};
+  TEACHER_ROLE_FIELDS.forEach((field) => {
+    const raw = source[field.key];
+    if (field.type === "number") {
+      const value = Number(raw);
+      roles[field.key] = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    } else {
+      roles[field.key] = Boolean(raw);
+    }
+  });
+  return roles;
+}
 
 function httpError(statusCode, message, details = null) {
   const error = new Error(message);
@@ -99,6 +157,7 @@ function ensureCollections(db) {
     "hrFlows",
     "hrFlowSteps",
     "hrAuditLogs",
+    "monthlyAssessments",
   ];
   keys.forEach((key) => {
     if (!Array.isArray(db[key])) db[key] = [];
@@ -517,6 +576,12 @@ export function publicEmployee(db, employee) {
     leftAt: employee.leftAt || "",
     salaryTemplateId: employee.salaryTemplateId || "",
     salaryTemplateVer: employee.salaryTemplateVer || 0,
+    // 人事维护的薪资相关事实（职称、学历、兼岗任命）
+    titleGrade: employee.titleGrade || "",
+    titleGradeLabel: TITLE_GRADES.find((item) => item.value === employee.titleGrade)?.label || "",
+    degree: employee.degree || "",
+    degreeLabel: DEGREE_OPTIONS.find((item) => item.value === (employee.degree || ""))?.label || "",
+    teacherRoles: employee.teacherRoles || normalizeTeacherRoles({}),
     createdAt: employee.createdAt,
     updatedAt: employee.updatedAt,
   };
@@ -638,6 +703,11 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
     leftAt: "",
     salaryTemplateId: String(input.salaryTemplateId || ""),
     salaryTemplateVer: Number(input.salaryTemplateVer || 0),
+    // 人事事实：职称评定结果与学历，薪资引擎据此套标准
+    titleGrade: String(input.titleGrade || ""),
+    degree: String(input.degree || ""),
+    // 兼岗任命（班主任、年级主任、教研组长等）
+    teacherRoles: normalizeTeacherRoles(input.teacherRoles),
     createdAt: now,
     updatedAt: now,
   };
@@ -706,8 +776,29 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
       employee.positionId = position.id;
       return;
     }
+    if (field === "titleGrade") {
+      const value = String(patch.titleGrade || "").trim();
+      if (value && !TITLE_GRADES.some((item) => item.value === value)) {
+        throw httpError(400, `职称档无效：${value}`);
+      }
+      employee.titleGrade = value;
+      return;
+    }
+    if (field === "degree") {
+      const value = String(patch.degree || "").trim();
+      if (value && !DEGREE_OPTIONS.some((item) => item.value === value)) {
+        throw httpError(400, `学历无效：${value}`);
+      }
+      employee.degree = value;
+      return;
+    }
     employee[field] = String(patch[field] ?? "");
   });
+
+  // 兼岗任命整体替换（前端按勾选提交全量）
+  if (patch.teacherRoles !== undefined) {
+    employee.teacherRoles = normalizeTeacherRoles(patch.teacherRoles);
+  }
 
   if (patch.idCard !== undefined) applySensitiveField(employee, "idCard", patch.idCard);
   if (patch.bankCard !== undefined) applySensitiveField(employee, "bankCard", patch.bankCard);
@@ -1409,14 +1500,65 @@ export function ensureHrData(db) {
       leftAt: "",
       salaryTemplateId: "",
       salaryTemplateVer: 0,
+      // 职称/学历/兼岗从既有工资档案迁入（这些本就是人事事实，此前误放在薪资侧）
+      titleGrade: titleGradeFromProfile(teacher),
+      degree: degreeFromProfile(teacher),
+      teacherRoles: normalizeTeacherRoles(teacher.salaryProfile?.roles),
       createdAt: now,
       updatedAt: now,
     });
     changed = true;
   });
 
+  // 存量档案补齐新增字段：首次升级时把工资档案里的人事事实搬到人事档案
+  (db.employees || []).forEach((employee) => {
+    if (employee.titleGrade !== undefined && employee.teacherRoles) return;
+    const teacher = (db.teachers || []).find((item) => item.id === employee.teacherId);
+    if (employee.titleGrade === undefined) {
+      employee.titleGrade = teacher ? titleGradeFromProfile(teacher) : "";
+      changed = true;
+    }
+    if (employee.degree === undefined) {
+      employee.degree = teacher ? degreeFromProfile(teacher) : "";
+      changed = true;
+    }
+    if (!employee.teacherRoles) {
+      employee.teacherRoles = normalizeTeacherRoles(teacher?.salaryProfile?.roles);
+      changed = true;
+    }
+  });
+
   if (changed) db.meta.updatedAt = now;
   return changed;
+}
+
+// 迁移辅助：优先取工资档案里已维护的值，其次从职称文本推断
+const LEGACY_TITLE_ALIASES = {
+  firstOrDoctor: "first",
+  secondOrMaster: "second",
+  thirdOrBachelor: "third",
+  ungradedOrJuniorCollege: "ungraded",
+};
+
+function titleGradeFromProfile(teacher = {}) {
+  const stored = teacher.salaryProfile?.qualificationGrade;
+  if (stored) return LEGACY_TITLE_ALIASES[stored] || stored;
+  const title = String(teacher.title || "");
+  if (title.includes("正高")) return "seniorProfessor";
+  if (title.includes("高级")) return "seniorTeacher";
+  if (title.includes("一级")) return "first";
+  if (title.includes("二级")) return "second";
+  if (title.includes("三级")) return "third";
+  return "";
+}
+
+function degreeFromProfile(teacher = {}) {
+  const stored = teacher.salaryProfile?.degree;
+  if (stored) return stored;
+  const title = String(teacher.title || "");
+  if (title.includes("博士")) return "doctor";
+  if (title.includes("硕士")) return "master";
+  return "";
 }
 
 export function seedHrData(db) {
@@ -2171,4 +2313,103 @@ export function teacherEligibility(db, teacherId) {
             ? "blocked"
             : "normal",
   };
+}
+
+// ===========================================================================
+// 月度考核记录
+//
+// 考核是线下评审的结果，由学部负责人/人事按月录入，财务只读——财务不掌握教师
+// 日常表现，不应由其决定考核等级。考核结果驱动考核工资浮动（见 payroll.js）。
+// 按「教师 + 月份」唯一，重复录入即更新并留痕。
+// ===========================================================================
+
+export const ASSESSMENT_GRADES = [
+  { value: "excellent", label: "优秀" },
+  { value: "good", label: "良好" },
+  { value: "default", label: "合格" },
+  { value: "warning", label: "基本合格" },
+  { value: "unqualified", label: "不合格" },
+];
+
+export function findMonthlyAssessment(db, teacherId, month) {
+  ensureCollections(db);
+  return (
+    db.monthlyAssessments.find((item) => item.teacherId === teacherId && item.month === month) || null
+  );
+}
+
+export function queryMonthlyAssessments(db, query = {}, account = null) {
+  ensureCollections(db);
+  const month = String(query.month || "");
+  const teacherId = String(query.teacherId || "");
+  let items = [...db.monthlyAssessments];
+  if (month) items = items.filter((item) => item.month === month);
+  if (teacherId) items = items.filter((item) => item.teacherId === teacherId);
+  // 学部负责人只看本学部
+  if (account?.role === "division_head") {
+    const scope = hrScopeFor(db, account);
+    items = items.filter((item) => {
+      const teacher = (db.teachers || []).find((entry) => entry.id === item.teacherId);
+      return teacher && scope.stageIds.has(teacher.stageId);
+    });
+  }
+  return items.sort((a, b) => `${b.month} ${a.teacherName}`.localeCompare(`${a.month} ${b.teacherName}`));
+}
+
+export function upsertMonthlyAssessment(db, input = {}, account = null) {
+  ensureCollections(db);
+  const teacherId = String(input.teacherId || "").trim();
+  const month = String(input.month || "").trim();
+  if (!teacherId) throw httpError(400, "请指定教师");
+  if (!/^\d{4}-\d{2}$/.test(month)) throw httpError(400, "月份格式应为 YYYY-MM");
+  const teacher = (db.teachers || []).find((item) => item.id === teacherId);
+  if (!teacher) throw httpError(404, "教师不存在");
+  if (account?.role === "division_head") {
+    const scope = hrScopeFor(db, account);
+    if (!scope.stageIds.has(teacher.stageId)) throw httpError(403, "只能录入本学部教师的考核");
+  }
+  const grade = String(input.grade || "default");
+  if (!ASSESSMENT_GRADES.some((item) => item.value === grade)) throw httpError(400, `考核等级无效：${grade}`);
+
+  // 区间制岗位（如幼儿园）可直接核定金额，留空则按等级系数浮动
+  const rawAmount = input.amount;
+  const amount = rawAmount === "" || rawAmount === undefined || rawAmount === null ? null : Number(rawAmount);
+  if (amount !== null && (!Number.isFinite(amount) || amount < 0)) {
+    throw httpError(400, "考核工资金额必须是非负数字");
+  }
+
+  const now = nowIso();
+  const existing = findMonthlyAssessment(db, teacherId, month);
+  const before = existing ? { grade: existing.grade, amount: existing.amount } : null;
+  const record = existing || {
+    id: nextId("ASSESS"),
+    teacherId,
+    month,
+    createdAt: now,
+  };
+  Object.assign(record, {
+    teacherName: teacher.name,
+    stageId: teacher.stageId || "",
+    grade,
+    amount,
+    note: String(input.note || "").trim(),
+    updatedAt: now,
+    updatedByAccountId: account?.id || "",
+    updatedByName: account?.displayName || account?.username || "",
+  });
+  if (!existing) db.monthlyAssessments.push(record);
+
+  appendHrAuditLog(db, {
+    action: existing ? "assessment_update" : "assessment_create",
+    targetType: "teacher",
+    targetId: teacherId,
+    targetName: teacher.name,
+    actorAccountId: account?.id || "",
+    actorName: account?.displayName || account?.username || "",
+    reason: `${month} 月度考核`,
+    fieldDiffs: existing
+      ? computeFieldDiffs(before, { grade, amount }, ["grade", "amount"])
+      : [{ field: "grade", before: "", after: grade }],
+  });
+  return record;
 }

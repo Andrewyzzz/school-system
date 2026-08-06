@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDatabaseFromPostgres, persistDatabaseToPostgres, resetPostgresStore } from "./db/postgresStore.js";
-import { ensureHrData, seedHrData, teacherEligibility } from "./hr.js";
+import { ensureHrData, seedHrData, teacherEligibility, findMonthlyAssessment } from "./hr.js";
 import { hashPassword, hashToken, verifyPassword } from "./auth.js";
 import {
   calculateDedicatedTeacherPayroll,
@@ -2574,6 +2574,9 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
   );
   const proration = payrollProrationFor(db, teacherId, month);
+  // 人事事实（职称、学历、兼岗任命）以人事档案为准，薪资引擎只读取不存储；
+  // 月度考核由学部/人事按月录入，财务不可改。
+  const employee = (db.employees || []).find((item) => item.teacherId === teacherId) || null;
   const payroll = calculateDedicatedTeacherPayroll({
     teacher,
     lessons,
@@ -2582,8 +2585,16 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     getRoomName: (lesson) => lessonRoomName(db, lesson),
     fixedProrationFactor: proration.factor,
     prorationNote: proration.note,
-    // 线下评审结果记录在教师档案中，计薪时按等级系数浮动考核工资
-    monthlyAssessment: teacher.salaryProfile?.monthlyAssessment || null,
+    hrFacts: employee
+      ? {
+          titleGrade: employee.titleGrade || "",
+          degree: employee.degree || "",
+          roles: employee.teacherRoles || null,
+          hiredAt: employee.hiredAt || teacher.hiredAt || "",
+          status: employee.status || "",
+        }
+      : null,
+    monthlyAssessment: findMonthlyAssessment(db, teacherId, month),
   });
   return {
     ...payroll,
@@ -2599,6 +2610,14 @@ function ensurePayrollDetails(db) {
 
 function findTeacherPayrollDetail(db, teacherId, month = "2026-06") {
   return ensurePayrollDetails(db).find((item) => item.teacherId === teacherId && item.month === month);
+}
+
+// 月度考核变更后，该教师该月未锁定的工资单需要重算（已锁定的不动）
+export function invalidateOpenPayrollDetailsForTeacher(db, teacherId, month) {
+  return invalidateOpenPayrollDetails(
+    db,
+    (detail) => detail.teacherId === teacherId && (!month || detail.month === month),
+  );
 }
 
 function invalidateOpenPayrollDetails(db, predicate = () => true) {

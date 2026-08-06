@@ -774,15 +774,17 @@ assert.equal(payroll.generated.status, "generated");
 assert.equal(payroll.confirmation.status, "school_approved");
 assert.ok(payroll.generated.unlockHistory.length >= 1);
 
+// 兼岗任命（班主任等）现由人事档案维护，财务侧只管金额与补充项
+const teacherEmployee = (db.employees || []).find((item) => item.teacherId === teacher.id);
+if (teacherEmployee) {
+  teacherEmployee.teacherRoles = { ...(teacherEmployee.teacherRoles || {}), homeroom: true, homeroomStudentCount: 40 };
+}
+
 const profileUpdate = updateTeacherSalaryProfile(
   db,
   teacher.id,
   {
     schoolYears: 6,
-    roles: {
-      homeroom: true,
-      homeroomStudentCount: 40,
-    },
     manualItems: [
       {
         name: "测试补充项",
@@ -801,7 +803,7 @@ assert.equal(payroll.generated.status, "saved");
 
 payroll = publishTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "generated");
-assert.ok(payroll.rows.some((row) => row.name === "班主任津贴"), "expected updated salary profile to affect payroll");
+assert.ok(payroll.rows.some((row) => row.name === "班主任津贴"), "expected HR-maintained roles to affect payroll");
 assert.ok(payroll.rows.some((row) => row.name === "测试补充项"), "expected manual salary item to affect payroll");
 
 payroll = confirmTeacherPayrollDetail(db, teacher.id, "2026-06", teacherAccount);

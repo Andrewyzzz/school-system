@@ -86,6 +86,7 @@ import {
   validatePhase1Readiness,
   storageHealth,
   DB_DRIVER,
+  invalidateOpenPayrollDetailsForTeacher,
 } from "./storage.js";
 import { postgresHealth, postgresPing } from "./db/postgresStore.js";
 import { piiEncryptionReady } from "./security/pii.js";
@@ -125,6 +126,12 @@ import {
   updateOrgUnit,
   updatePosition,
   withdrawProfileChangeRequest,
+  queryMonthlyAssessments,
+  upsertMonthlyAssessment,
+  ASSESSMENT_GRADES,
+  TITLE_GRADES,
+  DEGREE_OPTIONS,
+  TEACHER_ROLE_FIELDS,
 } from "./hr.js";
 import {
   registerOaSideEffect,
@@ -1536,6 +1543,29 @@ async function handleApi(req, res, db, url) {
         const contract = updateEmployeeContract(db, contractMatch[1], body, auth.account, hrContext);
         await saveDatabase(db);
         sendJson(res, 200, { contract });
+        return;
+      }
+
+      // ---- 月度考核（学部负责人/人事录入，财务只读）----
+      if (req.method === "GET" && url.pathname === "/api/hr/assessments") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "finance"]);
+        if (!auth) return;
+        sendJson(res, 200, {
+          assessments: queryMonthlyAssessments(db, Object.fromEntries(url.searchParams), auth.account),
+          grades: ASSESSMENT_GRADES,
+        });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/assessments") {
+        // 财务不在此列：财务不掌握教师日常表现，不应决定考核等级
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const assessment = upsertMonthlyAssessment(db, body, auth.account);
+        invalidateOpenPayrollDetailsForTeacher(db, assessment.teacherId, assessment.month);
+        await saveDatabase(db);
+        sendJson(res, 200, { assessment });
         return;
       }
 

@@ -352,3 +352,81 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
 }
 
 console.log("salary policy 2026 checks passed");
+
+// ------------------------- 人事事实归人事、金额归财务（职责分离）
+{
+  const { normalizeTeacherRoles } = await import("../server/hr.js");
+
+  // 人事档案的职称/学历覆盖工资档案里的旧值
+  const withHrFacts = calculateDedicatedTeacherPayroll({
+    teacher: {
+      ...baseTeacher({ title: "三级教师" }),
+      salaryProfile: { qualificationGrade: "third", degree: "", roles: {} },
+    },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { titleGrade: "seniorProfessor", degree: "doctor", hiredAt: "2016-09-01", status: "active" },
+  });
+  assert.equal(amountOf(withHrFacts, "基本工资"), 3520, "职称应以人事档案为准");
+  assert.equal(amountOf(withHrFacts, "学历补贴"), 800, "学历应以人事档案为准");
+
+  // 校龄由入职日期推算，不用手填值
+  const seniority = amountOf(withHrFacts, "校龄工资");
+  assert.ok(seniority > 0, "校龄应由入职日期自动推算");
+
+  // 试用期由人事状态推导
+  const probation = calculateDedicatedTeacherPayroll({
+    teacher: { ...baseTeacher(), salaryProfile: { roles: {} } },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { titleGrade: "first", degree: "", hiredAt: "2025-09-01", status: "probation" },
+  });
+  assert.equal(amountOf(probation, "基本工资"), 3120 * 0.8, "试用期状态应自动按 80% 计发");
+
+  // 兼岗任命来自人事档案
+  const withRoles = calculateDedicatedTeacherPayroll({
+    teacher: { ...baseTeacher(), salaryProfile: { roles: {} } },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: {
+      titleGrade: "first",
+      degree: "",
+      hiredAt: "2020-09-01",
+      status: "active",
+      roles: normalizeTeacherRoles({ homeroom: true, homeroomStudentCount: 45 }),
+    },
+  });
+  assert.equal(amountOf(withRoles, "班主任津贴"), 45 * 60 + 500, "兼岗津贴应按人事档案的任命计算");
+
+  // 未提供人事事实时回落到工资档案，保证存量数据兼容
+  const legacy = runPayroll({
+    teacher: baseTeacher(),
+    profile: { qualificationGrade: "second", degree: "master" },
+  });
+  assert.equal(amountOf(legacy, "基本工资"), 2820, "缺少人事事实时应回落到工资档案");
+  assert.equal(amountOf(legacy, "学历补贴"), 500);
+}
+
+// --------------------------------- 月度考核未核定金额时按等级系数浮动
+{
+  const teacher = baseTeacher();
+  // amount 为 null/空表示"未核定金额"，应走等级系数而非当成 0 元
+  [null, undefined, ""].forEach((emptyValue) => {
+    const result = runPayroll({
+      teacher,
+      profile: { assessmentBand: "high" },
+      monthlyAssessment: { grade: "excellent", amount: emptyValue },
+    });
+    assert.equal(amountOf(result, "考核工资"), 1776, `amount=${JSON.stringify(emptyValue)} 时应按系数浮动`);
+  });
+  // 显式核定 0 元仍然生效（如考核不合格全额扣发）
+  const zero = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    monthlyAssessment: { grade: "unqualified", amount: 0 },
+  });
+  assert.equal(amountOf(zero, "考核工资"), null, "核定 0 元时该项金额为 0，不出现在明细中");
+}

@@ -570,10 +570,12 @@ function assessmentComponent(teacher, profile, scheme, monthlyAssessment = null)
   const gradeKey = monthlyAssessment?.grade || "default";
   const gradeCfg = scheme.assessmentGrades?.[gradeKey] || scheme.assessmentGrades?.default || { label: "合格", rate: 1 };
   const rate = Number(gradeCfg.rate ?? 1);
-  // 允许财务/学部直接指定金额，覆盖系数计算（用于制度中的区间制岗位，如幼儿园）
-  const overrideAmount = Number(monthlyAssessment?.amount);
-  const amount = Number.isFinite(overrideAmount) && overrideAmount >= 0 ? overrideAmount : standard * rate;
-  const basis = Number.isFinite(overrideAmount) && overrideAmount >= 0
+  // 允许直接核定金额，覆盖系数计算（用于制度中的区间制岗位，如幼儿园）。
+  // 注意 null/""/undefined 都表示"未核定"，不能用 Number() 判断——Number(null) 是 0。
+  const rawAmount = monthlyAssessment?.amount;
+  const hasOverride = rawAmount !== null && rawAmount !== undefined && rawAmount !== "" && Number.isFinite(Number(rawAmount));
+  const amount = hasOverride ? Number(rawAmount) : standard * rate;
+  const basis = hasOverride
     ? `考核档 ${band}，按考核结果核定金额`
     : `考核档 ${band}（标准 ${standard} 元）× ${gradeCfg.label} ${rate}`;
   return {
@@ -785,17 +787,31 @@ export function calculateDedicatedTeacherPayroll({
   // 月度考核结果（0726 制度：考核工资须按表现拉开差距）
   // { grade: "excellent"|"good"|"default"|"warning"|"unqualified", amount?: number, note?: string }
   monthlyAssessment = null,
+  // 人事档案事实：职称、学历、兼岗任命、入职日期。这些是人事维护的客观事实，
+  // 薪资引擎只读取用于套标准，财务不可改（职责分离）。缺省时回落到工资档案，保证兼容。
+  hrFacts = null,
 } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
+  const defaults = defaultTeacherSalaryProfile(teacher);
   const profile = {
-    ...defaultTeacherSalaryProfile(teacher),
+    ...defaults,
     ...(teacher.salaryProfile || {}),
     roles: {
-      ...defaultTeacherSalaryProfile(teacher).roles,
+      ...defaults.roles,
       ...(teacher.salaryProfile?.roles || {}),
     },
   };
+  // 人事档案的事实覆盖工资档案：职称/学历/兼岗任命以人事为准
+  if (hrFacts) {
+    if (hrFacts.titleGrade) profile.qualificationGrade = hrFacts.titleGrade;
+    if (hrFacts.degree !== undefined && hrFacts.degree !== null) profile.degree = hrFacts.degree;
+    if (hrFacts.roles) profile.roles = { ...profile.roles, ...hrFacts.roles };
+    // 校龄按入职日期推算，不再手工维护，避免与人事档案不一致
+    if (hrFacts.hiredAt) profile.schoolYears = schoolYearsFromHiredAt(hrFacts.hiredAt, profile.schoolYears);
+    // 试用期折算由人事状态推导：试用期 80%，其余全额
+    if (hrFacts.status) profile.probationRate = hrFacts.status === "probation" ? 0.8 : 1;
+  }
   const sortedLessons = [...lessons].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const highRegularWeekUnits = new Map();
   const lines = sortedLessons.map((lesson) => {
