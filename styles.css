@@ -7612,3 +7612,39 @@ body.dialog-open { overflow: hidden; }
   .approval-tabs { overflow-x: auto; }
   .approval-tab { white-space: nowrap; }
 }
+
+/* 审批流程设置（系统管理员） */
+.approval-template-list { display: grid; gap: 12px; }
+.approval-template-card {
+  border: 1px solid var(--line); border-radius: var(--radius-md);
+  padding: 16px; background: var(--surface); display: grid; gap: 10px;
+}
+.approval-template-card.is-disabled { opacity: 0.62; }
+.approval-template-head { display: flex; align-items: center; gap: 12px; }
+.approval-template-title { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.approval-template-title strong { font-size: 15px; font-weight: 600; }
+.approval-template-title small { color: var(--muted); font-size: 12px; }
+.approval-template-desc { margin: 0; color: var(--muted); font-size: 13px; }
+.approval-template-applicants { font-size: 12px; color: var(--faint); }
+.approval-chain {
+  display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+  padding: 12px; background: var(--surface-soft); border-radius: var(--radius-sm);
+}
+.approval-chain-node {
+  display: grid; gap: 2px; padding: 8px 12px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); min-width: 150px;
+}
+.approval-chain-node b { font-size: 13px; font-weight: 500; }
+.approval-chain-node small { font-size: 11px; color: var(--muted); }
+.approval-chain-extra { color: var(--primary) !important; }
+.approval-chain-arrow { align-self: center; color: var(--faint); font-size: 14px; }
+.approval-template-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.approval-step-arrangement {
+  padding: 6px 10px; margin-top: 4px; background: var(--primary-soft);
+  border-radius: var(--radius-sm); color: var(--ink) !important; line-height: 1.6;
+}
+@media (max-width: 900px) {
+  .approval-chain { flex-direction: column; }
+  .approval-chain-arrow { transform: rotate(90deg); align-self: flex-start; margin-left: 20px; }
+  .approval-chain-node { min-width: 0; }
+}

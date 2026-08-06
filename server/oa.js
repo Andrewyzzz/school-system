@@ -30,8 +30,29 @@ function nextId(prefix) {
 
 function ensureCollections(db) {
   if (!Array.isArray(db.oaRequests)) db.oaRequests = [];
+  if (!Array.isArray(db.oaTemplates)) db.oaTemplates = [];
   if (!Array.isArray(db.notifications)) db.notifications = [];
   return db;
+}
+
+// 模板以库内数据为准（系统管理员可自定义流程）；首次运行用内置定义播种。
+// 已存在的模板不会被覆盖，避免学校改过的流程被升级重置。
+export function ensureOaTemplates(db) {
+  ensureCollections(db);
+  let changed = false;
+  OA_TEMPLATES.forEach((seed, index) => {
+    if (db.oaTemplates.some((item) => item.key === seed.key)) return;
+    db.oaTemplates.push({
+      ...JSON.parse(JSON.stringify(seed)),
+      status: "active",
+      builtIn: true,
+      sortOrder: index,
+      updatedAt: nowIso(),
+      updatedByName: "系统初始化",
+    });
+    changed = true;
+  });
+  return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,11 +83,25 @@ export const OA_TEMPLATES = [
       { key: "endDate", label: "结束日期", type: "date", required: true },
       { key: "days", label: "请假天数", type: "number", required: true, hint: "含起止日，半天填 0.5" },
       { key: "reason", label: "请假事由", type: "textarea", required: true, placeholder: "请说明请假原因" },
-      { key: "handover", label: "工作交接人", type: "text", required: true, hint: "课程由谁代课或如何安排" },
       { key: "attachment", label: "证明材料", type: "text", required: false, hint: "病假需附就诊证明，可填写材料说明或提交纸质件" },
     ],
     steps: [
-      { name: "学部负责人审批", approverRoles: ["division_head", "admin"], approverMode: "any" },
+      {
+        name: "学部负责人审批",
+        approverRoles: ["division_head", "admin"],
+        approverMode: "any",
+        // 代课与工作交接由上级安排，不由申请人自行填写
+        approverFields: [
+          {
+            key: "substituteArrangement",
+            label: "代课安排",
+            type: "textarea",
+            required: true,
+            hint: "指定代课教师及课程安排，通过后随审批单留痕",
+          },
+          { key: "handoverNote", label: "其他工作交接", type: "text", required: false, hint: "如班级事务、值班等交接说明" },
+        ],
+      },
       { name: "人事备案", approverRoles: ["hr", "system_admin"], approverMode: "any" },
     ],
   },
@@ -111,11 +146,26 @@ export const OA_TEMPLATES = [
     formFields: [
       { key: "lessonDate", label: "原课程日期", type: "date", required: true },
       { key: "lessonInfo", label: "原课程信息", type: "text", required: true, placeholder: "班级 / 科目 / 节次" },
-      { key: "swapType", label: "调课方式", type: "radio", required: true, options: ["调换时间", "他人代课"] },
-      { key: "targetInfo", label: "调整后安排", type: "text", required: true, placeholder: "调整到的时间，或代课教师姓名" },
+      { key: "swapType", label: "希望的调课方式", type: "radio", required: true, options: ["调换时间", "他人代课"] },
       { key: "reason", label: "调课原因", type: "textarea", required: true },
     ],
-    steps: [{ name: "教务审批", approverRoles: ["admin", "system_admin"], approverMode: "any" }],
+    steps: [
+      {
+        name: "教务审批",
+        approverRoles: ["admin", "system_admin"],
+        approverMode: "any",
+        // 具体调到哪节、由谁代课，由教务统筹安排
+        approverFields: [
+          {
+            key: "arrangement",
+            label: "调课安排",
+            type: "textarea",
+            required: true,
+            hint: "写明调整后的时间或代课教师，通过后按此执行",
+          },
+        ],
+      },
+    ],
   },
   {
     key: "class_size_confirm",
@@ -194,21 +244,197 @@ export const OA_TEMPLATES = [
 
 export const OA_TIMEOUT_WORKDAYS = 3;
 
-export function findTemplate(key) {
-  return OA_TEMPLATES.find((item) => item.key === key) || null;
+export function findTemplate(db, key) {
+  ensureOaTemplates(db);
+  return db.oaTemplates.find((item) => item.key === key) || null;
 }
 
 // 按角色返回可发起的模板（前端审批首页的图标网格用）
-export function listTemplatesForRole(role = "") {
-  return OA_TEMPLATES.filter((template) => template.applicantRoles.includes(role)).map((template) => ({
-    key: template.key,
-    name: template.name,
-    icon: template.icon,
-    category: template.category,
-    description: template.description,
-    formFields: template.formFields,
-    steps: template.steps.map((step) => ({ name: step.name, approverRoles: step.approverRoles })),
-  }));
+export function listTemplatesForRole(db, role = "") {
+  ensureOaTemplates(db);
+  return db.oaTemplates
+    .filter((template) => template.status !== "disabled" && template.applicantRoles.includes(role))
+    .sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99))
+    .map((template) => ({
+      key: template.key,
+      name: template.name,
+      icon: template.icon,
+      category: template.category,
+      description: template.description,
+      formFields: template.formFields,
+      steps: template.steps.map((step) => ({ name: step.name, approverRoles: step.approverRoles })),
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// 模板配置（系统管理员自定义审批流程）
+// ---------------------------------------------------------------------------
+
+export const OA_APPROVER_ROLES = [
+  { value: "division_head", label: "学部负责人" },
+  { value: "admin", label: "教务" },
+  { value: "hr", label: "人事专员" },
+  { value: "finance", label: "财务" },
+  { value: "system_admin", label: "总校管理员" },
+];
+
+export const OA_FIELD_TYPES = [
+  { value: "text", label: "单行文本" },
+  { value: "textarea", label: "多行文本" },
+  { value: "number", label: "数字" },
+  { value: "date", label: "日期" },
+  { value: "select", label: "下拉选择" },
+  { value: "radio", label: "单选" },
+];
+
+export function listAllTemplates(db) {
+  ensureOaTemplates(db);
+  return [...db.oaTemplates].sort((a, b) => (a.sortOrder ?? 99) - (b.sortOrder ?? 99));
+}
+
+function validateTemplateInput(input, { requireKey = true } = {}) {
+  const key = String(input.key || "").trim();
+  if (requireKey && !/^[a-z][a-z0-9_]{1,39}$/.test(key)) {
+    throw httpError(400, "模板标识只能用小写字母、数字和下划线，且以字母开头");
+  }
+  const name = String(input.name || "").trim();
+  if (!name) throw httpError(400, "审批名称不能为空");
+
+  const applicantRoles = Array.isArray(input.applicantRoles) ? input.applicantRoles.filter(Boolean) : [];
+  if (!applicantRoles.length) throw httpError(400, "至少指定一个可发起该审批的角色");
+
+  const formFields = Array.isArray(input.formFields) ? input.formFields : [];
+  if (!formFields.length) throw httpError(400, "至少配置一个表单字段");
+  const fieldKeys = new Set();
+  const normalizedFields = formFields.map((field, index) => {
+    const fieldKey = String(field.key || "").trim();
+    if (!/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(fieldKey)) {
+      throw httpError(400, `第 ${index + 1} 个字段的标识不合法`);
+    }
+    if (fieldKeys.has(fieldKey)) throw httpError(400, `字段标识重复：${fieldKey}`);
+    fieldKeys.add(fieldKey);
+    const label = String(field.label || "").trim();
+    if (!label) throw httpError(400, `第 ${index + 1} 个字段缺少名称`);
+    const type = String(field.type || "text");
+    if (!OA_FIELD_TYPES.some((item) => item.value === type)) throw httpError(400, `字段「${label}」类型无效`);
+    const options = Array.isArray(field.options) ? field.options.map((item) => String(item).trim()).filter(Boolean) : [];
+    if ((type === "select" || type === "radio") && !options.length) {
+      throw httpError(400, `字段「${label}」是选择类型，必须配置选项`);
+    }
+    return {
+      key: fieldKey,
+      label,
+      type,
+      required: Boolean(field.required),
+      placeholder: String(field.placeholder || ""),
+      hint: String(field.hint || ""),
+      options,
+    };
+  });
+
+  const steps = Array.isArray(input.steps) ? input.steps : [];
+  if (!steps.length) throw httpError(400, "至少配置一个审批环节");
+  if (steps.length > 8) throw httpError(400, "审批环节最多 8 级");
+  const normalizedSteps = steps.map((step, index) => {
+    const stepName = String(step.name || "").trim();
+    if (!stepName) throw httpError(400, `第 ${index + 1} 个环节缺少名称`);
+    const approverRoles = Array.isArray(step.approverRoles) ? step.approverRoles.filter(Boolean) : [];
+    if (!approverRoles.length) throw httpError(400, `环节「${stepName}」必须指定审批角色`);
+    const invalidRole = approverRoles.find((role) => !OA_APPROVER_ROLES.some((item) => item.value === role));
+    if (invalidRole) throw httpError(400, `环节「${stepName}」包含无效角色：${invalidRole}`);
+    const approverFields = Array.isArray(step.approverFields) ? step.approverFields : [];
+    const normalizedApproverFields = approverFields.map((field, fieldIndex) => {
+      const fieldKey = String(field.key || "").trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(fieldKey)) {
+        throw httpError(400, `环节「${stepName}」第 ${fieldIndex + 1} 个审批填写项标识不合法`);
+      }
+      const label = String(field.label || "").trim();
+      if (!label) throw httpError(400, `环节「${stepName}」第 ${fieldIndex + 1} 个审批填写项缺少名称`);
+      return {
+        key: fieldKey,
+        label,
+        type: String(field.type || "text"),
+        required: Boolean(field.required),
+        hint: String(field.hint || ""),
+      };
+    });
+    return {
+      name: stepName,
+      approverRoles,
+      approverMode: step.approverMode === "all" ? "all" : "any",
+      approverFields: normalizedApproverFields,
+    };
+  });
+
+  return {
+    key,
+    name,
+    icon: String(input.icon || "📝").slice(0, 4),
+    category: String(input.category || "其他").trim() || "其他",
+    description: String(input.description || "").trim(),
+    applicantRoles,
+    formFields: normalizedFields,
+    steps: normalizedSteps,
+  };
+}
+
+export function createOaTemplate(db, input, account) {
+  ensureOaTemplates(db);
+  const data = validateTemplateInput(input);
+  if (db.oaTemplates.some((item) => item.key === data.key)) {
+    throw httpError(400, `模板标识已存在：${data.key}`);
+  }
+  const template = {
+    ...data,
+    status: "active",
+    builtIn: false,
+    sortOrder: db.oaTemplates.length,
+    updatedAt: nowIso(),
+    updatedByName: account?.displayName || account?.username || "",
+  };
+  db.oaTemplates.push(template);
+  return template;
+}
+
+export function updateOaTemplate(db, key, input, account) {
+  ensureOaTemplates(db);
+  const template = db.oaTemplates.find((item) => item.key === key);
+  if (!template) throw httpError(404, "模板不存在");
+  const data = validateTemplateInput({ ...input, key }, { requireKey: false });
+  Object.assign(template, {
+    name: data.name,
+    icon: data.icon,
+    category: data.category,
+    description: data.description,
+    applicantRoles: data.applicantRoles,
+    formFields: data.formFields,
+    steps: data.steps,
+    updatedAt: nowIso(),
+    updatedByName: account?.displayName || account?.username || "",
+  });
+  return template;
+}
+
+export function setOaTemplateStatus(db, key, status, account) {
+  ensureOaTemplates(db);
+  const template = db.oaTemplates.find((item) => item.key === key);
+  if (!template) throw httpError(404, "模板不存在");
+  if (!["active", "disabled"].includes(status)) throw httpError(400, "状态无效");
+  template.status = status;
+  template.updatedAt = nowIso();
+  template.updatedByName = account?.displayName || account?.username || "";
+  return template;
+}
+
+export function deleteOaTemplate(db, key) {
+  ensureOaTemplates(db);
+  const template = db.oaTemplates.find((item) => item.key === key);
+  if (!template) throw httpError(404, "模板不存在");
+  if (template.builtIn) throw httpError(400, "内置模板不可删除，可将其停用");
+  const inUse = db.oaRequests.some((item) => item.templateKey === key && item.status === "pending");
+  if (inUse) throw httpError(400, "该模板下仍有审批中的单据，无法删除");
+  db.oaTemplates = db.oaTemplates.filter((item) => item.key !== key);
+  return { deleted: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -322,8 +548,9 @@ function notifyCurrentApprovers(db, request) {
 
 export function createOaRequest(db, account, input = {}) {
   ensureCollections(db);
-  const template = findTemplate(String(input.templateKey || "").trim());
+  const template = findTemplate(db, String(input.templateKey || "").trim());
   if (!template) throw httpError(400, "审批类型无效");
+  if (template.status === "disabled") throw httpError(400, `「${template.name}」已停用`);
   if (!template.applicantRoles.includes(account?.role || "")) {
     throw httpError(403, `当前角色无法发起「${template.name}」`);
   }
@@ -349,6 +576,9 @@ export function createOaRequest(db, account, input = {}) {
       name: step.name,
       approverRoles: [...step.approverRoles],
       approverMode: step.approverMode || "any",
+      // 审批人需填写的内容（如代课安排），由上级在审批时录入
+      approverFields: (step.approverFields || []).map((field) => ({ ...field })),
+      approverData: {},
       status: index === 0 ? "pending" : "waiting",
       approvals: [],
       comment: "",
@@ -428,6 +658,22 @@ export function actOnOaRequest(db, requestId, action, account, input = {}) {
   }
 
   if (action !== "approve") throw httpError(400, "审批动作无效");
+
+  // 审批人需填写的内容（如代课安排）在通过时校验并留痕
+  const approverFields = step.approverFields || [];
+  if (approverFields.length) {
+    const submitted = input.approverData || {};
+    const collected = {};
+    approverFields.forEach((field) => {
+      const raw = submitted[field.key];
+      const value = typeof raw === "string" ? raw.trim() : raw;
+      if (field.required && (value === undefined || value === null || value === "")) {
+        throw httpError(400, `请填写「${field.label}」`);
+      }
+      collected[field.key] = value === undefined || value === null ? "" : String(value);
+    });
+    step.approverData = { ...step.approverData, ...collected };
+  }
 
   step.approvals.push({
     accountId: account.id,
@@ -636,7 +882,8 @@ export function getOaRequestDetail(db, requestId, account) {
     ["hr", "system_admin"].includes(account?.role || "");
   if (!isRelated) throw httpError(403, "无权查看该审批单");
 
-  const template = findTemplate(request.templateKey);
+  const template = findTemplate(db, request.templateKey);
+  const currentStep = request.steps[request.currentStepIndex];
   return {
     ...request,
     statusLabel: statusLabel(request.status),
@@ -644,6 +891,8 @@ export function getOaRequestDetail(db, requestId, account) {
     canWithdraw: request.status === "pending" && request.applicantAccountId === account?.id,
     canUrge: request.status === "pending" && request.applicantAccountId === account?.id,
     formFields: template?.formFields || [],
+    // 当前环节要求审批人填写的内容（如代课安排），供前端在审批弹层中渲染
+    currentApproverFields: request.status === "pending" ? currentStep?.approverFields || [] : [],
   };
 }
 

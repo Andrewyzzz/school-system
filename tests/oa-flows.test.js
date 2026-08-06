@@ -4,6 +4,12 @@
 import assert from "node:assert/strict";
 import {
   OA_TEMPLATES,
+  ensureOaTemplates,
+  listAllTemplates,
+  createOaTemplate,
+  updateOaTemplate,
+  setOaTemplateStatus,
+  deleteOaTemplate,
   listTemplatesForRole,
   createOaRequest,
   actOnOaRequest,
@@ -26,7 +32,9 @@ const finance = account("ACC-FI", "finance", "财务");
 const sysadmin = account("ACC-SA", "system_admin", "总校管理员");
 
 function freshDb() {
-  return { oaRequests: [], notifications: [] };
+  const db = { oaRequests: [], oaTemplates: [], notifications: [] };
+  ensureOaTemplates(db);
+  return db;
 }
 
 function leaveForm(overrides = {}) {
@@ -36,7 +44,6 @@ function leaveForm(overrides = {}) {
     endDate: "2026-09-11",
     days: 2,
     reason: "家中有事",
-    handover: "王老师代课",
     ...overrides,
   };
 }
@@ -53,13 +60,13 @@ function leaveForm(overrides = {}) {
     });
   });
 
-  const teacherTemplates = listTemplatesForRole("teacher").map((item) => item.key);
+  const teacherTemplates = listTemplatesForRole(freshDb(), "teacher").map((item) => item.key);
   assert.ok(teacherTemplates.includes("leave"), "老师应能发起请假");
   assert.ok(teacherTemplates.includes("lesson_swap"), "老师应能发起调课");
   assert.ok(!teacherTemplates.includes("budget_confirm"), "老师不应能发起预算确认");
   assert.ok(!teacherTemplates.includes("class_size_confirm"), "老师不应能发起人数确认");
 
-  const financeTemplates = listTemplatesForRole("finance").map((item) => item.key);
+  const financeTemplates = listTemplatesForRole(freshDb(), "finance").map((item) => item.key);
   assert.ok(financeTemplates.includes("budget_confirm"), "财务应能发起预算确认");
   assert.ok(financeTemplates.includes("lesson_rule_confirm"), "财务应能发起课时规则确认");
 }
@@ -150,7 +157,7 @@ function leaveForm(overrides = {}) {
   assert.throws(() => actOnOaRequest(db, request.id, "approve", finance, {}), /当前环节不由您处理/);
 
   // 第一级通过
-  actOnOaRequest(db, request.id, "approve", head, { comment: "同意" });
+  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
   assert.equal(request.steps[0].status, "approved");
   assert.equal(request.currentStepIndex, 1);
   assert.equal(request.steps[1].status, "pending");
@@ -223,12 +230,21 @@ function leaveForm(overrides = {}) {
       lessonDate: "2026-09-15",
       lessonInfo: "高一(1)班 数学 第3节",
       swapType: "他人代课",
-      targetInfo: "王老师",
       reason: "外出培训",
     },
   });
   assert.equal(request.steps.length, 1);
-  actOnOaRequest(db, request.id, "approve", admin, { comment: "已安排" });
+  // 具体安排由教务在审批时指定
+  assert.throws(
+    () => actOnOaRequest(db, request.id, "approve", admin, { comment: "已安排" }),
+    /请填写「调课安排」/,
+    "未填调课安排应被拦截",
+  );
+  actOnOaRequest(db, request.id, "approve", admin, {
+    comment: "已安排",
+    approverData: { arrangement: "改由王老师代课" },
+  });
+  assert.equal(request.steps[0].approverData.arrangement, "改由王老师代课", "安排应留痕");
   assert.equal(request.status, "approved", "单级审批通过即完成");
 
   // 或签：加班审批多角色任一处理即可
@@ -293,7 +309,7 @@ function leaveForm(overrides = {}) {
   assert.equal(teacherTodo.meta.total, 0);
 
   // 我处理过
-  actOnOaRequest(db, own.id, "approve", head, { comment: "同意" });
+  actOnOaRequest(db, own.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
   const handled = queryOaRequests(db, { scope: "handled" }, head);
   assert.equal(handled.meta.total, 1, "处理过的应可追溯");
 
@@ -335,7 +351,7 @@ function leaveForm(overrides = {}) {
   assert.equal(scanOaTimeouts(db).reminded, 1, "超期应提醒一次");
   assert.equal(scanOaTimeouts(db).reminded, 0, "同一周期内不重复提醒");
   // 已完成的不再提醒
-  actOnOaRequest(db, request.id, "approve", head, {});
+  actOnOaRequest(db, request.id, "approve", head, { approverData: { substituteArrangement: "王老师代课" } });
   actOnOaRequest(db, request.id, "approve", hr, {});
   assert.equal(scanOaTimeouts(db).reminded, 0);
 }
@@ -344,11 +360,212 @@ function leaveForm(overrides = {}) {
 {
   const db = freshDb();
   const request = createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm() });
-  actOnOaRequest(db, request.id, "approve", head, { comment: "同意" });
+  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
   // 同一人不能在同一环节重复处理（此时已流转到下一环节，故报环节不符）
   assert.throws(() => actOnOaRequest(db, request.id, "approve", head, {}), /当前环节不由您处理/);
-  assert.equal(findTemplate("leave").name, "请假申请");
-  assert.equal(findTemplate("not_exist"), null);
+  assert.equal(findTemplate(db, "leave").name, "请假申请");
+  assert.equal(findTemplate(db, "not_exist"), null);
+}
+
+// ---------------------------------------- 代课与工作交接由上级在审批时安排
+{
+  const db = freshDb();
+  const leaveTemplate = findTemplate(db, "leave");
+  assert.ok(
+    !leaveTemplate.formFields.some((field) => field.key === "handover"),
+    "请假表单不应再要求申请人填写交接人",
+  );
+  const arrangeFields = leaveTemplate.steps[0].approverFields || [];
+  assert.ok(
+    arrangeFields.some((field) => field.key === "substituteArrangement" && field.required),
+    "学部负责人环节应必填代课安排",
+  );
+
+  const request = createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm() });
+  // 未安排代课不能通过
+  assert.throws(
+    () => actOnOaRequest(db, request.id, "approve", head, { comment: "同意" }),
+    /请填写「代课安排」/,
+  );
+  actOnOaRequest(db, request.id, "approve", head, {
+    comment: "同意",
+    approverData: { substituteArrangement: "由王芳老师代课", handoverNote: "晨检交副班主任" },
+  });
+  assert.equal(request.steps[0].approverData.substituteArrangement, "由王芳老师代课");
+  assert.equal(request.steps[0].approverData.handoverNote, "晨检交副班主任");
+
+  // 申请人可在详情中看到上级的安排
+  const detail = getOaRequestDetail(db, request.id, teacher);
+  assert.equal(detail.steps[0].approverData.substituteArrangement, "由王芳老师代课", "申请人应能看到代课安排");
+  // 当前环节（人事备案）无需填写内容
+  assert.equal(detail.currentApproverFields.length, 0);
+}
+
+// ------------------------------------------- 审批流程自定义（系统管理员 DIY）
+{
+  const db = freshDb();
+  const before = listAllTemplates(db).length;
+
+  // 新建自定义模板
+  const created = createOaTemplate(
+    db,
+    {
+      key: "seal_use",
+      name: "用章申请",
+      icon: "🔖",
+      category: "行政",
+      description: "公章使用申请",
+      applicantRoles: ["teacher", "admin"],
+      formFields: [
+        { key: "sealType", label: "印章类型", type: "select", required: true, options: ["公章", "合同章"] },
+        { key: "purpose", label: "用途", type: "textarea", required: true },
+      ],
+      steps: [
+        { name: "部门负责人审批", approverRoles: ["division_head", "admin"], approverMode: "any" },
+        {
+          name: "办公室登记",
+          approverRoles: ["hr"],
+          approverMode: "any",
+          approverFields: [{ key: "sealNo", label: "用印编号", type: "text", required: true }],
+        },
+      ],
+    },
+    sysadmin,
+  );
+  assert.equal(created.builtIn, false, "自定义模板不应标记为内置");
+  assert.equal(listAllTemplates(db).length, before + 1);
+  assert.ok(
+    listTemplatesForRole(db, "teacher").some((item) => item.key === "seal_use"),
+    "新模板应立即对可发起角色可见",
+  );
+
+  // 用自定义模板走完流程，验证审批人填写项生效
+  const request = createOaRequest(db, teacher, {
+    templateKey: "seal_use",
+    formData: { sealType: "公章", purpose: "开具证明" },
+  });
+  actOnOaRequest(db, request.id, "approve", admin, { comment: "同意" });
+  assert.throws(() => actOnOaRequest(db, request.id, "approve", hr, {}), /请填写「用印编号」/);
+  actOnOaRequest(db, request.id, "approve", hr, { approverData: { sealNo: "YZ-2026-001" } });
+  assert.equal(request.status, "approved");
+  assert.equal(request.steps[1].approverData.sealNo, "YZ-2026-001");
+
+  // 校验：标识非法、角色非法、选择类型缺选项、环节缺角色
+  assert.throws(() => createOaTemplate(db, { key: "Bad Key", name: "x" }, sysadmin), /模板标识只能用/);
+  // 标识重复（补齐其它必填项，确保命中的是重复校验而非缺字段）
+  assert.throws(
+    () =>
+      createOaTemplate(
+        db,
+        {
+          key: "seal_use",
+          name: "重复的用章申请",
+          applicantRoles: ["teacher"],
+          formFields: [{ key: "a", label: "甲", type: "text" }],
+          steps: [{ name: "审批", approverRoles: ["admin"] }],
+        },
+        sysadmin,
+      ),
+    /模板标识已存在/,
+  );
+  assert.throws(
+    () =>
+      createOaTemplate(
+        db,
+        {
+          key: "bad_role",
+          name: "测试",
+          applicantRoles: ["teacher"],
+          formFields: [{ key: "a", label: "甲", type: "text" }],
+          steps: [{ name: "审批", approverRoles: ["不存在"] }],
+        },
+        sysadmin,
+      ),
+    /包含无效角色/,
+  );
+  assert.throws(
+    () =>
+      createOaTemplate(
+        db,
+        {
+          key: "bad_option",
+          name: "测试",
+          applicantRoles: ["teacher"],
+          formFields: [{ key: "a", label: "甲", type: "select" }],
+          steps: [{ name: "审批", approverRoles: ["admin"] }],
+        },
+        sysadmin,
+      ),
+    /必须配置选项/,
+  );
+
+  // 修改内置模板的审批链
+  const updated = updateOaTemplate(
+    db,
+    "attendance_fix",
+    {
+      name: "补卡申请",
+      icon: "⏱️",
+      category: "考勤",
+      description: "考勤补记",
+      applicantRoles: ["teacher"],
+      formFields: [{ key: "fixDate", label: "补卡日期", type: "date", required: true }],
+      steps: [
+        { name: "部门负责人审批", approverRoles: ["division_head"], approverMode: "any" },
+        { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
+      ],
+    },
+    sysadmin,
+  );
+  assert.equal(updated.steps.length, 2, "内置模板的审批链应可改为两级");
+  assert.equal(updated.updatedByName, "总校管理员", "应记录修改人");
+  const newFix = createOaRequest(db, teacher, { templateKey: "attendance_fix", formData: { fixDate: "2026-09-10" } });
+  assert.equal(newFix.steps.length, 2, "新申请应按修改后的流程走");
+
+  // 停用后不可发起，启用后恢复
+  setOaTemplateStatus(db, "seal_use", "disabled", sysadmin);
+  assert.ok(!listTemplatesForRole(db, "teacher").some((item) => item.key === "seal_use"), "停用后不再出现在可发起列表");
+  assert.throws(
+    () => createOaRequest(db, teacher, { templateKey: "seal_use", formData: { sealType: "公章", purpose: "x" } }),
+    /已停用/,
+  );
+  setOaTemplateStatus(db, "seal_use", "active", sysadmin);
+  assert.ok(listTemplatesForRole(db, "teacher").some((item) => item.key === "seal_use"));
+
+  // 内置模板不可删除；有进行中单据的模板不可删除
+  assert.throws(() => deleteOaTemplate(db, "leave"), /内置模板不可删除/);
+  const pendingSeal = createOaRequest(db, teacher, {
+    templateKey: "seal_use",
+    formData: { sealType: "公章", purpose: "占用中" },
+  });
+  assert.throws(() => deleteOaTemplate(db, "seal_use"), /仍有审批中的单据/);
+  withdrawOaRequest(db, pendingSeal.id, teacher);
+  assert.deepEqual(deleteOaTemplate(db, "seal_use"), { deleted: true });
+}
+
+// -------------------------------------------------- 播种幂等性与配置保留
+{
+  const db = freshDb();
+  // 学校改过的流程在再次播种时不应被重置
+  updateOaTemplate(
+    db,
+    "overtime",
+    {
+      name: "加班申请",
+      icon: "🌙",
+      category: "考勤",
+      description: "自定义后的说明",
+      applicantRoles: ["teacher"],
+      formFields: [{ key: "hours", label: "时长", type: "number", required: true }],
+      steps: [{ name: "自定义环节", approverRoles: ["hr"], approverMode: "any" }],
+    },
+    sysadmin,
+  );
+  const changed = ensureOaTemplates(db);
+  assert.equal(changed, false, "已有模板齐全时不应再写入");
+  const overtime = findTemplate(db, "overtime");
+  assert.equal(overtime.steps[0].name, "自定义环节", "自定义流程不应被播种覆盖");
+  assert.equal(overtime.description, "自定义后的说明");
 }
 
 console.log("oa flows checks passed");

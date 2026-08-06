@@ -925,6 +925,11 @@ const views = {
     title: "审批中心",
     el: document.querySelector("#approvalsView"),
   },
+  approvalSettings: {
+    role: "system_admin",
+    title: "审批流程设置",
+    el: document.querySelector("#approvalSettingsView"),
+  },
   hrAudit: {
     role: "hr,system_admin,division_head",
     title: "人事审计",
@@ -6868,6 +6873,7 @@ function render() {
   renderStep("组织与岗位", renderHrOrg);
   renderStep("人事审批", renderHrFlows);
   renderStep("审批中心", renderApprovalsView);
+  renderStep("审批流程设置", renderApprovalSettingsView);
   renderStep("人事审计", renderHrAudit);
   renderStep("我的档案", renderMyHrProfile);
   renderStep("签入签出", renderScanner);
@@ -12582,6 +12588,9 @@ function switchView(viewName) {
   state.activeView = viewName;
   render();
   // 审批中心首次进入时按需加载模板与列表
+  if (viewName === "approvalSettings" && backendMode() && !oaAdminState.templates.length) {
+    loadOaAdminTemplates();
+  }
   if (viewName === "approvals" && backendMode()) {
     loadOaTemplates().then(() => {
       renderApprovalsView();
@@ -14193,6 +14202,7 @@ let oaState = {
 };
 
 function resetOaState() {
+  oaAdminState = { templates: [], approverRoles: [], fieldTypes: [], loading: false, error: "" };
   oaState = { ...oaState, templates: [], templatesLoaded: false, items: [], meta: null, page: 1, todoCount: 0, error: "" };
 }
 
@@ -14419,12 +14429,20 @@ async function openOaDetail(requestId) {
       const votes = step.approvals
         .map((vote) => `${escapeHtml(vote.accountName)}${vote.comment ? `：${escapeHtml(vote.comment)}` : ""}`)
         .join("；");
+      // 上级在该环节安排的内容（如代课安排），申请人与后续审批人都能看到
+      const arrangements = (step.approverFields || [])
+        .map((field) => {
+          const value = step.approverData?.[field.key];
+          return value ? `<small class="approval-step-arrangement"><b>${escapeHtml(field.label)}：</b>${escapeHtml(value)}</small>` : "";
+        })
+        .join("");
       return `
         <li class="approval-step ${stateClass}">
           <span class="approval-step-dot"></span>
           <div>
             <strong>${escapeHtml(step.name)}</strong>
             <small>${votes || (step.status === "pending" ? "等待处理" : "未开始")}</small>
+            ${arrangements}
             ${step.actedAt ? `<small>${escapeHtml(formatDateTimeShort(step.actedAt))}</small>` : ""}
           </div>
         </li>
@@ -14478,10 +14496,34 @@ async function openOaDetail(requestId) {
   };
 
   root.querySelector("[data-oa-approve]")?.addEventListener("click", async () => {
-    const comment = await promptDialog("通过审批", { label: "审批意见", value: "同意", required: false, confirmText: "通过" });
-    if (comment === null) return;
+    // 当前环节若要求审批人填写内容（如代课安排），在通过时一并收集
+    const approverFields = detail.currentApproverFields || [];
+    const dialogFields = [
+      ...approverFields.map((field) => ({
+        name: field.key,
+        label: field.label,
+        type: field.type === "textarea" ? "textarea" : field.type,
+        required: field.required,
+        hint: field.hint || "",
+      })),
+      { name: "comment", label: "审批意见", value: "同意", required: false },
+    ];
+    const values = await openDialog({
+      title: "通过审批",
+      description: approverFields.length ? "以下安排将随审批单留痕，申请人可见。" : "",
+      confirmText: "通过",
+      fields: dialogFields,
+    });
+    if (!values) return;
+    const { comment, ...approverData } = values;
     try {
-      await act("approve", comment);
+      await apiRequest(`/api/oa/requests/${detail.id}/approve`, {
+        method: "POST",
+        body: { comment, approverData },
+      });
+      close();
+      showToast("已通过");
+      loadOaRequests();
     } catch (error) {
       showToast(error.message || "操作失败");
     }
@@ -14512,6 +14554,251 @@ async function openOaDetail(requestId) {
     }
   });
 }
+
+// ===========================================================================
+// 审批流程设置（系统管理员自定义审批链路与表单）
+// ===========================================================================
+let oaAdminState = { templates: [], approverRoles: [], fieldTypes: [], loading: false, error: "" };
+
+async function loadOaAdminTemplates() {
+  if (!backendMode()) return;
+  oaAdminState = { ...oaAdminState, loading: true, error: "" };
+  render();
+  try {
+    const result = await apiRequest("/api/oa/admin/templates");
+    oaAdminState = {
+      templates: result.templates || [],
+      approverRoles: result.approverRoles || [],
+      fieldTypes: result.fieldTypes || [],
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    oaAdminState = { ...oaAdminState, loading: false, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+function roleLabelOf(value) {
+  return oaAdminState.approverRoles.find((item) => item.value === value)?.label || value;
+}
+
+function renderApprovalSettingsView() {
+  if (state.activeView !== "approvalSettings") return;
+  const list = document.querySelector("#oaTemplateAdminList");
+  if (!list) return;
+  if (oaAdminState.error) {
+    list.innerHTML = loadErrorHtml(oaAdminState.error, "oaAdminTemplates");
+    return;
+  }
+  if (oaAdminState.loading && !oaAdminState.templates.length) {
+    list.innerHTML = skeletonListHtml(4);
+    return;
+  }
+  if (!oaAdminState.templates.length) {
+    list.innerHTML = `<div class="empty-state">暂无审批类型，点击右上角新建</div>`;
+    return;
+  }
+  list.innerHTML = oaAdminState.templates
+    .map((template) => {
+      const chain = template.steps
+        .map(
+          (step, index) => `
+            <span class="approval-chain-node">
+              <b>${index + 1}. ${escapeHtml(step.name)}</b>
+              <small>${step.approverRoles.map(roleLabelOf).map(escapeHtml).join(" / ")}${step.approverMode === "all" ? " · 会签" : ""}</small>
+              ${(step.approverFields || []).length ? `<small class="approval-chain-extra">需填写：${step.approverFields.map((f) => escapeHtml(f.label)).join("、")}</small>` : ""}
+            </span>
+          `,
+        )
+        .join('<span class="approval-chain-arrow">→</span>');
+      return `
+        <div class="approval-template-card ${template.status === "disabled" ? "is-disabled" : ""}">
+          <div class="approval-template-head">
+            <span class="approval-entry-icon">${escapeHtml(template.icon)}</span>
+            <div class="approval-template-title">
+              <strong>${escapeHtml(template.name)}</strong>
+              <small>${escapeHtml(template.category)} · ${template.formFields.length} 个表单字段 · ${template.steps.length} 级审批${template.builtIn ? " · 内置" : ""}</small>
+            </div>
+            <span class="status-pill ${template.status === "disabled" ? "muted" : "done"}">${template.status === "disabled" ? "已停用" : "启用中"}</span>
+          </div>
+          <p class="approval-template-desc">${escapeHtml(template.description || "")}</p>
+          <div class="approval-template-applicants">可发起：${template.applicantRoles.map((r) => escapeHtml(r === "teacher" ? "老师" : roleLabelOf(r))).join("、")}</div>
+          <div class="approval-chain">${chain}</div>
+          <div class="approval-template-actions">
+            <button class="ghost-button compact-button" data-oa-tpl-edit="${escapeHtml(template.key)}" type="button">编辑流程</button>
+            <button class="ghost-button compact-button" data-oa-tpl-toggle="${escapeHtml(template.key)}" data-next-status="${template.status === "disabled" ? "active" : "disabled"}" type="button">${template.status === "disabled" ? "启用" : "停用"}</button>
+            ${template.builtIn ? "" : `<button class="ghost-button compact-button" data-oa-tpl-delete="${escapeHtml(template.key)}" type="button">删除</button>`}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+// 用 JSON 编辑流程定义：兼顾灵活性与实现成本，字段含义在弹层里写清楚
+function templateEditorPayload(template) {
+  return JSON.stringify(
+    {
+      name: template.name,
+      icon: template.icon,
+      category: template.category,
+      description: template.description,
+      applicantRoles: template.applicantRoles,
+      formFields: template.formFields.map((field) => ({
+        key: field.key,
+        label: field.label,
+        type: field.type,
+        required: Boolean(field.required),
+        ...(field.options?.length ? { options: field.options } : {}),
+        ...(field.hint ? { hint: field.hint } : {}),
+      })),
+      steps: template.steps.map((step) => ({
+        name: step.name,
+        approverRoles: step.approverRoles,
+        approverMode: step.approverMode || "any",
+        ...(step.approverFields?.length
+          ? {
+              approverFields: step.approverFields.map((field) => ({
+                key: field.key,
+                label: field.label,
+                type: field.type,
+                required: Boolean(field.required),
+                ...(field.hint ? { hint: field.hint } : {}),
+              })),
+            }
+          : {}),
+      })),
+    },
+    null,
+    2,
+  );
+}
+
+const OA_EDITOR_HINT = [
+  "applicantRoles：可发起角色，取值 teacher / admin / finance / hr / division_head / system_admin",
+  "formFields：申请人填写的字段，type 支持 text / textarea / number / date / select / radio；select 与 radio 必须给 options",
+  "steps：审批环节，按顺序执行；approverMode 填 any（任一人通过）或 all（每个角色都要通过）",
+  "approverFields：该环节要求审批人填写的内容，例如代课安排，由上级在审批时录入",
+].join("\n");
+
+async function openOaTemplateEditor(templateKey) {
+  const template = oaAdminState.templates.find((item) => item.key === templateKey);
+  if (!template) return;
+  const result = await openDialog({
+    title: `编辑「${template.name}」流程`,
+    description: OA_EDITOR_HINT,
+    confirmText: "保存",
+    fields: [
+      {
+        name: "payload",
+        label: "流程定义（JSON）",
+        type: "textarea",
+        rows: 16,
+        value: templateEditorPayload(template),
+        required: true,
+      },
+    ],
+    onConfirm: async (values) => {
+      let payload;
+      try {
+        payload = JSON.parse(values.payload);
+      } catch {
+        throw new Error("JSON 格式有误，请检查括号与引号");
+      }
+      await apiRequest(`/api/oa/admin/templates/${templateKey}`, { method: "PATCH", body: payload });
+    },
+  });
+  if (result) {
+    showToast("流程已更新");
+    loadOaAdminTemplates();
+  }
+}
+
+async function openOaTemplateCreator() {
+  const sample = {
+    name: "用章申请",
+    icon: "🔖",
+    category: "行政",
+    description: "公章、合同章使用申请",
+    applicantRoles: ["teacher", "admin", "hr"],
+    formFields: [
+      { key: "sealType", label: "印章类型", type: "select", required: true, options: ["公章", "合同章"] },
+      { key: "purpose", label: "用途说明", type: "textarea", required: true },
+    ],
+    steps: [
+      { name: "部门负责人审批", approverRoles: ["division_head", "admin"], approverMode: "any" },
+      { name: "总校批准", approverRoles: ["system_admin"], approverMode: "any" },
+    ],
+  };
+  const result = await openDialog({
+    title: "新建审批类型",
+    description: OA_EDITOR_HINT,
+    confirmText: "创建",
+    fields: [
+      { name: "key", label: "模板标识", required: true, placeholder: "小写字母/数字/下划线，如 seal_use", hint: "创建后不可修改" },
+      {
+        name: "payload",
+        label: "流程定义（JSON）",
+        type: "textarea",
+        rows: 16,
+        value: JSON.stringify(sample, null, 2),
+        required: true,
+      },
+    ],
+    onConfirm: async (values) => {
+      let payload;
+      try {
+        payload = JSON.parse(values.payload);
+      } catch {
+        throw new Error("JSON 格式有误，请检查括号与引号");
+      }
+      await apiRequest("/api/oa/admin/templates", { method: "POST", body: { ...payload, key: values.key } });
+    },
+  });
+  if (result) {
+    showToast("审批类型已创建");
+    loadOaAdminTemplates();
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  if (event.target.closest("#oaTemplateCreate")) {
+    openOaTemplateCreator();
+    return;
+  }
+  const editButton = event.target.closest("[data-oa-tpl-edit]");
+  if (editButton) {
+    openOaTemplateEditor(editButton.dataset.oaTplEdit);
+    return;
+  }
+  const toggleButton = event.target.closest("[data-oa-tpl-toggle]");
+  if (toggleButton) {
+    const nextStatus = toggleButton.dataset.nextStatus;
+    try {
+      await apiRequest(`/api/oa/admin/templates/${toggleButton.dataset.oaTplToggle}`, {
+        method: "PATCH",
+        body: { status: nextStatus },
+      });
+      showToast(nextStatus === "disabled" ? "已停用" : "已启用");
+      loadOaAdminTemplates();
+    } catch (error) {
+      showToast(error.message || "操作失败");
+    }
+    return;
+  }
+  const deleteButton = event.target.closest("[data-oa-tpl-delete]");
+  if (deleteButton) {
+    if (!(await confirmDialog("删除审批类型", { description: "删除后该类型不再可用，已完成的历史单据仍可查看。", confirmText: "删除", danger: true }))) return;
+    try {
+      await apiRequest(`/api/oa/admin/templates/${deleteButton.dataset.oaTplDelete}`, { method: "DELETE" });
+      showToast("已删除");
+      loadOaAdminTemplates();
+    } catch (error) {
+      showToast(error.message || "删除失败");
+    }
+  }
+});
 
 let hrFlowsState = {
   flows: [],
@@ -14779,6 +15066,7 @@ document.addEventListener("click", async (event) => {
   if (retryButton) {
     const key = retryButton.dataset.retryAction;
     if (key === "oaRequests") loadOaRequests();
+    else if (key === "oaAdminTemplates") loadOaAdminTemplates();
     else if (key === "hrEmployees") loadHrEmployeePage();
     else if (key === "hrFlows") loadHrFlows();
     else if (key === "hrOrg") loadHrOrgData();

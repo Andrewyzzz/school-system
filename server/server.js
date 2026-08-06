@@ -125,6 +125,14 @@ import {
 } from "./hr.js";
 import {
   listTemplatesForRole,
+  listAllTemplates,
+  createOaTemplate,
+  updateOaTemplate,
+  setOaTemplateStatus,
+  deleteOaTemplate,
+  ensureOaTemplates,
+  OA_APPROVER_ROLES,
+  OA_FIELD_TYPES,
   createOaRequest,
   actOnOaRequest,
   withdrawOaRequest,
@@ -1673,7 +1681,48 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/oa/templates") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
         if (!auth) return;
-        sendJson(res, 200, { templates: listTemplatesForRole(auth.account.role) });
+        sendJson(res, 200, { templates: listTemplatesForRole(db, auth.account.role) });
+        return;
+      }
+
+      // ---- 审批流程配置（系统管理员自定义）----
+      if (req.method === "GET" && url.pathname === "/api/oa/admin/templates") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        sendJson(res, 200, {
+          templates: listAllTemplates(db),
+          approverRoles: OA_APPROVER_ROLES,
+          fieldTypes: OA_FIELD_TYPES,
+        });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/oa/admin/templates") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const template = createOaTemplate(db, body, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { template });
+        return;
+      }
+
+      const templateMatch = url.pathname.match(/^\/api\/oa\/admin\/templates\/([^/]+)$/);
+      if (templateMatch && (req.method === "PATCH" || req.method === "DELETE")) {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        if (req.method === "DELETE") {
+          const result = deleteOaTemplate(db, templateMatch[1]);
+          await saveDatabase(db);
+          sendJson(res, 200, result);
+          return;
+        }
+        const body = await readJsonBody(req);
+        const template = body.status
+          ? setOaTemplateStatus(db, templateMatch[1], body.status, auth.account)
+          : updateOaTemplate(db, templateMatch[1], body, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { template });
         return;
       }
 
@@ -1832,6 +1881,9 @@ export async function createServer() {
   const db = await ensureDatabase();
 
   // M3：人事审批超时扫描（每小时一次，停留超 3 个工作日提醒；启动即扫一次）
+  // 审批模板首次运行时播种（幂等，已有模板不会被覆盖）
+  if (ensureOaTemplates(db)) await saveDatabase(db);
+
   const runHrTimeoutScan = async () => {
     try {
       const notified = scanHrFlowTimeouts(db);
