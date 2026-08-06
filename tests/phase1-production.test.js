@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createDefaultPayrollRules } from "../server/payroll.js";
 import {
   approveMonthlyWorkload,
   archiveAcademicTerm,
@@ -742,7 +743,8 @@ assert.throws(
 payroll = publishTeacherPayrollDetail(db, teacher.id, "2026-06", finance);
 assert.equal(payroll.generated.status, "generated");
 assert.ok(payroll.generated.publishedAt);
-assert.equal(payroll.salarySchemeVersion, "fuyuan-dedicated-teacher-2026-v1");
+// 版本号随薪酬制度修订递增，此处只断言与当前方案一致，避免每次修订都要改测试
+assert.equal(payroll.salarySchemeVersion, createDefaultPayrollRules().teacherSalaryScheme.version);
 assert.ok(payroll.rows.some((row) => row.name === "考核工资"), "expected assessment salary row");
 assert.ok(payroll.rows.some((row) => row.name === "校龄工资"), "expected seniority salary row");
 assert.ok(payroll.rows.some((row) => row.name === "住房补贴"), "expected housing allowance row");

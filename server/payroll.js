@@ -1,5 +1,8 @@
 const MONEY_PRECISION = 100;
-const SCHEME_VERSION = "fuyuan-dedicated-teacher-2026-v1";
+// 方案版本：随薪酬制度修订递增。存量库中的旧版本方案会在 normalizePayrollRules 中
+// 自动升级到本版制度标准（见 upgradeSchemeToCurrentPolicy），避免"改了代码但库里还是旧标准"。
+const SCHEME_VERSION = "fuyuan-policy-2026-09";
+const LEGACY_SCHEME_VERSIONS = new Set(["fuyuan-dedicated-teacher-2026-v1"]);
 
 export const DEFAULT_PAYROLL_RULES = {
   baseSalary: 6500,
@@ -16,20 +19,21 @@ export const DEFAULT_PAYROLL_RULES = {
     version: SCHEME_VERSION,
     settlementMode: "actualCompletedLessons",
     monthlyWeeks: 4.4,
-    // 基本工资按职称档（0726 制度第二章·二）
+    // 基本工资按【职称】档（0726 制度第二章·二）
+    // 注意：职称与学历互不绑定——一级职称不等于博士、二级职称不等于硕士，
+    // 学历另按 degreeAllowance 单独发放补贴，两者可同时享受。
     baseSalaryByQualification: {
       seniorProfessor: 3520,
       seniorTeacher: 3320,
-      firstOrDoctor: 3120,
-      secondOrMaster: 2820,
-      thirdOrBachelor: 2620,
-      ungradedOrJuniorCollege: 2520,
+      first: 3120,
+      second: 2820,
+      third: 2620,
+      ungraded: 2520,
     },
-    // 学历补贴（制度注：硕士 500 / 博士 800）。基本工资档已含"一级(博士)/二级(硕士)"，
-    // 是否再叠加待学校确认（澄清项 C2），默认不叠加；确认叠加时把金额填入即可，无需改代码。
+    // 学历补贴（制度：硕士 500 元/月、博士 800 元/月），与职称档并行发放
     degreeAllowance: {
-      master: 0,
-      doctor: 0,
+      master: 500,
+      doctor: 800,
     },
     // 试用期工资（制度第六条）：转正后工资的 80%，不低于深圳市最低工资标准
     // scope 待学校确认（澄清项 C6）：all=全部薪酬项，fixed=仅固定项与津贴
@@ -250,13 +254,40 @@ export function createDefaultPayrollRules() {
   return clone(DEFAULT_PAYROLL_RULES);
 }
 
+// 制度修订升级：库里存的是旧版方案时，制度规定的标准（工资档、系数、津贴标准等）
+// 以新制度为准重建，仅保留学校自行维护的补充项；同版本则按常规深合并，尊重学校的配置调整。
+const POLICY_OWNED_KEYS = [
+  "baseSalaryByQualification",
+  "degreeAllowance",
+  "seniorityRules",
+  "seniorityAllowance",
+  "housingAllowance",
+  "assessmentSalary",
+  "assessmentGrades",
+  "probationRule",
+  "stageLessonRules",
+  "postAllowances",
+];
+
+export function upgradeSchemeToCurrentPolicy(defaultScheme, storedScheme = {}) {
+  const storedVersion = storedScheme?.version;
+  const isLegacy = storedVersion && storedVersion !== SCHEME_VERSION && LEGACY_SCHEME_VERSIONS.has(storedVersion);
+  if (!isLegacy) return deepMerge(defaultScheme, storedScheme);
+  // 旧版：制度参数整体以新标准覆盖，非制度类设置（如结算模式、周数）仍沿用原值
+  const preserved = { ...storedScheme };
+  POLICY_OWNED_KEYS.forEach((key) => delete preserved[key]);
+  const upgraded = deepMerge(defaultScheme, preserved);
+  upgraded.version = SCHEME_VERSION;
+  return upgraded;
+}
+
 export function normalizePayrollRules(rules = {}) {
   const defaults = createDefaultPayrollRules();
   const merged = {
     ...defaults,
     ...(rules || {}),
   };
-  merged.teacherSalaryScheme = deepMerge(
+  merged.teacherSalaryScheme = upgradeSchemeToCurrentPolicy(
     defaults.teacherSalaryScheme,
     rules?.teacherSalaryScheme || {},
   );
@@ -283,13 +314,39 @@ function numberFromTeacherId(teacher = {}) {
   return matched ? Number.parseInt(matched[1], 10) : 1;
 }
 
+// 存量数据兼容：旧档位键把职称与学历混在一起，统一映射到纯职称键
+const LEGACY_QUALIFICATION_ALIASES = {
+  firstOrDoctor: "first",
+  secondOrMaster: "second",
+  thirdOrBachelor: "third",
+  ungradedOrJuniorCollege: "ungraded",
+};
+
+export function normalizeQualificationGrade(grade = "") {
+  return LEGACY_QUALIFICATION_ALIASES[grade] || grade || "third";
+}
+
+// 只按【职称】判档，学历不参与（博士/硕士走 degreeAllowance）
 function qualificationFromTitle(title = "", seedIndex = 1) {
   if (title.includes("正高")) return "seniorProfessor";
   if (title.includes("高级")) return "seniorTeacher";
-  if (title.includes("博士") || title.includes("一级") || title.includes("骨干")) return "firstOrDoctor";
-  if (title.includes("硕士") || title.includes("二级")) return "secondOrMaster";
-  if (title.includes("大专") || title.includes("未评级")) return "ungradedOrJuniorCollege";
-  return seedIndex % 4 === 0 ? "secondOrMaster" : "thirdOrBachelor";
+  if (title.includes("一级")) return "first";
+  if (title.includes("二级")) return "second";
+  if (title.includes("三级")) return "third";
+  if (title.includes("未评级")) return "ungraded";
+  return seedIndex % 4 === 0 ? "second" : "third";
+}
+
+// 学历：优先取档案 degree 字段；存量数据未维护时从职称文本兜底推断
+export function degreeFromTeacher(teacher = {}) {
+  const explicit = String(teacher.degree || teacher.salaryProfile?.degree || "").toLowerCase();
+  if (["doctor", "phd", "博士"].some((key) => explicit.includes(key))) return "doctor";
+  if (["master", "硕士"].some((key) => explicit.includes(key))) return "master";
+  if (explicit) return "";
+  const title = String(teacher.title || "");
+  if (title.includes("博士")) return "doctor";
+  if (title.includes("硕士")) return "master";
+  return "";
 }
 
 function schoolYearsFromHiredAt(hiredAt = "", fallback = 1) {
@@ -322,9 +379,12 @@ export function defaultTeacherSalaryProfile(teacher = {}, seedIndex = null) {
   return {
     version: SCHEME_VERSION,
     qualificationGrade: qualificationFromTitle(title, index),
+    // 学历与职称独立：博士/硕士按学历补贴发放，不影响职称档
+    degree: degreeFromTeacher(teacher),
     schoolYears: schoolYearsFromHiredAt(teacher.hiredAt, (index % 6) + 1),
     assessmentBand: defaultAssessmentBand(teacher),
-    housingTier: isBackbone || gradeHead || deputyGradeHead ? "backboneOrGradeHead" : "teacher",
+    // 制度规定专任教师住房补贴统一 2100，不再按骨干/年级长分档
+    housingTier: "teacher",
     probationRate: 1,
     roles: {
       homeroom: isHomeroom,
@@ -478,16 +538,17 @@ function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, pay
 
 function baseSalaryComponent(profile, scheme) {
   // 试用期折算已移到汇总层统一处理（按制度"转正后工资的 80%"，范围可配置），此处只出标准额
-  const amount = Number(scheme.baseSalaryByQualification?.[profile.qualificationGrade] || 0);
+  const grade = normalizeQualificationGrade(profile.qualificationGrade);
+  const amount = Number(scheme.baseSalaryByQualification?.[grade] || 0);
   return {
     name: "基本工资",
-    basis: `职称/学历档：${profile.qualificationGrade}`,
+    basis: `职称档：${grade}`,
     amount: roundMoney(amount),
     category: "fixed",
   };
 }
 
-// 学历补贴（硕士/博士）。默认 0，学校确认需叠加时改配置即可
+// 学历补贴（硕士/博士），与职称档并行发放，互不影响
 function degreeAllowanceComponent(profile, scheme) {
   const degree = profile.degree || "";
   const amount = Number(scheme.degreeAllowance?.[degree] || 0);

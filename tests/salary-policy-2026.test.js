@@ -8,6 +8,7 @@ import {
   seniorityAllowanceFor,
   applyProbationPolicy,
   applyPostAllowancePolicy,
+  normalizePayrollRules,
 } from "../server/payroll.js";
 
 const scheme = DEFAULT_PAYROLL_RULES.teacherSalaryScheme;
@@ -41,10 +42,47 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   const b = scheme.baseSalaryByQualification;
   assert.equal(b.seniorProfessor, 3520, "正高基本工资应为 3520");
   assert.equal(b.seniorTeacher, 3320, "高级基本工资应为 3320");
-  assert.equal(b.firstOrDoctor, 3120, "一级(博士)基本工资应为 3120");
-  assert.equal(b.secondOrMaster, 2820, "二级(硕士)基本工资应为 2820");
-  assert.equal(b.thirdOrBachelor, 2620, "三级基本工资应为 2620");
-  assert.equal(b.ungradedOrJuniorCollege, 2520, "未评级基本工资应为 2520");
+  assert.equal(b.first, 3120, "一级职称基本工资应为 3120");
+  assert.equal(b.second, 2820, "二级职称基本工资应为 2820");
+  assert.equal(b.third, 2620, "三级职称基本工资应为 2620");
+  assert.equal(b.ungraded, 2520, "未评级基本工资应为 2520");
+  // 职称与学历解绑：档位键中不得再出现学历字样
+  assert.ok(!("firstOrDoctor" in b), "职称档不应与博士学历绑定");
+  assert.ok(!("secondOrMaster" in b), "职称档不应与硕士学历绑定");
+}
+
+// -------------------------------------------------- 职称与学历互不绑定
+{
+  // 一级职称 + 博士学历：基本工资走职称档，学历补贴另发
+  const doctorFirst = runPayroll({
+    teacher: baseTeacher({ title: "一级教师" }),
+    profile: { qualificationGrade: "first", degree: "doctor" },
+  });
+  assert.equal(amountOf(doctorFirst, "基本工资"), 3120, "一级职称基本工资 3120");
+  assert.equal(amountOf(doctorFirst, "学历补贴"), 800, "博士学历补贴 800，与职称并行");
+
+  // 三级职称 + 硕士学历：低职称同样享受学历补贴
+  const masterThird = runPayroll({
+    teacher: baseTeacher({ title: "三级教师" }),
+    profile: { qualificationGrade: "third", degree: "master" },
+  });
+  assert.equal(amountOf(masterThird, "基本工资"), 2620, "三级职称基本工资 2620");
+  assert.equal(amountOf(masterThird, "学历补贴"), 500, "硕士学历补贴 500");
+
+  // 高职称 + 无学位：只有职称档，无学历补贴
+  const seniorNoDegree = runPayroll({
+    teacher: baseTeacher({ title: "高级教师" }),
+    profile: { qualificationGrade: "seniorTeacher", degree: "" },
+  });
+  assert.equal(amountOf(seniorNoDegree, "基本工资"), 3320);
+  assert.equal(amountOf(seniorNoDegree, "学历补贴"), null, "无学位不发学历补贴");
+
+  // 存量数据旧键自动归一
+  const legacy = runPayroll({
+    teacher: baseTeacher(),
+    profile: { qualificationGrade: "firstOrDoctor" },
+  });
+  assert.equal(amountOf(legacy, "基本工资"), 3120, "旧键 firstOrDoctor 应归一化为一级职称");
 }
 
 // ------------------------------------------------------------ 校龄津贴四公式
@@ -231,25 +269,86 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   assert.equal(scheme.assessmentSalary.primaryCoreHigh, 3430);
 }
 
-// -------------------------------------------------------------- 学历补贴开关
+// ------------------------------------------ 全部标准可通过配置随时调整
 {
-  const teacher = baseTeacher();
-  const off = runPayroll({ teacher, profile: { degree: "doctor" } });
-  assert.equal(amountOf(off, "学历补贴"), null, "默认不叠加学历补贴（待学校确认）");
+  const teacher = baseTeacher({ title: "一级教师" });
+  const custom = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
+  // 模拟学校通过配置接口调整各类标准
+  custom.teacherSalaryScheme.baseSalaryByQualification.first = 3500;
+  custom.teacherSalaryScheme.degreeAllowance.doctor = 1000;
+  custom.teacherSalaryScheme.housingAllowance.teacher = 2300;
+  custom.teacherSalaryScheme.assessmentSalary.high = 1600;
+  custom.teacherSalaryScheme.seniorityRules.teacher.cap = 800;
+  custom.teacherSalaryScheme.postAllowances.high.homeroomBase = 700;
 
-  const on = calculateDedicatedTeacherPayroll({
-    teacher: { ...teacher, salaryProfile: { degree: "doctor", roles: {} } },
-    lessons: [],
-    month: "2026-09",
-    payrollRules: {
-      ...DEFAULT_PAYROLL_RULES,
-      teacherSalaryScheme: {
-        ...scheme,
-        degreeAllowance: { master: 500, doctor: 800 },
+  const result = calculateDedicatedTeacherPayroll({
+    teacher: {
+      ...teacher,
+      salaryProfile: {
+        qualificationGrade: "first",
+        degree: "doctor",
+        assessmentBand: "high",
+        schoolYears: 20,
+        roles: { homeroom: true, homeroomStudentCount: 40 },
       },
     },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: custom,
   });
-  assert.equal(on.components.find((i) => i.name === "学历补贴")?.amount, 800, "开启后博士补贴 800");
+  const pick = (name) => result.components.find((i) => i.name === name)?.amount;
+  assert.equal(pick("基本工资"), 3500, "基本工资标准可调");
+  assert.equal(pick("学历补贴"), 1000, "学历补贴标准可调");
+  assert.equal(pick("住房补贴"), 2300, "住房补贴标准可调");
+  assert.equal(pick("考核工资"), 1600, "考核工资标准可调");
+  assert.equal(pick("校龄工资"), 800, "校龄封顶可调");
+  assert.equal(pick("班主任津贴"), 40 * 60 + 700, "班主任月固定额可调");
+
+  // 最低工资标准可调，且调整后即时兜底
+  const minWageRules = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
+  minWageRules.teacherSalaryScheme.probationRule.minimumWage = 9999;
+  const probation = calculateDedicatedTeacherPayroll({
+    teacher: { ...teacher, salaryProfile: { qualificationGrade: "first", probationRate: 0.8, roles: {} } },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: minWageRules,
+  });
+  assert.equal(probation.grossPay, 9999, "最低工资标准调整后应即时补足");
+  assert.ok(
+    probation.components.some((i) => i.name === "最低工资补足"),
+    "补足项应在工资单中列示",
+  );
+}
+
+// -------------------------------------------- 旧版方案自动升级到新制度标准
+{
+  // 模拟存量库：旧版本号 + 旧制度参数（改制前的值）
+  const legacyStored = {
+    version: "fuyuan-dedicated-teacher-2026-v1",
+    settlementMode: "actualCompletedLessons",
+    monthlyWeeks: 4.4,
+    assessmentSalary: { high: 1180, middle: 3280 },
+    baseSalaryByQualification: { seniorTeacher: 3120, firstOrDoctor: 2920 },
+    stageLessonRules: { middle: { subjectCoefficients: { biology: 1.2 } } },
+  };
+  const upgraded = normalizePayrollRules({ teacherSalaryScheme: legacyStored }).teacherSalaryScheme;
+  assert.equal(upgraded.version, "fuyuan-policy-2026-09", "旧版方案应升级版本号");
+  assert.equal(upgraded.assessmentSalary.high, 1480, "旧考核标准 1180 应升级为制度值 1480");
+  assert.equal(upgraded.baseSalaryByQualification.seniorTeacher, 3320, "旧基本工资应升级为制度值");
+  assert.equal(upgraded.baseSalaryByQualification.first, 3120, "应改用纯职称档键");
+  assert.equal(upgraded.stageLessonRules.middle.subjectCoefficients.biology, 1, "旧学科系数应修正");
+  assert.equal(upgraded.monthlyWeeks, 4.4, "非制度类设置应沿用原值");
+
+  // 同版本：学校自行调整的配置必须保留，不被默认值覆盖
+  const schoolCustom = {
+    version: "fuyuan-policy-2026-09",
+    assessmentSalary: { high: 1600 },
+    probationRule: { minimumWage: 2800 },
+  };
+  const kept = normalizePayrollRules({ teacherSalaryScheme: schoolCustom }).teacherSalaryScheme;
+  assert.equal(kept.assessmentSalary.high, 1600, "同版本下学校自定义标准应保留");
+  assert.equal(kept.probationRule.minimumWage, 2800, "同版本下最低工资自定义值应保留");
+  assert.equal(kept.assessmentSalary.middle, 3280, "未自定义项仍取制度默认值");
 }
 
 console.log("salary policy 2026 checks passed");

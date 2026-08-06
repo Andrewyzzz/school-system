@@ -3509,16 +3509,23 @@ async function saveBackendPayrollRules() {
 }
 
 function salaryProfileFromInputs() {
+  const assessmentGrade = document.querySelector("#salaryAssessmentGrade")?.value || "default";
   return {
-    qualificationGrade: document.querySelector("#salaryQualificationGrade")?.value || "thirdOrBachelor",
+    qualificationGrade: document.querySelector("#salaryQualificationGrade")?.value || "third",
+    // 学历与职称各自独立：博士/硕士按学历补贴发放，不影响职称档
+    degree: document.querySelector("#salaryDegree")?.value || "",
     schoolYears: Number(document.querySelector("#salarySchoolYears")?.value || 0),
     assessmentBand: document.querySelector("#salaryAssessmentBand")?.value || "high",
+    // 线下评审结果由财务/学部在档案中选择，系统按等级系数浮动考核工资
+    monthlyAssessment: { grade: assessmentGrade },
     housingTier: document.querySelector("#salaryHousingTier")?.value || "teacher",
     probationRate: Number(document.querySelector("#salaryProbationRate")?.value || 1),
+    postAllowanceMode: document.querySelector("#salaryPostAllowanceMode")?.value || "stack",
     attendanceDeduction: 0,
     roles: {
       homeroom: Boolean(document.querySelector("#salaryRoleHomeroom")?.checked),
       homeroomStudentCount: Number(document.querySelector("#salaryHomeroomStudentCount")?.value || 0),
+      gradeClassCount: Number(document.querySelector("#salaryGradeClassCount")?.value || 0),
       gradeHead: Boolean(document.querySelector("#salaryRoleGradeHead")?.checked),
       deputyGradeHead: Boolean(document.querySelector("#salaryRoleDeputyGradeHead")?.checked),
       teachingResearchLeader: Boolean(document.querySelector("#salaryRoleTeachingResearchLeader")?.checked),
@@ -11326,6 +11333,20 @@ function syncHomeroomStudentField(profile = null) {
     input.disabled = !canEdit || !isHomeroom;
     if (!isHomeroom) input.value = "0";
   }
+  syncGradeHeadClassField(profile);
+}
+
+// 年级主任津贴按管辖班级数计算（初高中），仅勾选年级主任后可填
+function syncGradeHeadClassField(profile = null) {
+  const isGradeHead = Boolean(document.querySelector("#salaryRoleGradeHead")?.checked);
+  const field = document.querySelector("#gradeHeadClassField");
+  const input = document.querySelector("#salaryGradeClassCount");
+  const canEdit = profile ? canEditSalaryProfile(profile) : salaryProfileEditContextAllowsInput();
+  if (field) field.hidden = !isGradeHead;
+  if (input) {
+    input.disabled = !canEdit || !isGradeHead;
+    if (!isGradeHead) input.value = "0";
+  }
 }
 
 function syncSalaryProfileEditState(profile) {
@@ -11354,10 +11375,13 @@ function syncSalaryProfileEditState(profile) {
 
   [
     "#salaryQualificationGrade",
+    "#salaryDegree",
     "#salarySchoolYears",
     "#salaryAssessmentBand",
+    "#salaryAssessmentGrade",
     "#salaryHousingTier",
     "#salaryProbationRate",
+    "#salaryPostAllowanceMode",
   ].forEach((selector) => {
     const element = document.querySelector(selector);
     if (element) element.disabled = !editable;
@@ -11395,6 +11419,18 @@ function syncSalaryProfileEditState(profile) {
   syncHomeroomStudentField(profile);
 }
 
+// 存量档案的职称档旧键（把职称与学历混在一起）在表单中归一到纯职称档
+const LEGACY_QUALIFICATION_FORM_ALIASES = {
+  firstOrDoctor: "first",
+  secondOrMaster: "second",
+  thirdOrBachelor: "third",
+  ungradedOrJuniorCollege: "ungraded",
+};
+
+function normalizeQualificationGradeForForm(grade) {
+  return LEGACY_QUALIFICATION_FORM_ALIASES[grade] || grade || "third";
+}
+
 function renderSalaryProfilePanel(payroll) {
   const profile = payroll?.teacher?.salaryProfile || payroll?.salaryProfile || null;
   salaryProfilePanelCurrentProfile = profile;
@@ -11402,11 +11438,15 @@ function renderSalaryProfilePanel(payroll) {
   if (!profile) {
     [
       "#salaryQualificationGrade",
+      "#salaryDegree",
       "#salarySchoolYears",
       "#salaryAssessmentBand",
+      "#salaryAssessmentGrade",
       "#salaryHousingTier",
       "#salaryProbationRate",
+      "#salaryPostAllowanceMode",
       "#salaryHomeroomStudentCount",
+      "#salaryGradeClassCount",
       "#salaryManualItemsJson",
     ].forEach((selector) => setInputValue(selector, selector === "#salaryManualItemsJson" ? "[]" : ""));
     [
@@ -11425,12 +11465,16 @@ function renderSalaryProfilePanel(payroll) {
     return;
   }
 
-  setInputValue("#salaryQualificationGrade", profile.qualificationGrade || "thirdOrBachelor");
+  setInputValue("#salaryQualificationGrade", normalizeQualificationGradeForForm(profile.qualificationGrade));
+  setInputValue("#salaryDegree", profile.degree || "");
   setInputValue("#salarySchoolYears", profile.schoolYears || 0);
   setInputValue("#salaryAssessmentBand", profile.assessmentBand || "high");
+  setInputValue("#salaryAssessmentGrade", profile.monthlyAssessment?.grade || "default");
   setInputValue("#salaryHousingTier", profile.housingTier || "teacher");
   setInputValue("#salaryProbationRate", profile.probationRate ?? 1);
+  setInputValue("#salaryPostAllowanceMode", profile.postAllowanceMode || "stack");
   setInputValue("#salaryHomeroomStudentCount", profile.roles?.homeroomStudentCount || 0);
+  setInputValue("#salaryGradeClassCount", profile.roles?.gradeClassCount || 0);
   setInputValue("#salaryManualItemsJson", JSON.stringify(profile.manualItems || [], null, 2));
   setCheckboxValue("#salaryRoleHomeroom", profile.roles?.homeroom);
   setCheckboxValue("#salaryRoleGradeHead", profile.roles?.gradeHead);

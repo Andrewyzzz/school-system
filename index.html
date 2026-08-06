@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260708-ux-p0p1-3" />
+    <link rel="stylesheet" href="styles.css?v=20260708-salary-2026-1" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -1707,14 +1707,21 @@
                 </div>
               </div>
               <div class="payroll-rule-grid salary-profile-grid">
-                <label class="field-label">职称/学历档
+                <label class="field-label">职称档
                   <select id="salaryQualificationGrade" class="lesson-select">
                     <option value="seniorProfessor">正高</option>
                     <option value="seniorTeacher">高级</option>
-                    <option value="firstOrDoctor">一级/博士</option>
-                    <option value="secondOrMaster">二级/硕士</option>
-                    <option value="thirdOrBachelor">三级/本科</option>
-                    <option value="ungradedOrJuniorCollege">未评级/大专</option>
+                    <option value="first">一级</option>
+                    <option value="second">二级</option>
+                    <option value="third">三级</option>
+                    <option value="ungraded">未评级</option>
+                  </select>
+                </label>
+                <label class="field-label">学历
+                  <select id="salaryDegree" class="lesson-select">
+                    <option value="">本科及以下（无补贴）</option>
+                    <option value="master">硕士</option>
+                    <option value="doctor">博士</option>
                   </select>
                 </label>
                 <label class="field-label">校龄<input id="salarySchoolYears" type="number" min="0" /></label>
@@ -1727,11 +1734,21 @@
                     <option value="primarySpecial">小学艺体信息心理</option>
                   </select>
                 </label>
+                <label class="field-label">本月考核结果
+                  <select id="salaryAssessmentGrade" class="lesson-select">
+                    <option value="default">合格（全额）</option>
+                    <option value="excellent">优秀（上浮）</option>
+                    <option value="good">良好（上浮）</option>
+                    <option value="warning">基本合格（扣减）</option>
+                    <option value="unqualified">不合格（扣减）</option>
+                  </select>
+                </label>
                 <label class="field-label">住房档
                   <select id="salaryHousingTier" class="lesson-select">
-                    <option value="chief">首席</option>
-                    <option value="backboneOrGradeHead">骨干/年级主任</option>
-                    <option value="teacher">普通教师</option>
+                    <option value="teacher">专任教师</option>
+                    <option value="chief">校级领导/学部主任</option>
+                    <option value="middleManager">部门正职/学部副主任</option>
+                    <option value="otherAdmin">其他行政</option>
                   </select>
                 </label>
               </div>
@@ -1753,6 +1770,13 @@
                 </label>
                 <p>仅勾选“班主任”后参与计算，用于按学生人数核算班主任津贴。</p>
               </div>
+              <div class="homeroom-student-field" id="gradeHeadClassField">
+                <label class="field-label" for="salaryGradeClassCount">
+                  年级管辖班级数
+                  <input id="salaryGradeClassCount" type="number" min="0" />
+                </label>
+                <p>仅勾选“年级主任”后参与计算，初高中按“班数 × 单价 + 固定额”核算年级长津贴。</p>
+              </div>
               <details class="special-employment-details">
                 <summary>特殊用工状态</summary>
                 <div class="special-employment-grid">
@@ -1760,7 +1784,15 @@
                     试用期比例
                     <input id="salaryProbationRate" type="number" min="0" max="1" step="0.01" />
                   </label>
-                  <p>默认 1.00 表示全额工资；只有试用期、停薪留职等特殊状态才需要调整，后续会接入人事档案自动带出。</p>
+                  <p>默认 1.00 表示全额工资；试用期按制度填 0.80（整体八折，低于最低工资标准时系统自动补足）。</p>
+                  <label class="field-label" for="salaryPostAllowanceMode">
+                    兼岗津贴发放方式
+                    <select id="salaryPostAllowanceMode" class="lesson-select">
+                      <option value="stack">授课教师：多岗位叠加</option>
+                      <option value="highest">行政管理人员：择最高一项</option>
+                    </select>
+                  </label>
+                  <p>制度规定授课教师兼多岗可叠加，行政管理人员兼任多职务时就高不就低。</p>
                 </div>
               </details>
               <section class="manual-item-editor" aria-labelledby="manualItemTitle">
@@ -1981,6 +2013,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260708-ux-p0p1-3"></script>
+    <script src="app.js?v=20260708-salary-2026-1"></script>
   </body>
 </html>

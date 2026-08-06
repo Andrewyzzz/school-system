@@ -2023,8 +2023,10 @@ function normalizeSalaryProfilePatch(patch = {}, current = {}) {
   if (next.roles && typeof next.roles === "object" && !Array.isArray(next.roles)) {
     const currentRoles = current.roles || {};
     const rolePatch = { ...next.roles };
+    // 数值型角色属性（学生数、管辖班数）不能按布尔处理，否则津贴金额会被清零
+    const numericRoleKeys = new Set(["homeroomStudentCount", "gradeClassCount"]);
     Object.keys(rolePatch).forEach((key) => {
-      if (key === "homeroomStudentCount") {
+      if (numericRoleKeys.has(key)) {
         rolePatch[key] = numberValue(rolePatch[key], currentRoles[key] || 0);
       } else {
         rolePatch[key] = booleanValue(rolePatch[key], currentRoles[key] || false);
@@ -2580,6 +2582,8 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     getRoomName: (lesson) => lessonRoomName(db, lesson),
     fixedProrationFactor: proration.factor,
     prorationNote: proration.note,
+    // 线下评审结果记录在教师档案中，计薪时按等级系数浮动考核工资
+    monthlyAssessment: teacher.salaryProfile?.monthlyAssessment || null,
   });
   return {
     ...payroll,
