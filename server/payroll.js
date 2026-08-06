@@ -16,59 +16,103 @@ export const DEFAULT_PAYROLL_RULES = {
     version: SCHEME_VERSION,
     settlementMode: "actualCompletedLessons",
     monthlyWeeks: 4.4,
+    // 基本工资按职称档（0726 制度第二章·二）
     baseSalaryByQualification: {
       seniorProfessor: 3520,
-      seniorTeacher: 3120,
-      firstOrDoctor: 2920,
-      secondOrMaster: 2720,
+      seniorTeacher: 3320,
+      firstOrDoctor: 3120,
+      secondOrMaster: 2820,
       thirdOrBachelor: 2620,
       ungradedOrJuniorCollege: 2520,
     },
-    seniorityAllowance: {
-      1: 100,
-      2: 200,
-      3: 300,
-      4: 350,
-      5: 400,
-      6: 500,
+    // 学历补贴（制度注：硕士 500 / 博士 800）。基本工资档已含"一级(博士)/二级(硕士)"，
+    // 是否再叠加待学校确认（澄清项 C2），默认不叠加；确认叠加时把金额填入即可，无需改代码。
+    degreeAllowance: {
+      master: 0,
+      doctor: 0,
+    },
+    // 试用期工资（制度第六条）：转正后工资的 80%，不低于深圳市最低工资标准
+    // scope 待学校确认（澄清项 C6）：all=全部薪酬项，fixed=仅固定项与津贴
+    // minimumWage 需按深圳市当年公布标准维护，逐年调整时改此处即可
+    probationRule: {
+      scope: "all",
+      minimumWage: 2520,
+    },
+    // 校龄津贴：按岗位类别取不同公式（制度中教师/生活教师/司机/食堂四套并存）
+    // tiered：≤tier1Years 按 校龄×tier1Rate；超出按 tier2Base+(校龄-tier1Years)×tier2Rate；统一封顶 cap
+    // flat：校龄×flatRate，封顶 cap
+    seniorityRules: {
+      teacher: { mode: "tiered", tier1Years: 3, tier1Rate: 100, tier2Base: 300, tier2Rate: 50, cap: 500 },
+      lifeTeacher: { mode: "flat", flatRate: 50, cap: 300 },
+      driver: { mode: "flat", flatRate: 20, cap: 500 },
+      canteen: { mode: "flat", flatRate: 20, cap: 500 },
     },
     housingAllowance: {
-      chief: 2500,
-      backboneOrGradeHead: 2300,
+      // 专任教师：制度规定小初高统一 2100 元/月，不分骨干/年级长
       teacher: 2100,
+      // 以下为行政干部住房补贴分档（制度第二章·一·三），供行政方案使用
+      chief: 3000,
+      middleManager: 2800,
+      otherAdmin: 2500,
     },
     assessmentSalary: {
-      high: 1180,
+      high: 1480,
       middle: 3280,
       primaryCoreHigh: 3430,
       primaryCoreLow: 3330,
       primarySpecial: 3130,
     },
+    // 考核工资浮动规则（制度：考核工资须"根据表现拉开差距"，合格全额、优秀上浮、不合格梯度扣减）
+    // 月度考核结果录入后按此系数浮动；未录入时按 default 全额发放，与原固定档行为一致
+    assessmentGrades: {
+      excellent: { label: "优秀", rate: 1.2 },
+      good: { label: "良好", rate: 1.1 },
+      default: { label: "合格", rate: 1 },
+      warning: { label: "基本合格", rate: 0.8 },
+      unqualified: { label: "不合格", rate: 0.6 },
+    },
     stageLessonRules: {
       high: {
         regularBaseRate: 80,
-        regularThresholdPerWeek: 12,
-        regularExcessRate: 120,
+        // 0726 制度未设超课时加价档，置 0 表示不启用（保留配置能力以备学校恢复）
+        regularThresholdPerWeek: 0,
+        regularExcessRate: 0,
+        // 制度：数学 1.2；其他高考科目 1.0；非统考科目 0.9
         subjectCoefficients: {
           math: 1.2,
-          default: 1,
+          chinese: 1,
+          english: 1,
+          physics: 1,
+          chemistry: 1,
+          biology: 1,
+          politics: 1,
+          history: 1,
+          geography: 1,
+          default: 0.9,
         },
         morning: 40,
         evening: 35,
+        // 跨头课补助：按月固定，不按节计（制度：500 元/月）
+        crossGradeMonthly: 500,
+        // 心理辅导按所任课时量的 50% 计算
+        psychologyLessonRate: 0.5,
+        // 补课费：正课 100 元/节，毕业年级 120 元/节
         makeupByGrade: {
-          10: 110,
-          11: 110,
-          12: 130,
+          10: 100,
+          11: 100,
+          12: 120,
         },
+        makeupEvening: 35,
         weekendByGrade: {
-          10: 110,
-          11: 110,
-          12: 130,
+          10: 100,
+          11: 100,
+          12: 120,
         },
         substitute: 32,
       },
       middle: {
         regularBaseRate: 44,
+        // 制度：语数英 1.3；物理化学政治历史体育 1.2；生物地理美术音乐心理健康 1
         subjectCoefficients: {
           chinese: 1.3,
           math: 1.3,
@@ -77,10 +121,12 @@ export const DEFAULT_PAYROLL_RULES = {
           chemistry: 1.2,
           politics: 1.2,
           history: 1.2,
-          biology: 1.2,
-          geography: 1.2,
           pe: 1.2,
-          psychology: 1.2,
+          biology: 1,
+          geography: 1,
+          art: 1,
+          music: 1,
+          psychology: 1,
           default: 1,
         },
         evening: 20,
@@ -115,34 +161,50 @@ export const DEFAULT_PAYROLL_RULES = {
     },
     postAllowances: {
       high: {
-        gradeHead: 6000,
-        deputyGradeHead: 2000,
+        // 年级长：班数 × 300 + 300（制度改为按管辖班级数动态计算）
+        gradeHeadPerClass: 300,
+        gradeHeadBase: 300,
+        gradeHead: 0,
+        deputyGradeHead: 0,
+        // 班主任：60 元/生 + 500 元/月
+        homeroomBase: 500,
         homeroomPerStudent: 60,
         teachingResearchLeader: 1000,
+        // 备课组长：语数外 1400，其他 1000
         lessonPrepLeader: 1000,
         lessonPrepLargeGroup: 1400,
-        graduateDegree: 1000,
+        graduateDegree: 0,
         graduatingClass: 1000,
         eliteClass: 1000,
         qingbeiClass: 2000,
         busDuty: 0,
       },
       middle: {
-        gradeHead: 4500,
-        deputyGradeHead: 3500,
-        subjectCenterDirector: 3000,
+        // 年级长：班数 × 300 + 300
+        gradeHeadPerClass: 300,
+        gradeHeadBase: 300,
+        gradeHead: 0,
+        deputyGradeHead: 0,
+        teachingResearchLeader: 3000,
+        subjectCenterDirector: 0,
         lessonPrepLeader: 800,
         homeroomPerStudent: 50,
+        // 毕业班统考科目任课教师（干部）
         graduatingClass: 900,
         busDuty: 0,
       },
       primary: {
+        // 小学年级长为固定标准（制度未改为按班数）
         gradeHead: 2650,
+        // 教研组长：主科 750 / 副科 650
         teachingResearchLeader: 750,
         teachingResearchDeputy: 650,
+        // 备课组长：主科高段 550 / 主科低段 450 / 副科 450 / 统考年级 1000
         lessonPrepHigh: 550,
         lessonPrepLow: 450,
         lessonPrepDeputy: 450,
+        lessonPrepStandardizedGrade: 1000,
+        // 班主任：30 元/生 + 100 元/月
         homeroomBase: 100,
         homeroomPerStudent: 30,
         firstGrade: 200,
@@ -415,33 +477,91 @@ function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, pay
 }
 
 function baseSalaryComponent(profile, scheme) {
+  // 试用期折算已移到汇总层统一处理（按制度"转正后工资的 80%"，范围可配置），此处只出标准额
   const amount = Number(scheme.baseSalaryByQualification?.[profile.qualificationGrade] || 0);
   return {
     name: "基本工资",
     basis: `职称/学历档：${profile.qualificationGrade}`,
-    amount: roundMoney(amount * Number(profile.probationRate || 1)),
+    amount: roundMoney(amount),
     category: "fixed",
   };
 }
 
-function assessmentComponent(teacher, profile, scheme) {
-  const band = profile.assessmentBand || defaultAssessmentBand(teacher);
-  const amount = Number(scheme.assessmentSalary?.[band] || 0);
+// 学历补贴（硕士/博士）。默认 0，学校确认需叠加时改配置即可
+function degreeAllowanceComponent(profile, scheme) {
+  const degree = profile.degree || "";
+  const amount = Number(scheme.degreeAllowance?.[degree] || 0);
+  if (!amount) return null;
   return {
-    name: "考核工资",
-    basis: `考核档：${band}`,
-    amount,
+    name: "学历补贴",
+    basis: degree === "doctor" ? "博士学历补贴" : "硕士学历补贴",
+    amount: roundMoney(amount),
     category: "fixed",
   };
+}
+
+// 考核工资 = 岗位标准额 × 月度考核系数
+// 制度要求考核工资"根据表现拉开差距"；未录入月度考核结果时按合格（系数 1）发放，
+// 与改造前的固定档行为一致，保证过渡期不产生金额跳变。
+function assessmentComponent(teacher, profile, scheme, monthlyAssessment = null) {
+  const band = profile.assessmentBand || defaultAssessmentBand(teacher);
+  const standard = Number(scheme.assessmentSalary?.[band] || 0);
+  const gradeKey = monthlyAssessment?.grade || "default";
+  const gradeCfg = scheme.assessmentGrades?.[gradeKey] || scheme.assessmentGrades?.default || { label: "合格", rate: 1 };
+  const rate = Number(gradeCfg.rate ?? 1);
+  // 允许财务/学部直接指定金额，覆盖系数计算（用于制度中的区间制岗位，如幼儿园）
+  const overrideAmount = Number(monthlyAssessment?.amount);
+  const amount = Number.isFinite(overrideAmount) && overrideAmount >= 0 ? overrideAmount : standard * rate;
+  const basis = Number.isFinite(overrideAmount) && overrideAmount >= 0
+    ? `考核档 ${band}，按考核结果核定金额`
+    : `考核档 ${band}（标准 ${standard} 元）× ${gradeCfg.label} ${rate}`;
+  return {
+    name: "考核工资",
+    basis,
+    amount: roundMoney(amount),
+    category: "fixed",
+  };
+}
+
+// 校龄/工龄津贴：按岗位类别取公式（0726 制度四套并存）
+// 制度口径：校龄取实数（进校满一年才计一年），故对年数向下取整
+export function seniorityAllowanceFor(years, rule = {}) {
+  const y = Math.max(0, Math.floor(Number(years) || 0));
+  if (!y) return { amount: 0, basis: "校龄不足 1 年" };
+  const cap = Number(rule.cap || 0);
+  let amount;
+  let basis;
+  if (rule.mode === "flat") {
+    const rate = Number(rule.flatRate || 0);
+    amount = y * rate;
+    basis = `校龄 ${y} 年 × ${rate} 元`;
+  } else {
+    const tier1Years = Number(rule.tier1Years ?? 3);
+    const tier1Rate = Number(rule.tier1Rate ?? 100);
+    const tier2Base = Number(rule.tier2Base ?? 300);
+    const tier2Rate = Number(rule.tier2Rate ?? 50);
+    if (y <= tier1Years) {
+      amount = y * tier1Rate;
+      basis = `校龄 ${y} 年（${tier1Years} 年内）× ${tier1Rate} 元`;
+    } else {
+      amount = tier2Base + (y - tier1Years) * tier2Rate;
+      basis = `校龄 ${y} 年：${tier2Base} + (${y}-${tier1Years}) × ${tier2Rate} 元`;
+    }
+  }
+  if (cap && amount > cap) {
+    return { amount: cap, basis: `${basis}，封顶 ${cap} 元` };
+  }
+  return { amount: roundMoney(amount), basis };
 }
 
 function seniorityComponent(profile, scheme) {
-  const years = Math.max(1, Math.floor(Number(profile.schoolYears || 1)));
-  const tier = Math.min(years, 6);
+  const category = profile.seniorityCategory || "teacher";
+  const rule = scheme.seniorityRules?.[category] || scheme.seniorityRules?.teacher || {};
+  const { amount, basis } = seniorityAllowanceFor(profile.schoolYears, rule);
   return {
     name: "校龄工资",
-    basis: `校龄 ${years} 年，按 ${tier >= 6 ? "6 年及以上" : `${tier} 年`} 档`,
-    amount: Number(scheme.seniorityAllowance?.[tier] || 0),
+    basis,
+    amount,
     category: "fixed",
   };
 }
@@ -474,11 +594,31 @@ function roleComponents(teacher, profile, scheme) {
     push(true, "班主任津贴", base + students * perStudent, `${students} 人 × ${perStudent} 元${base ? ` + 固定 ${base} 元` : ""}`);
   }
 
-  push(roles.gradeHead, "年级主任津贴", cfg.gradeHead, "按学段岗位津贴标准");
+  // 年级长：初高中按"班数 × 单价 + 固定额"动态计算，小学为固定标准
+  if (roles.gradeHead) {
+    const perClass = Number(cfg.gradeHeadPerClass || 0);
+    if (perClass) {
+      const classCount = Number(roles.gradeClassCount || 0);
+      const base = Number(cfg.gradeHeadBase || 0);
+      push(true, "年级主任津贴", classCount * perClass + base, `${classCount} 个班 × ${perClass} 元 + 固定 ${base} 元`);
+    } else {
+      push(true, "年级主任津贴", cfg.gradeHead, "按学段岗位津贴标准");
+    }
+  }
   push(roles.deputyGradeHead, "年级副主任津贴", cfg.deputyGradeHead, "按学段岗位津贴标准");
   push(roles.teachingResearchLeader, "教研组长津贴", cfg.teachingResearchLeader, "按学段岗位津贴标准");
   push(roles.teachingResearchDeputy, "教研副组长津贴", cfg.teachingResearchDeputy, "按学段岗位津贴标准");
-  push(roles.lessonPrepLeader, "备课组长津贴", cfg.lessonPrepLargeGroup && roles.lessonPrepLargeGroup ? cfg.lessonPrepLargeGroup : cfg.lessonPrepLeader || cfg.lessonPrepHigh || cfg.lessonPrepLow, "按学段备课组岗位津贴标准");
+  // 备课组长：统考年级 > 大组(语数外) > 常规档
+  push(
+    roles.lessonPrepLeader,
+    "备课组长津贴",
+    roles.lessonPrepStandardizedGrade && cfg.lessonPrepStandardizedGrade
+      ? cfg.lessonPrepStandardizedGrade
+      : cfg.lessonPrepLargeGroup && roles.lessonPrepLargeGroup
+        ? cfg.lessonPrepLargeGroup
+        : cfg.lessonPrepLeader || cfg.lessonPrepHigh || cfg.lessonPrepLow,
+    "按学段备课组岗位津贴标准",
+  );
   push(roles.lessonPrepDeputy, "备课副组长津贴", cfg.lessonPrepDeputy, "按学段岗位津贴标准");
   push(roles.subjectCenterDirector, "学科中心主任津贴", cfg.subjectCenterDirector, "按初中岗位津贴标准");
   push(roles.graduateDegree, "研究生学历津贴", cfg.graduateDegree, "高中研究生学历津贴");
@@ -492,6 +632,57 @@ function roleComponents(teacher, profile, scheme) {
   push(roles.olympiadHomeroom, "奥数班主任津贴", cfg.olympiadHomeroom, "小学奥数班主任津贴");
 
   return components;
+}
+
+// 试用期工资政策（0726 制度第六条）：按转正后工资的 80% 计发，且不低于深圳市最低工资标准。
+//   scope="all"（默认，按制度字面"工资"理解）折算全部薪酬项；scope="fixed" 只折算固定项与津贴。
+//   折算后若低于最低工资标准，补足差额并在明细中列示，保证不违法。
+export function applyProbationPolicy(components, profile = {}, scheme = {}) {
+  const rate = Number(profile.probationRate ?? 1);
+  if (!(rate >= 0) || rate >= 1) return components;
+  const rule = scheme.probationRule || {};
+  const scope = rule.scope || "all";
+  const percent = Math.round(rate * 100);
+  const adjusted = components.map((component) => {
+    if (scope === "fixed" && !["fixed", "allowance"].includes(component.category)) return component;
+    return {
+      ...component,
+      amount: roundMoney(component.amount * rate),
+      basis: `${component.basis}；试用期按 ${percent}% 计发`,
+    };
+  });
+  const minimumWage = Number(rule.minimumWage || 0);
+  if (!minimumWage) return adjusted;
+  const total = adjusted.reduce((sum, item) => sum + item.amount, 0);
+  if (total >= minimumWage) return adjusted;
+  return [
+    ...adjusted,
+    {
+      name: "最低工资补足",
+      basis: `试用期工资 ${roundMoney(total)} 元低于当地最低工资标准 ${minimumWage} 元，按规定补足`,
+      amount: roundMoney(minimumWage - total),
+      category: "supplement",
+    },
+  ];
+}
+
+// 兼岗津贴发放政策（0726 制度第三条原则 1 与原则 6，经学校澄清）：
+//   授课教师——兼多个教学岗位，津贴可叠加（默认）
+//   行政管理人员——兼任多职务时择最高一项发放，且兼岗不超过 1 项
+export function applyPostAllowancePolicy(components, profile = {}) {
+  const mode = profile.postAllowanceMode || "stack";
+  if (mode !== "highest" || components.length <= 1) return components;
+  const limit = Math.max(1, Number(profile.maxPostAllowanceCount || 1));
+  const sorted = [...components].sort((a, b) => b.amount - a.amount);
+  const kept = sorted.slice(0, limit);
+  const dropped = sorted.slice(limit);
+  if (!dropped.length) return kept;
+  const droppedNames = dropped.map((item) => item.name).join("、");
+  return kept.map((item, index) =>
+    index === 0
+      ? { ...item, basis: `${item.basis}；行政岗位择高发放，未计：${droppedNames}` }
+      : item,
+  );
 }
 
 function manualComponents(profile) {
@@ -530,6 +721,9 @@ export function calculateDedicatedTeacherPayroll({
   // 人事联动（第二阶段 M4）：离职/入职当月固定项按在职天数折算，1 表示不折算
   fixedProrationFactor = 1,
   prorationNote = "",
+  // 月度考核结果（0726 制度：考核工资须按表现拉开差距）
+  // { grade: "excellent"|"good"|"default"|"warning"|"unqualified", amount?: number, note?: string }
+  monthlyAssessment = null,
 } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
@@ -568,13 +762,14 @@ export function calculateDedicatedTeacherPayroll({
   const prorate = Math.min(Math.max(Number(fixedProrationFactor) || 1, 0), 1);
   const fixedComponents = [
     baseSalaryComponent(profile, scheme),
-    assessmentComponent(teacher, profile, scheme),
+    degreeAllowanceComponent(profile, scheme),
+    assessmentComponent(teacher, profile, scheme, monthlyAssessment),
     seniorityComponent(profile, scheme),
     housingComponent(profile, scheme),
-    ...roleComponents(teacher, profile, scheme),
+    ...applyPostAllowancePolicy(roleComponents(teacher, profile, scheme), profile),
     ...manualComponents(profile),
   ]
-    .filter((component) => component.amount)
+    .filter((component) => component && component.amount)
     .map((component) => {
       // 只折算固定月度项（fixed/allowance）：课时按实际完成结算、奖扣按实际录入不折算
       if (prorate >= 1 || !["fixed", "allowance"].includes(component.category)) return component;
@@ -590,7 +785,7 @@ export function calculateDedicatedTeacherPayroll({
     amount: lessonAmount,
     category: "lesson",
   };
-  const components = [...fixedComponents, lessonComponent];
+  const components = applyProbationPolicy([...fixedComponents, lessonComponent], profile, scheme);
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
   const tax = roundMoney(Math.max(grossPay - Number(normalizedRules.taxThreshold || 0), 0) * Number(normalizedRules.taxRate || 0));
   const netPay = roundMoney(grossPay - tax);
