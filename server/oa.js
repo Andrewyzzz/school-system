@@ -1,0 +1,683 @@
+// ---------------------------------------------------------------------------
+// 通用审批（OA）引擎
+//
+// 设计要点：模板驱动，不为每类审批写死代码。
+//   模板 = 表单字段定义 + 审批步骤定义 + 可发起角色
+//   新增审批类型只需增加模板（可由代码内置或后续做成可配置），不改流转逻辑。
+//
+// 与人事流程（server/hr.js）的分工：
+//   人事流程承载入职/调岗/离职这类"审批通过后要改人事状态并联动排课计薪"的业务链路；
+//   本模块承载请假、加班、补卡、调课以及学期初各类确认事项等通用审批，审批结果本身即为结论。
+// ---------------------------------------------------------------------------
+
+function httpError(statusCode, message, details = null) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  if (details) error.details = details;
+  return error;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+let oaIdCounter = 0;
+
+function nextId(prefix) {
+  oaIdCounter = (oaIdCounter + 1) % 100000;
+  return `${prefix}-${Date.now()}-${oaIdCounter}`;
+}
+
+function ensureCollections(db) {
+  if (!Array.isArray(db.oaRequests)) db.oaRequests = [];
+  if (!Array.isArray(db.notifications)) db.notifications = [];
+  return db;
+}
+
+// ---------------------------------------------------------------------------
+// 审批模板
+// ---------------------------------------------------------------------------
+// 字段类型：text | textarea | number | date | select | radio | checkbox
+// 步骤 approverMode：any=或签（任一人通过即可）；all=会签（全部通过才进入下一步）
+// approverRoles 用现有角色体系：teacher / admin(教务) / finance / hr /
+//                              division_head(学部负责人) / system_admin(总校)
+
+export const OA_TEMPLATES = [
+  {
+    key: "leave",
+    name: "请假申请",
+    icon: "🏖️",
+    category: "考勤",
+    description: "事假、病假、婚假、产假等各类假期申请",
+    applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
+    formFields: [
+      {
+        key: "leaveType",
+        label: "请假类型",
+        type: "select",
+        required: true,
+        options: ["事假", "病假", "年假", "婚假", "丧假", "产假", "陪产假", "工伤假"],
+      },
+      { key: "startDate", label: "开始日期", type: "date", required: true },
+      { key: "endDate", label: "结束日期", type: "date", required: true },
+      { key: "days", label: "请假天数", type: "number", required: true, hint: "含起止日，半天填 0.5" },
+      { key: "reason", label: "请假事由", type: "textarea", required: true, placeholder: "请说明请假原因" },
+      { key: "handover", label: "工作交接人", type: "text", required: true, hint: "课程由谁代课或如何安排" },
+      { key: "attachment", label: "证明材料", type: "text", required: false, hint: "病假需附就诊证明，可填写材料说明或提交纸质件" },
+    ],
+    steps: [
+      { name: "学部负责人审批", approverRoles: ["division_head", "admin"], approverMode: "any" },
+      { name: "人事备案", approverRoles: ["hr", "system_admin"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "overtime",
+    name: "加班申请",
+    icon: "🌙",
+    category: "考勤",
+    description: "周末、节假日及日常超时加班申请",
+    applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
+    formFields: [
+      { key: "overtimeDate", label: "加班日期", type: "date", required: true },
+      { key: "startTime", label: "开始时间", type: "text", required: true, placeholder: "如 18:00" },
+      { key: "endTime", label: "结束时间", type: "text", required: true, placeholder: "如 21:00" },
+      { key: "hours", label: "加班时长（小时）", type: "number", required: true },
+      { key: "overtimeType", label: "加班类型", type: "select", required: true, options: ["日常超时", "周末加班", "节假日加班", "夜班"] },
+      { key: "reason", label: "加班事由", type: "textarea", required: true },
+    ],
+    steps: [{ name: "部门负责人确认", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
+  },
+  {
+    key: "attendance_fix",
+    name: "补卡申请",
+    icon: "⏱️",
+    category: "考勤",
+    description: "漏打卡、设备异常等情况的考勤补记",
+    applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
+    formFields: [
+      { key: "fixDate", label: "补卡日期", type: "date", required: true },
+      { key: "fixType", label: "补卡类型", type: "select", required: true, options: ["上班卡", "下班卡", "全天"] },
+      { key: "reason", label: "补卡原因", type: "textarea", required: true, placeholder: "请说明未正常打卡的原因" },
+    ],
+    steps: [{ name: "部门负责人审批", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
+  },
+  {
+    key: "lesson_swap",
+    name: "调课申请",
+    icon: "🔄",
+    category: "教学",
+    description: "教师发起调课或代课，教务审批后执行",
+    applicantRoles: ["teacher", "admin", "division_head", "system_admin"],
+    formFields: [
+      { key: "lessonDate", label: "原课程日期", type: "date", required: true },
+      { key: "lessonInfo", label: "原课程信息", type: "text", required: true, placeholder: "班级 / 科目 / 节次" },
+      { key: "swapType", label: "调课方式", type: "radio", required: true, options: ["调换时间", "他人代课"] },
+      { key: "targetInfo", label: "调整后安排", type: "text", required: true, placeholder: "调整到的时间，或代课教师姓名" },
+      { key: "reason", label: "调课原因", type: "textarea", required: true },
+    ],
+    steps: [{ name: "教务审批", approverRoles: ["admin", "system_admin"], approverMode: "any" }],
+  },
+  {
+    key: "class_size_confirm",
+    name: "班级学生人数确认",
+    icon: "👥",
+    category: "学期事项",
+    description: "学期初确认各班学生人数，作为班主任、生活教师津贴的计算依据",
+    applicantRoles: ["admin", "division_head", "hr", "system_admin"],
+    formFields: [
+      { key: "termName", label: "适用学期", type: "text", required: true, placeholder: "如 2026学年第一学期" },
+      { key: "effectiveMonth", label: "生效月份", type: "text", required: true, placeholder: "如 2026-09" },
+      { key: "scopeInfo", label: "确认范围", type: "text", required: true, placeholder: "如 小学部全部班级" },
+      { key: "classDetail", label: "班级与人数明细", type: "textarea", required: true, hint: "每行一条，格式：班级名称,学生人数" },
+      { key: "reason", label: "说明", type: "textarea", required: false, hint: "人数变动原因等" },
+    ],
+    steps: [
+      { name: "学部负责人核对", approverRoles: ["division_head", "admin"], approverMode: "any" },
+      { name: "财务确认", approverRoles: ["finance"], approverMode: "any" },
+      { name: "总校审批", approverRoles: ["system_admin"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "lesson_rule_confirm",
+    name: "课时规则确认",
+    icon: "📐",
+    category: "学期事项",
+    description: "学期初确认跨头课、心理辅导折算等课时计薪规则",
+    applicantRoles: ["admin", "finance", "hr", "system_admin"],
+    formFields: [
+      { key: "termName", label: "适用学期", type: "text", required: true },
+      { key: "effectiveMonth", label: "生效月份", type: "text", required: true, placeholder: "如 2026-09" },
+      { key: "ruleScope", label: "规则范围", type: "select", required: true, options: ["跨头课补助", "心理辅导折算", "补课费标准", "非正课单价", "其他"] },
+      { key: "ruleDetail", label: "规则内容", type: "textarea", required: true, hint: "写明适用对象、标准与计算方式" },
+      { key: "reason", label: "调整依据", type: "textarea", required: true, hint: "对应制度条款或学校决议" },
+    ],
+    steps: [
+      { name: "财务复核", approverRoles: ["finance"], approverMode: "any" },
+      { name: "总校审批", approverRoles: ["system_admin"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "budget_confirm",
+    name: "薪酬总额预算确认",
+    icon: "📊",
+    category: "学期事项",
+    description: "学期初薪酬总额预算方案的审议与审批",
+    applicantRoles: ["finance", "hr", "system_admin"],
+    formFields: [
+      { key: "termName", label: "适用学期", type: "text", required: true },
+      { key: "totalBudget", label: "薪酬总额预算（元）", type: "number", required: true },
+      { key: "payoutRatio", label: "发放比例（%）", type: "number", required: true, hint: "制度规定原则上 90% 用于薪酬发放" },
+      { key: "reserveRatio", label: "预留比例（%）", type: "number", required: true, hint: "预留作学期专项奖金" },
+      { key: "breakdown", label: "分部门预算明细", type: "textarea", required: true, hint: "每行一条，格式：部门,预算金额" },
+      { key: "reason", label: "编制说明", type: "textarea", required: true },
+    ],
+    steps: [
+      { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
+      { name: "总校审批", approverRoles: ["system_admin"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "general",
+    name: "通用事项申请",
+    icon: "📝",
+    category: "其他",
+    description: "上述类型未覆盖的事项，走通用审批",
+    applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
+    formFields: [
+      { key: "subject", label: "事项名称", type: "text", required: true },
+      { key: "detail", label: "事项说明", type: "textarea", required: true },
+      { key: "expectedDate", label: "期望完成日期", type: "date", required: false },
+    ],
+    steps: [{ name: "管理层审批", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
+  },
+];
+
+export const OA_TIMEOUT_WORKDAYS = 3;
+
+export function findTemplate(key) {
+  return OA_TEMPLATES.find((item) => item.key === key) || null;
+}
+
+// 按角色返回可发起的模板（前端审批首页的图标网格用）
+export function listTemplatesForRole(role = "") {
+  return OA_TEMPLATES.filter((template) => template.applicantRoles.includes(role)).map((template) => ({
+    key: template.key,
+    name: template.name,
+    icon: template.icon,
+    category: template.category,
+    description: template.description,
+    formFields: template.formFields,
+    steps: template.steps.map((step) => ({ name: step.name, approverRoles: step.approverRoles })),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// 表单校验
+// ---------------------------------------------------------------------------
+
+function validateFormData(template, formData = {}) {
+  const clean = {};
+  template.formFields.forEach((field) => {
+    const raw = formData[field.key];
+    const value = typeof raw === "string" ? raw.trim() : raw;
+    const isEmpty = value === undefined || value === null || value === "";
+    if (field.required && isEmpty) {
+      throw httpError(400, `请填写「${field.label}」`);
+    }
+    if (isEmpty) {
+      clean[field.key] = "";
+      return;
+    }
+    if (field.type === "number") {
+      const num = Number(value);
+      if (!Number.isFinite(num)) throw httpError(400, `「${field.label}」必须是数字`);
+      clean[field.key] = num;
+      return;
+    }
+    if ((field.type === "select" || field.type === "radio") && Array.isArray(field.options)) {
+      if (!field.options.includes(String(value))) {
+        throw httpError(400, `「${field.label}」取值无效`);
+      }
+    }
+    clean[field.key] = String(value);
+  });
+  return clean;
+}
+
+// 请假等带日期区间的模板做基本合理性校验
+function validateBusinessRules(templateKey, formData) {
+  if (templateKey === "leave") {
+    if (formData.endDate < formData.startDate) {
+      throw httpError(400, "结束日期不能早于开始日期");
+    }
+    if (Number(formData.days) <= 0) throw httpError(400, "请假天数必须大于 0");
+  }
+  if (templateKey === "budget_confirm") {
+    const total = Number(formData.payoutRatio) + Number(formData.reserveRatio);
+    if (Math.abs(total - 100) > 0.01) {
+      throw httpError(400, `发放比例与预留比例之和应为 100%，当前为 ${total}%`);
+    }
+  }
+}
+
+// 摘要标题：列表中一眼看清是什么申请（Lark 的列表也是这么呈现的）
+function buildSummary(template, formData) {
+  switch (template.key) {
+    case "leave":
+      return `${formData.leaveType} ${formData.days} 天（${formData.startDate} 至 ${formData.endDate}）`;
+    case "overtime":
+      return `${formData.overtimeType} ${formData.overtimeDate} ${formData.hours} 小时`;
+    case "attendance_fix":
+      return `${formData.fixDate} ${formData.fixType}`;
+    case "lesson_swap":
+      return `${formData.lessonDate} ${formData.lessonInfo} · ${formData.swapType}`;
+    case "class_size_confirm":
+      return `${formData.termName} · ${formData.scopeInfo}`;
+    case "lesson_rule_confirm":
+      return `${formData.termName} · ${formData.ruleScope}`;
+    case "budget_confirm":
+      return `${formData.termName} · 总额 ${Number(formData.totalBudget).toLocaleString("zh-CN")} 元`;
+    default:
+      return String(formData.subject || template.name);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 通知
+// ---------------------------------------------------------------------------
+
+function pushOaNotification(db, { audience, accountIds = [], title, text, level = "info" }) {
+  db.notifications.push({
+    id: nextId("NTF-OA"),
+    audience: audience || "",
+    teacherIds: [],
+    accountIds,
+    title: String(title || "").trim(),
+    text: String(text || "").trim(),
+    source: "审批中心",
+    level,
+    createdAt: nowIso(),
+    createdByAccountId: "SYSTEM",
+    createdByName: "审批流程",
+    readByAccountIds: [],
+  });
+}
+
+function notifyCurrentApprovers(db, request) {
+  const step = request.steps[request.currentStepIndex];
+  if (!step) return;
+  step.approverRoles.forEach((role) => {
+    pushOaNotification(db, {
+      audience: role,
+      title: `待审批：${request.templateName}`,
+      text: `${request.applicantName} 提交的「${request.summary}」等待您在「${step.name}」环节处理。`,
+      level: "warning",
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 发起
+// ---------------------------------------------------------------------------
+
+export function createOaRequest(db, account, input = {}) {
+  ensureCollections(db);
+  const template = findTemplate(String(input.templateKey || "").trim());
+  if (!template) throw httpError(400, "审批类型无效");
+  if (!template.applicantRoles.includes(account?.role || "")) {
+    throw httpError(403, `当前角色无法发起「${template.name}」`);
+  }
+  const formData = validateFormData(template, input.formData || {});
+  validateBusinessRules(template.key, formData);
+
+  const now = nowIso();
+  const request = {
+    id: nextId("OA"),
+    templateKey: template.key,
+    templateName: template.name,
+    templateIcon: template.icon,
+    category: template.category,
+    summary: buildSummary(template, formData),
+    applicantAccountId: account.id,
+    applicantName: account.displayName || account.username || "",
+    applicantRole: account.role,
+    formData,
+    status: "pending",
+    currentStepIndex: 0,
+    steps: template.steps.map((step, index) => ({
+      index,
+      name: step.name,
+      approverRoles: [...step.approverRoles],
+      approverMode: step.approverMode || "any",
+      status: index === 0 ? "pending" : "waiting",
+      approvals: [],
+      comment: "",
+      actedAt: "",
+    })),
+    timeline: [
+      {
+        action: "submitted",
+        actionLabel: "提交申请",
+        actorAccountId: account.id,
+        actorName: account.displayName || account.username || "",
+        comment: "",
+        at: now,
+      },
+    ],
+    createdAt: now,
+    updatedAt: now,
+    completedAt: "",
+  };
+  db.oaRequests.push(request);
+  notifyCurrentApprovers(db, request);
+  return request;
+}
+
+// ---------------------------------------------------------------------------
+// 审批动作
+// ---------------------------------------------------------------------------
+
+function canActOnStep(step, account) {
+  if (!step || step.status !== "pending") return false;
+  return step.approverRoles.includes(account?.role || "");
+}
+
+export function actOnOaRequest(db, requestId, action, account, input = {}) {
+  ensureCollections(db);
+  const request = db.oaRequests.find((item) => item.id === requestId);
+  if (!request) throw httpError(404, "审批单不存在");
+  if (request.status !== "pending") throw httpError(400, `该审批单已${statusLabel(request.status)}，无法再处理`);
+
+  const step = request.steps[request.currentStepIndex];
+  if (!canActOnStep(step, account)) {
+    throw httpError(403, "当前环节不由您处理");
+  }
+  // 会签场景下同一人不能重复投票
+  if (step.approvals.some((item) => item.accountId === account.id)) {
+    throw httpError(400, "您已处理过该环节");
+  }
+
+  const comment = String(input.comment || "").trim();
+  const now = nowIso();
+  const actorName = account.displayName || account.username || "";
+
+  if (action === "reject") {
+    if (!comment) throw httpError(400, "拒绝时必须填写理由");
+    step.status = "rejected";
+    step.comment = comment;
+    step.actedAt = now;
+    step.approvals.push({ accountId: account.id, accountName: actorName, decision: "reject", comment, at: now });
+    request.status = "rejected";
+    request.completedAt = now;
+    request.updatedAt = now;
+    request.timeline.push({
+      action: "rejected",
+      actionLabel: `${step.name} 拒绝`,
+      actorAccountId: account.id,
+      actorName,
+      comment,
+      at: now,
+    });
+    pushOaNotification(db, {
+      accountIds: [request.applicantAccountId],
+      title: `审批被拒绝：${request.templateName}`,
+      text: `您提交的「${request.summary}」在「${step.name}」被拒绝：${comment}`,
+      level: "danger",
+    });
+    return request;
+  }
+
+  if (action !== "approve") throw httpError(400, "审批动作无效");
+
+  step.approvals.push({
+    accountId: account.id,
+    accountName: actorName,
+    approverRole: account.role,
+    decision: "approve",
+    comment,
+    at: now,
+  });
+  request.timeline.push({
+    action: "approved",
+    actionLabel: `${step.name} 通过`,
+    actorAccountId: account.id,
+    actorName,
+    comment,
+    at: now,
+  });
+
+  // 会签：每个审批角色都要有人通过；或签：任一人通过即进入下一环节
+  const passed =
+    step.approverMode === "all"
+      ? step.approverRoles.every((role) =>
+          step.approvals.some((item) => item.decision === "approve" && item.approverRole === role),
+        )
+      : true;
+
+  if (!passed) {
+    step.comment = comment;
+    request.updatedAt = now;
+    return request;
+  }
+
+  step.status = "approved";
+  step.comment = comment;
+  step.actedAt = now;
+
+  const nextIndex = request.currentStepIndex + 1;
+  if (nextIndex < request.steps.length) {
+    request.currentStepIndex = nextIndex;
+    request.steps[nextIndex].status = "pending";
+    request.updatedAt = now;
+    notifyCurrentApprovers(db, request);
+    return request;
+  }
+
+  request.status = "approved";
+  request.completedAt = now;
+  request.updatedAt = now;
+  request.timeline.push({
+    action: "completed",
+    actionLabel: "审批完成",
+    actorAccountId: account.id,
+    actorName,
+    comment: "",
+    at: now,
+  });
+  pushOaNotification(db, {
+    accountIds: [request.applicantAccountId],
+    title: `审批通过：${request.templateName}`,
+    text: `您提交的「${request.summary}」已全部审批通过。`,
+    level: "success",
+  });
+  return request;
+}
+
+export function withdrawOaRequest(db, requestId, account) {
+  ensureCollections(db);
+  const request = db.oaRequests.find((item) => item.id === requestId);
+  if (!request) throw httpError(404, "审批单不存在");
+  if (request.applicantAccountId !== account.id) throw httpError(403, "只能撤回本人发起的申请");
+  if (request.status !== "pending") throw httpError(400, "已结束的审批单无法撤回");
+
+  const now = nowIso();
+  request.status = "withdrawn";
+  request.completedAt = now;
+  request.updatedAt = now;
+  request.steps.forEach((step) => {
+    if (step.status === "pending" || step.status === "waiting") step.status = "skipped";
+  });
+  request.timeline.push({
+    action: "withdrawn",
+    actionLabel: "撤回申请",
+    actorAccountId: account.id,
+    actorName: account.displayName || account.username || "",
+    comment: "",
+    at: now,
+  });
+  return request;
+}
+
+// 催办：给当前环节审批人再推一次通知
+export function urgeOaRequest(db, requestId, account) {
+  ensureCollections(db);
+  const request = db.oaRequests.find((item) => item.id === requestId);
+  if (!request) throw httpError(404, "审批单不存在");
+  if (request.applicantAccountId !== account.id) throw httpError(403, "只能催办本人发起的申请");
+  if (request.status !== "pending") throw httpError(400, "该审批单已结束");
+  const step = request.steps[request.currentStepIndex];
+  step.approverRoles.forEach((role) => {
+    pushOaNotification(db, {
+      audience: role,
+      title: `催办：${request.templateName}`,
+      text: `${request.applicantName} 催办「${request.summary}」，请尽快在「${step.name}」环节处理。`,
+      level: "warning",
+    });
+  });
+  request.timeline.push({
+    action: "urged",
+    actionLabel: "催办",
+    actorAccountId: account.id,
+    actorName: account.displayName || account.username || "",
+    comment: "",
+    at: nowIso(),
+  });
+  return request;
+}
+
+// ---------------------------------------------------------------------------
+// 查询
+// ---------------------------------------------------------------------------
+
+function statusLabel(status) {
+  return { pending: "审批中", approved: "通过", rejected: "拒绝", withdrawn: "撤回" }[status] || status;
+}
+
+export function isPendingForAccount(request, account) {
+  if (request.status !== "pending") return false;
+  const step = request.steps[request.currentStepIndex];
+  if (!step) return false;
+  if (!step.approverRoles.includes(account?.role || "")) return false;
+  return !step.approvals.some((item) => item.accountId === account.id);
+}
+
+// scope=todo 待我审批 / mine 我发起的 / all 全部（管理角色可见）
+export function queryOaRequests(db, query = {}, account = null) {
+  ensureCollections(db);
+  const scope = String(query.scope || "todo");
+  const status = String(query.status || "");
+  const templateKey = String(query.templateKey || "");
+  const keyword = String(query.search || "").trim().toLowerCase();
+  const page = Math.max(Number.parseInt(query.page || "1", 10), 1);
+  const pageSize = Math.min(Math.max(Number.parseInt(query.pageSize || "20", 10), 1), 100);
+
+  let items = [...db.oaRequests];
+  if (scope === "todo") {
+    items = items.filter((item) => isPendingForAccount(item, account));
+  } else if (scope === "mine") {
+    items = items.filter((item) => item.applicantAccountId === account?.id);
+  } else if (scope === "handled") {
+    // 我处理过的（含已完成的）
+    items = items.filter((item) =>
+      item.steps.some((step) => step.approvals.some((vote) => vote.accountId === account?.id)),
+    );
+  } else if (!["hr", "system_admin", "division_head", "admin", "finance"].includes(account?.role || "")) {
+    // 普通教师没有全局查看权限，退回到本人相关
+    items = items.filter(
+      (item) => item.applicantAccountId === account?.id || isPendingForAccount(item, account),
+    );
+  }
+
+  if (status) items = items.filter((item) => item.status === status);
+  if (templateKey) items = items.filter((item) => item.templateKey === templateKey);
+  if (keyword) {
+    items = items.filter((item) =>
+      `${item.summary} ${item.templateName} ${item.applicantName}`.toLowerCase().includes(keyword),
+    );
+  }
+
+  items.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  const total = items.length;
+  const start = (page - 1) * pageSize;
+  return {
+    items: items.slice(start, start + pageSize).map((item) => summarizeRequest(item, account)),
+    meta: { total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) },
+  };
+}
+
+function summarizeRequest(request, account) {
+  const step = request.steps[request.currentStepIndex];
+  return {
+    id: request.id,
+    templateKey: request.templateKey,
+    templateName: request.templateName,
+    templateIcon: request.templateIcon,
+    category: request.category,
+    summary: request.summary,
+    applicantName: request.applicantName,
+    applicantAccountId: request.applicantAccountId,
+    status: request.status,
+    statusLabel: statusLabel(request.status),
+    currentStepName: request.status === "pending" ? step?.name || "" : "",
+    canAct: isPendingForAccount(request, account),
+    canWithdraw: request.status === "pending" && request.applicantAccountId === account?.id,
+    createdAt: request.createdAt,
+    updatedAt: request.updatedAt,
+  };
+}
+
+export function getOaRequestDetail(db, requestId, account) {
+  ensureCollections(db);
+  const request = db.oaRequests.find((item) => item.id === requestId);
+  if (!request) throw httpError(404, "审批单不存在");
+  const isRelated =
+    request.applicantAccountId === account?.id ||
+    request.steps.some((step) => step.approverRoles.includes(account?.role || "")) ||
+    ["hr", "system_admin"].includes(account?.role || "");
+  if (!isRelated) throw httpError(403, "无权查看该审批单");
+
+  const template = findTemplate(request.templateKey);
+  return {
+    ...request,
+    statusLabel: statusLabel(request.status),
+    canAct: isPendingForAccount(request, account),
+    canWithdraw: request.status === "pending" && request.applicantAccountId === account?.id,
+    canUrge: request.status === "pending" && request.applicantAccountId === account?.id,
+    formFields: template?.formFields || [],
+  };
+}
+
+export function countOaTodos(db, account) {
+  ensureCollections(db);
+  return db.oaRequests.filter((item) => isPendingForAccount(item, account)).length;
+}
+
+// 超时扫描：停留超过 N 个工作日提醒当前审批人（与人事流程同口径）
+export function scanOaTimeouts(db, workdays = OA_TIMEOUT_WORKDAYS) {
+  ensureCollections(db);
+  const now = Date.now();
+  let reminded = 0;
+  db.oaRequests.forEach((request) => {
+    if (request.status !== "pending") return;
+    const step = request.steps[request.currentStepIndex];
+    if (!step) return;
+    const since = new Date(request.updatedAt || request.createdAt).getTime();
+    const elapsedDays = (now - since) / 86400000;
+    if (elapsedDays < workdays) return;
+    if (request.timeoutRemindedAt) {
+      const remindedDays = (now - new Date(request.timeoutRemindedAt).getTime()) / 86400000;
+      if (remindedDays < workdays) return;
+    }
+    request.timeoutRemindedAt = nowIso();
+    reminded += 1;
+    step.approverRoles.forEach((role) => {
+      pushOaNotification(db, {
+        audience: role,
+        title: `审批超时提醒：${request.templateName}`,
+        text: `${request.applicantName} 的「${request.summary}」已在「${step.name}」停留超过 ${workdays} 个工作日，请尽快处理。`,
+        level: "danger",
+      });
+    });
+  });
+  return { reminded };
+}

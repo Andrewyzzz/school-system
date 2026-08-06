@@ -123,6 +123,17 @@ import {
   updatePosition,
   withdrawProfileChangeRequest,
 } from "./hr.js";
+import {
+  listTemplatesForRole,
+  createOaRequest,
+  actOnOaRequest,
+  withdrawOaRequest,
+  urgeOaRequest,
+  queryOaRequests,
+  getOaRequestDetail,
+  countOaTodos,
+  scanOaTimeouts,
+} from "./oa.js";
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -1654,6 +1665,75 @@ async function handleApi(req, res, db, url) {
       }
     }
 
+    // ---------------------------------------------------------------- 通用审批（OA）
+    if (parts[0] === "api" && parts[1] === "oa") {
+      const ALL_ROLES = ["teacher", "admin", "finance", "hr", "division_head", "system_admin"];
+
+      // 可发起的审批类型（按角色过滤）
+      if (req.method === "GET" && url.pathname === "/api/oa/templates") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        sendJson(res, 200, { templates: listTemplatesForRole(auth.account.role) });
+        return;
+      }
+
+      // 待办数（前端角标）
+      if (req.method === "GET" && url.pathname === "/api/oa/todos") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        sendJson(res, 200, { count: countOaTodos(db, auth.account) });
+        return;
+      }
+
+      // 列表：scope=todo|mine|handled|all
+      if (req.method === "GET" && url.pathname === "/api/oa/requests") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        sendJson(res, 200, queryOaRequests(db, Object.fromEntries(url.searchParams), auth.account));
+        return;
+      }
+
+      // 发起申请
+      if (req.method === "POST" && url.pathname === "/api/oa/requests") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const request = createOaRequest(db, auth.account, body);
+        await saveDatabase(db);
+        broadcastEvent("oa-request");
+        broadcastEvent("notification");
+        sendJson(res, 200, { request });
+        return;
+      }
+
+      // 审批动作：approve / reject / withdraw / urge
+      const actionMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)\/(approve|reject|withdraw|urge)$/);
+      if (actionMatch && req.method === "POST") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const [, requestId, action] = actionMatch;
+        let request;
+        if (action === "withdraw") request = withdrawOaRequest(db, requestId, auth.account);
+        else if (action === "urge") request = urgeOaRequest(db, requestId, auth.account);
+        else request = actOnOaRequest(db, requestId, action, auth.account, body);
+        await saveDatabase(db);
+        broadcastEvent("oa-request");
+        broadcastEvent("notification");
+        sendJson(res, 200, { request });
+        return;
+      }
+
+      // 详情
+      const detailMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)$/);
+      if (detailMatch && req.method === "GET") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        sendJson(res, 200, { request: getOaRequestDetail(db, detailMatch[1], auth.account) });
+        return;
+      }
+    }
+
     if (req.method === "GET" && url.pathname === "/api/phase1/readiness") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
@@ -1755,8 +1835,10 @@ export async function createServer() {
   const runHrTimeoutScan = async () => {
     try {
       const notified = scanHrFlowTimeouts(db);
+      // 通用审批与人事流程同口径：停留超 3 个工作日提醒当前审批人
+      const oaResult = scanOaTimeouts(db);
       db.meta.hrTimeoutScanAt = new Date().toISOString();
-      if (notified) await saveDatabase(db);
+      if (notified || oaResult.reminded) await saveDatabase(db);
     } catch (error) {
       console.error("[hr] 审批超时扫描失败:", error.message);
     }

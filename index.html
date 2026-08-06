@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260708-salary-2026-1" />
+    <link rel="stylesheet" href="styles.css?v=20260708-oa-approval-1" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -107,6 +107,10 @@
           <button class="nav-item" data-view="hrAudit" data-role="hr,system_admin,division_head" type="button">
             <span aria-hidden="true">≡</span>
             人事审计
+          </button>
+          <button class="nav-item" data-view="approvals" data-role="teacher,admin,finance,hr,division_head,system_admin" type="button">
+            <span aria-hidden="true">✓</span>
+            审批中心
           </button>
           <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin,hr" type="button">
             <span aria-hidden="true">✉</span>
@@ -1178,6 +1182,46 @@
           </div>
         </section>
 
+        <section class="view" id="approvalsView" aria-labelledby="approvalsTitle">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="approvalsTitle">审批中心</h2>
+                <p>请假、加班、补卡、调课等日常申请，以及学期初的人数、课时规则、预算等确认事项，统一在此发起与审批。</p>
+              </div>
+              <span class="status-pill" id="oaTodoPill">待办 0</span>
+            </div>
+            <div class="approval-entry-grid" id="oaTemplateGrid"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <h2>审批单</h2>
+                <p>按状态查看与我相关的审批单。</p>
+              </div>
+              <button class="ghost-button compact-button" id="oaRefresh" type="button">刷新</button>
+            </div>
+            <div class="approval-tabs" role="tablist">
+              <button class="approval-tab is-active" data-oa-scope="todo" type="button" role="tab">待我审批</button>
+              <button class="approval-tab" data-oa-scope="mine" type="button" role="tab">我发起的</button>
+              <button class="approval-tab" data-oa-scope="handled" type="button" role="tab">我处理过</button>
+            </div>
+            <div class="approval-filter-row">
+              <input id="oaSearch" type="search" placeholder="搜索申请人、事项摘要" />
+              <select id="oaStatusFilter" class="lesson-select">
+                <option value="">全部状态</option>
+                <option value="pending">审批中</option>
+                <option value="approved">已通过</option>
+                <option value="rejected">已拒绝</option>
+                <option value="withdrawn">已撤回</option>
+              </select>
+            </div>
+            <div class="approval-list" id="oaRequestList"></div>
+            <div class="pager" id="oaPager"></div>
+          </section>
+        </section>
+
         <section class="view" id="hrFlowsView" aria-labelledby="hrFlowsTitle">
           <section class="panel">
             <div class="panel-heading">
@@ -2013,6 +2057,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260708-salary-2026-1"></script>
+    <script src="app.js?v=20260708-oa-approval-1"></script>
   </body>
 </html>

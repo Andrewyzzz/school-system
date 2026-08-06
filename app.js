@@ -920,6 +920,11 @@ const views = {
     title: "人事审批",
     el: document.querySelector("#hrFlowsView"),
   },
+  approvals: {
+    role: "teacher,admin,finance,hr,division_head,system_admin",
+    title: "审批中心",
+    el: document.querySelector("#approvalsView"),
+  },
   hrAudit: {
     role: "hr,system_admin,division_head",
     title: "人事审计",
@@ -1173,12 +1178,43 @@ function connectEventStream() {
       }
     }
   });
+  // 审批单变化：在审批中心时重载列表，否则只刷新待办角标
+  eventStream.addEventListener("oa-request", () => {
+    if (!backendMode()) return;
+    if (state.activeView === "approvals") loadOaRequests();
+    else refreshOaTodoBadge();
+  });
   // 新通知：刷新通知中心与角标
   eventStream.addEventListener("notification", () => {
     if (backendMode()) loadBackendNotifications().then(render);
   });
   // 连接后先拉一次待办角标（HR 系角色）
   if (["hr", "system_admin", "division_head"].includes(currentRole())) refreshHrTodoBadge();
+  refreshOaTodoBadge();
+}
+
+// 审批中心导航角标（全角色都可能有待办）
+async function refreshOaTodoBadge() {
+  if (!backendMode()) return;
+  try {
+    const result = await apiRequest("/api/oa/todos");
+    oaState = { ...oaState, todoCount: result.count || 0 };
+    const navBtn = document.querySelector('.nav-item[data-view="approvals"]');
+    if (!navBtn) return;
+    let badge = navBtn.querySelector(".nav-badge");
+    if (result.count > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "nav-badge";
+        navBtn.appendChild(badge);
+      }
+      badge.textContent = result.count > 99 ? "99+" : String(result.count);
+    } else if (badge) {
+      badge.remove();
+    }
+  } catch (error) {
+    // 角标刷新失败静默
+  }
 }
 
 function disconnectEventStream() {
@@ -1216,6 +1252,7 @@ function handleBackendAuthExpired() {
   sessionAccountId = "";
   clearSession();
   clearBackendSession();
+  resetOaState();
   resetTeacherWorkloadState();
   resetAttendanceRecordState();
   resetTeacherPayrollState();
@@ -6830,6 +6867,7 @@ function render() {
   renderStep("人员档案", renderHrEmployees);
   renderStep("组织与岗位", renderHrOrg);
   renderStep("人事审批", renderHrFlows);
+  renderStep("审批中心", renderApprovalsView);
   renderStep("人事审计", renderHrAudit);
   renderStep("我的档案", renderMyHrProfile);
   renderStep("签入签出", renderScanner);
@@ -12543,6 +12581,13 @@ function switchView(viewName) {
   }
   state.activeView = viewName;
   render();
+  // 审批中心首次进入时按需加载模板与列表
+  if (viewName === "approvals" && backendMode()) {
+    loadOaTemplates().then(() => {
+      renderApprovalsView();
+      if (!oaState.meta) loadOaRequests();
+    });
+  }
 }
 
 function loginAccount(accountId) {
@@ -12552,6 +12597,7 @@ function loginAccount(accountId) {
   // 切换账号时强制收起弹层与命令面板，避免残留到新账号界面
   if (activeDialogClose) activeDialogClose();
   if (commandState.open) closeCommandPalette();
+  resetOaState();
   resetTeacherWorkloadState();
   resetAttendanceRecordState();
   resetTeacherPayrollState();
@@ -14129,6 +14175,344 @@ function renderMyHrProfile() {
   `;
 }
 
+// ===========================================================================
+// 审批中心（通用 OA）：模板驱动，表单与流程由后端模板定义，前端动态渲染
+// ===========================================================================
+let oaState = {
+  templates: [],
+  templatesLoaded: false,
+  scope: "todo",
+  status: "",
+  search: "",
+  page: 1,
+  items: [],
+  meta: null,
+  todoCount: 0,
+  loading: false,
+  error: "",
+};
+
+function resetOaState() {
+  oaState = { ...oaState, templates: [], templatesLoaded: false, items: [], meta: null, page: 1, todoCount: 0, error: "" };
+}
+
+async function loadOaTemplates() {
+  if (!backendMode() || oaState.templatesLoaded) return;
+  try {
+    const result = await apiRequest("/api/oa/templates");
+    oaState = { ...oaState, templates: result.templates || [], templatesLoaded: true };
+  } catch (error) {
+    oaState = { ...oaState, templates: [], templatesLoaded: true };
+  }
+}
+
+async function loadOaRequests(overrides = {}) {
+  if (!backendMode()) return;
+  oaState = { ...oaState, ...overrides, loading: true, error: "" };
+  render();
+  try {
+    const params = new URLSearchParams({
+      scope: oaState.scope,
+      page: String(oaState.page),
+      pageSize: "20",
+    });
+    if (oaState.status) params.set("status", oaState.status);
+    if (oaState.search) params.set("search", oaState.search);
+    const [list, todos] = await Promise.all([
+      apiRequest(`/api/oa/requests?${params.toString()}`),
+      apiRequest("/api/oa/todos"),
+    ]);
+    oaState = {
+      ...oaState,
+      items: list.items || [],
+      meta: list.meta || null,
+      todoCount: todos.count || 0,
+      loading: false,
+    };
+  } catch (error) {
+    oaState = { ...oaState, items: [], loading: false, error: error.message || "加载失败" };
+  }
+  render();
+}
+
+// 审批类型图标网格（Lark 审批首页的选择方式）
+function renderOaTemplateGrid() {
+  const grid = document.querySelector("#oaTemplateGrid");
+  if (!grid) return;
+  if (!oaState.templates.length) {
+    grid.innerHTML = `<div class="empty-state compact">当前角色暂无可发起的审批类型</div>`;
+    return;
+  }
+  const groups = new Map();
+  oaState.templates.forEach((template) => {
+    if (!groups.has(template.category)) groups.set(template.category, []);
+    groups.get(template.category).push(template);
+  });
+  grid.innerHTML = [...groups.entries()]
+    .map(
+      ([category, templates]) => `
+        <div class="approval-entry-group">
+          <p class="approval-entry-category">${escapeHtml(category)}</p>
+          <div class="approval-entry-items">
+            ${templates
+              .map(
+                (template) => `
+                  <button class="approval-entry" data-oa-new="${escapeHtml(template.key)}" type="button">
+                    <span class="approval-entry-icon">${escapeHtml(template.icon)}</span>
+                    <span class="approval-entry-body">
+                      <strong>${escapeHtml(template.name)}</strong>
+                      <small>${escapeHtml(template.description)}</small>
+                    </span>
+                  </button>
+                `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+const OA_STATUS_CLASS = {
+  pending: "warning",
+  approved: "done",
+  rejected: "danger",
+  withdrawn: "muted",
+};
+
+function renderOaRequestList() {
+  const list = document.querySelector("#oaRequestList");
+  if (!list) return;
+  if (oaState.error) {
+    list.innerHTML = loadErrorHtml(oaState.error, "oaRequests");
+    return;
+  }
+  if (oaState.loading && !oaState.items.length) {
+    list.innerHTML = skeletonListHtml(4);
+    return;
+  }
+  if (!oaState.items.length) {
+    const emptyText =
+      oaState.scope === "todo"
+        ? "当前没有需要您处理的审批"
+        : oaState.scope === "mine"
+          ? "您还没有发起过审批，可从上方选择类型发起"
+          : "暂无记录";
+    list.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+    return;
+  }
+  list.innerHTML = oaState.items
+    .map(
+      (item) => `
+        <button class="approval-row" data-oa-detail="${escapeHtml(item.id)}" type="button">
+          <span class="approval-row-icon">${escapeHtml(item.templateIcon || "📄")}</span>
+          <span class="approval-row-body">
+            <span class="approval-row-head">
+              <strong>${escapeHtml(item.templateName)}</strong>
+              <span class="status-pill ${OA_STATUS_CLASS[item.status] || ""}">${escapeHtml(item.statusLabel)}</span>
+            </span>
+            <span class="approval-row-summary">${escapeHtml(item.summary)}</span>
+            <span class="approval-row-meta">
+              ${escapeHtml(item.applicantName)}
+              ${item.currentStepName ? ` · 当前：${escapeHtml(item.currentStepName)}` : ""}
+              · ${escapeHtml(formatDateTimeShort(item.updatedAt))}
+            </span>
+          </span>
+          ${item.canAct ? `<span class="approval-row-flag">待处理</span>` : ""}
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function formatDateTimeShort(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16).replace("T", " ");
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function renderOaPager() {
+  const pager = document.querySelector("#oaPager");
+  if (!pager) return;
+  const meta = oaState.meta;
+  if (!meta || meta.totalPages <= 1) {
+    pager.innerHTML = "";
+    return;
+  }
+  pager.innerHTML = `
+    <button class="ghost-button compact-button" data-oa-page="${Math.max(1, meta.page - 1)}" ${meta.page <= 1 ? "disabled" : ""} type="button">上一页</button>
+    <span>第 ${meta.page} / ${meta.totalPages} 页 · 共 ${meta.total} 条</span>
+    <button class="ghost-button compact-button" data-oa-page="${Math.min(meta.totalPages, meta.page + 1)}" ${meta.page >= meta.totalPages ? "disabled" : ""} type="button">下一页</button>
+  `;
+}
+
+function renderApprovalsView() {
+  if (state.activeView !== "approvals") return;
+  renderOaTemplateGrid();
+  renderOaRequestList();
+  renderOaPager();
+  const pill = document.querySelector("#oaTodoPill");
+  if (pill) {
+    pill.textContent = `待办 ${oaState.todoCount}`;
+    pill.className = oaState.todoCount ? "status-pill warning" : "status-pill done";
+  }
+  document.querySelectorAll("[data-oa-scope]").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.oaScope === oaState.scope);
+  });
+  const search = document.querySelector("#oaSearch");
+  if (search && document.activeElement !== search) search.value = oaState.search;
+  const statusFilter = document.querySelector("#oaStatusFilter");
+  if (statusFilter) statusFilter.value = oaState.status;
+}
+
+// 发起申请：按模板字段动态生成表单
+async function openOaCreateDialog(templateKey) {
+  const template = oaState.templates.find((item) => item.key === templateKey);
+  if (!template) return;
+  const fields = template.formFields.map((field) => ({
+    name: field.key,
+    label: field.label,
+    type: field.type === "textarea" ? "textarea" : field.type === "select" || field.type === "radio" ? "select" : field.type,
+    required: field.required,
+    placeholder: field.placeholder || "",
+    hint: field.hint || "",
+    options: (field.options || []).map((option) => ({ value: option, label: option })),
+    value: field.type === "select" || field.type === "radio" ? field.options?.[0] || "" : "",
+  }));
+  await openDialog({
+    title: `发起${template.name}`,
+    description: `流程：${template.steps.map((step) => step.name).join(" → ")}`,
+    confirmText: "提交申请",
+    fields,
+    onConfirm: async (values) => {
+      await apiRequest("/api/oa/requests", { method: "POST", body: { templateKey, formData: values } });
+      showToast("申请已提交");
+      loadOaRequests({ scope: "mine", page: 1 });
+    },
+  });
+}
+
+// 详情：表单内容 + 流程进度时间线 + 操作
+async function openOaDetail(requestId) {
+  let detail;
+  try {
+    const result = await apiRequest(`/api/oa/requests/${requestId}`);
+    detail = result.request;
+  } catch (error) {
+    showToast(error.message || "加载详情失败");
+    return;
+  }
+  const fieldRows = (detail.formFields || [])
+    .map((field) => {
+      const value = detail.formData?.[field.key];
+      if (value === undefined || value === "") return "";
+      return `<div class="approval-detail-row"><span>${escapeHtml(field.label)}</span><strong>${escapeHtml(String(value))}</strong></div>`;
+    })
+    .join("");
+  const stepRows = detail.steps
+    .map((step) => {
+      const stateClass =
+        step.status === "approved" ? "done" : step.status === "rejected" ? "danger" : step.status === "pending" ? "current" : "";
+      const votes = step.approvals
+        .map((vote) => `${escapeHtml(vote.accountName)}${vote.comment ? `：${escapeHtml(vote.comment)}` : ""}`)
+        .join("；");
+      return `
+        <li class="approval-step ${stateClass}">
+          <span class="approval-step-dot"></span>
+          <div>
+            <strong>${escapeHtml(step.name)}</strong>
+            <small>${votes || (step.status === "pending" ? "等待处理" : "未开始")}</small>
+            ${step.actedAt ? `<small>${escapeHtml(formatDateTimeShort(step.actedAt))}</small>` : ""}
+          </div>
+        </li>
+      `;
+    })
+    .join("");
+
+  const root = document.querySelector("#dialogRoot");
+  root.innerHTML = `
+    <div class="dialog-overlay" data-dialog-overlay>
+      <div class="dialog-card approval-detail-card" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h3>${escapeHtml(detail.templateIcon || "")} ${escapeHtml(detail.templateName)}</h3>
+          <p>${escapeHtml(detail.summary)} · 申请人 ${escapeHtml(detail.applicantName)} · <span class="status-pill ${OA_STATUS_CLASS[detail.status] || ""}">${escapeHtml(detail.statusLabel)}</span></p>
+        </div>
+        <div class="approval-detail-body">
+          <div class="approval-detail-fields">${fieldRows || '<p class="empty-state compact">无表单内容</p>'}</div>
+          <ol class="approval-steps">${stepRows}</ol>
+        </div>
+        <p class="dialog-error" data-dialog-error></p>
+        <div class="dialog-actions">
+          <button class="ghost-button" data-dialog-cancel type="button">关闭</button>
+          ${detail.canUrge ? `<button class="ghost-button" data-oa-urge="${escapeHtml(detail.id)}" type="button">催办</button>` : ""}
+          ${detail.canWithdraw ? `<button class="ghost-button" data-oa-withdraw="${escapeHtml(detail.id)}" type="button">撤回</button>` : ""}
+          ${detail.canAct ? `<button class="danger-button" data-oa-reject="${escapeHtml(detail.id)}" type="button">拒绝</button>` : ""}
+          ${detail.canAct ? `<button class="primary-button" data-oa-approve="${escapeHtml(detail.id)}" type="button">通过</button>` : ""}
+        </div>
+      </div>
+    </div>
+  `;
+  root.setAttribute("aria-hidden", "false");
+  document.body.classList.add("dialog-open");
+
+  const close = () => {
+    root.innerHTML = "";
+    root.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("dialog-open");
+    activeDialogClose = null;
+  };
+  activeDialogClose = close;
+  root.querySelector("[data-dialog-cancel]").addEventListener("click", close);
+  root.querySelector("[data-dialog-overlay]").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) close();
+  });
+
+  const act = async (action, comment) => {
+    await apiRequest(`/api/oa/requests/${detail.id}/${action}`, { method: "POST", body: { comment } });
+    close();
+    showToast(action === "approve" ? "已通过" : action === "reject" ? "已拒绝" : "操作完成");
+    loadOaRequests();
+  };
+
+  root.querySelector("[data-oa-approve]")?.addEventListener("click", async () => {
+    const comment = await promptDialog("通过审批", { label: "审批意见", value: "同意", required: false, confirmText: "通过" });
+    if (comment === null) return;
+    try {
+      await act("approve", comment);
+    } catch (error) {
+      showToast(error.message || "操作失败");
+    }
+  });
+  root.querySelector("[data-oa-reject]")?.addEventListener("click", async () => {
+    const comment = await promptDialog("拒绝审批", { label: "拒绝原因", placeholder: "请说明理由", confirmText: "拒绝", danger: true });
+    if (!comment) return;
+    try {
+      await act("reject", comment);
+    } catch (error) {
+      showToast(error.message || "操作失败");
+    }
+  });
+  root.querySelector("[data-oa-withdraw]")?.addEventListener("click", async () => {
+    if (!(await confirmDialog("撤回申请", { description: "撤回后该申请作废，如需继续请重新发起。", confirmText: "撤回", danger: true }))) return;
+    try {
+      await act("withdraw", "");
+    } catch (error) {
+      showToast(error.message || "操作失败");
+    }
+  });
+  root.querySelector("[data-oa-urge]")?.addEventListener("click", async () => {
+    try {
+      await apiRequest(`/api/oa/requests/${detail.id}/urge`, { method: "POST", body: {} });
+      showToast("已催办当前审批人");
+    } catch (error) {
+      showToast(error.message || "催办失败");
+    }
+  });
+}
+
 let hrFlowsState = {
   flows: [],
   todoCount: 0,
@@ -14349,12 +14733,53 @@ async function hrApiAction(fn, successText) {
   }
 }
 
+// ---- 审批中心交互 ----
+document.addEventListener("click", async (event) => {
+  const newRequest = event.target.closest("[data-oa-new]");
+  if (newRequest) {
+    openOaCreateDialog(newRequest.dataset.oaNew);
+    return;
+  }
+  const detailRow = event.target.closest("[data-oa-detail]");
+  if (detailRow) {
+    openOaDetail(detailRow.dataset.oaDetail);
+    return;
+  }
+  const scopeTab = event.target.closest("[data-oa-scope]");
+  if (scopeTab) {
+    loadOaRequests({ scope: scopeTab.dataset.oaScope, page: 1 });
+    return;
+  }
+  const pageButton = event.target.closest("[data-oa-page]");
+  if (pageButton && !pageButton.disabled) {
+    loadOaRequests({ page: Number(pageButton.dataset.oaPage) });
+    return;
+  }
+  if (event.target.closest("#oaRefresh")) {
+    loadOaRequests();
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target.id === "oaStatusFilter") {
+    loadOaRequests({ status: event.target.value, page: 1 });
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.target.id === "oaSearch" && event.key === "Enter") {
+    event.preventDefault();
+    loadOaRequests({ search: event.target.value.trim(), page: 1 });
+  }
+});
+
 document.addEventListener("click", async (event) => {
   // 加载失败重试（骨架屏错误态）
   const retryButton = event.target.closest("[data-retry-action]");
   if (retryButton) {
     const key = retryButton.dataset.retryAction;
-    if (key === "hrEmployees") loadHrEmployeePage();
+    if (key === "oaRequests") loadOaRequests();
+    else if (key === "hrEmployees") loadHrEmployeePage();
     else if (key === "hrFlows") loadHrFlows();
     else if (key === "hrOrg") loadHrOrgData();
     else if (key === "hrAudit") loadHrAuditPage();
