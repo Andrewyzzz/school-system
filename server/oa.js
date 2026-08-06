@@ -21,6 +21,14 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// 审批通过后的副作用处理器（由 server 启动时注入，避免与排课模块循环依赖）
+// applySubstitutes(db, arrangements, account) -> { applied, cancelled }
+const sideEffectHandlers = {};
+
+export function registerOaSideEffect(name, handler) {
+  sideEffectHandlers[name] = handler;
+}
+
 let oaIdCounter = 0;
 
 function nextId(prefix) {
@@ -90,14 +98,14 @@ export const OA_TEMPLATES = [
         name: "学部负责人审批",
         approverRoles: ["division_head", "admin"],
         approverMode: "any",
-        // 代课与工作交接由上级安排，不由申请人自行填写
+        // 代课由上级逐节安排，审批通过后直接写入课表（type=lessonArrangement）
         approverFields: [
           {
-            key: "substituteArrangement",
-            label: "代课安排",
-            type: "textarea",
+            key: "lessonArrangements",
+            label: "课程安排",
+            type: "lessonArrangement",
             required: true,
-            hint: "指定代课教师及课程安排，通过后随审批单留痕",
+            hint: "请假期间的每节课需指定代课教师或取消，通过后自动更新课表",
           },
           { key: "handoverNote", label: "其他工作交接", type: "text", required: false, hint: "如班级事务、值班等交接说明" },
         ],
@@ -661,16 +669,39 @@ export function actOnOaRequest(db, requestId, action, account, input = {}) {
 
   // 审批人需填写的内容（如代课安排）在通过时校验并留痕
   const approverFields = step.approverFields || [];
+  const pendingSideEffects = [];
   if (approverFields.length) {
     const submitted = input.approverData || {};
     const collected = {};
     approverFields.forEach((field) => {
       const raw = submitted[field.key];
+      // 课程安排是结构化数组，审批通过后要真正落到课表
+      if (field.type === "lessonArrangement") {
+        const list = Array.isArray(raw) ? raw.filter((entry) => entry && entry.lessonId) : [];
+        if (field.required && !list.length && !submitted[`${field.key}__empty`]) {
+          throw httpError(400, `请安排「${field.label}」：请假期间的每节课都需指定代课教师或取消`);
+        }
+        const missing = list.find((entry) => entry.action !== "cancel" && !String(entry.substituteTeacherId || "").trim());
+        if (missing) {
+          throw httpError(400, `${missing.date || ""} ${missing.time || ""} 的课程未指定代课教师`);
+        }
+        collected[field.key] = list;
+        pendingSideEffects.push({ type: "applySubstitutes", arrangements: list });
+        return;
+      }
       const value = typeof raw === "string" ? raw.trim() : raw;
       if (field.required && (value === undefined || value === null || value === "")) {
         throw httpError(400, `请填写「${field.label}」`);
       }
       collected[field.key] = value === undefined || value === null ? "" : String(value);
+    });
+    // 先执行课表变更：若冲突校验失败则整单不通过，避免"审批过了但课表没改"
+    pendingSideEffects.forEach((effect) => {
+      if (effect.type !== "applySubstitutes") return;
+      const handler = sideEffectHandlers.applySubstitutes;
+      if (!handler) return;
+      const result = handler(db, effect.arrangements, account);
+      collected.lessonArrangementResult = result;
     });
     step.approverData = { ...step.approverData, ...collected };
   }

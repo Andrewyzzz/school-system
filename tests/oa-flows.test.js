@@ -157,7 +157,7 @@ function leaveForm(overrides = {}) {
   assert.throws(() => actOnOaRequest(db, request.id, "approve", finance, {}), /当前环节不由您处理/);
 
   // 第一级通过
-  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
+  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { lessonArrangements: [], lessonArrangements__empty: true } });
   assert.equal(request.steps[0].status, "approved");
   assert.equal(request.currentStepIndex, 1);
   assert.equal(request.steps[1].status, "pending");
@@ -309,7 +309,7 @@ function leaveForm(overrides = {}) {
   assert.equal(teacherTodo.meta.total, 0);
 
   // 我处理过
-  actOnOaRequest(db, own.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
+  actOnOaRequest(db, own.id, "approve", head, { comment: "同意", approverData: { lessonArrangements: [], lessonArrangements__empty: true } });
   const handled = queryOaRequests(db, { scope: "handled" }, head);
   assert.equal(handled.meta.total, 1, "处理过的应可追溯");
 
@@ -351,7 +351,7 @@ function leaveForm(overrides = {}) {
   assert.equal(scanOaTimeouts(db).reminded, 1, "超期应提醒一次");
   assert.equal(scanOaTimeouts(db).reminded, 0, "同一周期内不重复提醒");
   // 已完成的不再提醒
-  actOnOaRequest(db, request.id, "approve", head, { approverData: { substituteArrangement: "王老师代课" } });
+  actOnOaRequest(db, request.id, "approve", head, { approverData: { lessonArrangements: [], lessonArrangements__empty: true } });
   actOnOaRequest(db, request.id, "approve", hr, {});
   assert.equal(scanOaTimeouts(db).reminded, 0);
 }
@@ -360,7 +360,7 @@ function leaveForm(overrides = {}) {
 {
   const db = freshDb();
   const request = createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm() });
-  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { substituteArrangement: "王老师代课" } });
+  actOnOaRequest(db, request.id, "approve", head, { comment: "同意", approverData: { lessonArrangements: [], lessonArrangements__empty: true } });
   // 同一人不能在同一环节重复处理（此时已流转到下一环节，故报环节不符）
   assert.throws(() => actOnOaRequest(db, request.id, "approve", head, {}), /当前环节不由您处理/);
   assert.equal(findTemplate(db, "leave").name, "请假申请");
@@ -377,26 +377,25 @@ function leaveForm(overrides = {}) {
   );
   const arrangeFields = leaveTemplate.steps[0].approverFields || [];
   assert.ok(
-    arrangeFields.some((field) => field.key === "substituteArrangement" && field.required),
-    "学部负责人环节应必填代课安排",
+    arrangeFields.some((field) => field.key === "lessonArrangements" && field.type === "lessonArrangement" && field.required),
+    "学部负责人环节应逐节安排课程（结构化，可落到课表）",
   );
 
   const request = createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm() });
-  // 未安排代课不能通过
+  // 未安排课程不能通过
   assert.throws(
     () => actOnOaRequest(db, request.id, "approve", head, { comment: "同意" }),
-    /请填写「代课安排」/,
+    /请安排「课程安排」/,
   );
   actOnOaRequest(db, request.id, "approve", head, {
     comment: "同意",
-    approverData: { substituteArrangement: "由王芳老师代课", handoverNote: "晨检交副班主任" },
+    approverData: { lessonArrangements: [], lessonArrangements__empty: true, handoverNote: "晨检交副班主任" },
   });
-  assert.equal(request.steps[0].approverData.substituteArrangement, "由王芳老师代课");
   assert.equal(request.steps[0].approverData.handoverNote, "晨检交副班主任");
 
   // 申请人可在详情中看到上级的安排
   const detail = getOaRequestDetail(db, request.id, teacher);
-  assert.equal(detail.steps[0].approverData.substituteArrangement, "由王芳老师代课", "申请人应能看到代课安排");
+  assert.equal(detail.steps[0].approverData.handoverNote, "晨检交副班主任", "申请人应能看到上级安排");
   // 当前环节（人事备案）无需填写内容
   assert.equal(detail.currentApproverFields.length, 0);
 }
@@ -566,6 +565,90 @@ function leaveForm(overrides = {}) {
   const overtime = findTemplate(db, "overtime");
   assert.equal(overtime.steps[0].name, "自定义环节", "自定义流程不应被播种覆盖");
   assert.equal(overtime.description, "自定义后的说明");
+}
+
+// ------------------------------- 请假代课落到课表：课次查询、阻断原因与回滚
+{
+  const { applySubstituteArrangements, listTeacherLessonsInRange } = await import("../server/scheduling.js");
+
+  const buildScheduleDb = () => ({
+    meta: { updatedAt: "" },
+    auditLogs: [], notifications: [], attendanceRecords: [], payrollDetails: [], accounts: [],
+    subjects: [{ id: "chinese", name: "语文", teacherIds: ["T1", "T2", "T3"] }],
+    teachers: [
+      { id: "T1", name: "原老师", status: "active" },
+      { id: "T2", name: "代课A", status: "active" },
+    ],
+    terms: [{ id: "TERM-1", name: "测试学期", current: true, status: "active", startDate: "2026-06-01", endDate: "2026-07-31" }],
+    scheduleDrafts: [{
+      id: "DRAFT-1", termId: "TERM-1", divisionId: "primary", gradeId: "primary-1", status: "published",
+      assignments: [
+        { id: "A1", teacherId: "T1", date: "2026-06-15", time: "08:00-08:40", period: 1, dayIndex: 0, classId: "C1", subjectId: "chinese", roomId: "R1" },
+        { id: "A2", teacherId: "T1", date: "2026-06-16", time: "08:00-08:40", period: 1, dayIndex: 1, classId: "C1", subjectId: "chinese", roomId: "R1" },
+      ],
+    }],
+    lessonInstances: [
+      { id: "L1", scheduleAssignmentId: "A1", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-15", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", status: "scheduled" },
+      { id: "L2", scheduleAssignmentId: "A2", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-16", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", status: "scheduled" },
+    ],
+    scheduleChangeRequests: [],
+  });
+
+  // 按教师与日期区间列出请假期间的课次
+  const db1 = buildScheduleDb();
+  const lessons = listTeacherLessonsInRange(db1, "T1", "2026-06-15", "2026-06-16");
+  assert.equal(lessons.length, 2, "应列出请假期间的两节课");
+  assert.ok(lessons[0].changeable, "正常课次应可变更");
+  assert.equal(lessons[0].assignmentId, "A1");
+  assert.equal(listTeacherLessonsInRange(db1, "T1", "2026-07-01", "2026-07-02").length, 0, "区间外不应返回课次");
+
+  // 已签到的课次不可变更并说明原因
+  const db2 = buildScheduleDb();
+  db2.attendanceRecords.push({ lessonId: "L1" });
+  const blocked = listTeacherLessonsInRange(db2, "T1", "2026-06-15", "2026-06-16");
+  assert.equal(blocked[0].changeable, false, "已有签到记录的课次不可变更");
+  assert.match(blocked[0].blockedReason, /签到/);
+
+  // 已完成的课次同样不可变更
+  const db3 = buildScheduleDb();
+  db3.lessonInstances[0].status = "completed";
+  assert.equal(listTeacherLessonsInRange(db3, "T1", "2026-06-15", "2026-06-16")[0].changeable, false);
+
+  // 取消课次
+  const db4 = buildScheduleDb();
+  const cancelled = applySubstituteArrangements(db4, [{ lessonId: "L1", action: "cancel" }], { id: "ACC", name: "审批人" });
+  assert.equal(cancelled.cancelled.length, 1);
+  assert.equal(db4.lessonInstances.find((item) => item.id === "L1").status, "cancelled", "课次应标记取消");
+  assert.match(db4.lessonInstances.find((item) => item.id === "L1").cancelReason, /请假/);
+
+  // 中途失败整单回滚：第一节取消成功，第二节课次不存在
+  const db5 = buildScheduleDb();
+  const before = JSON.stringify(db5.lessonInstances);
+  assert.throws(
+    () =>
+      applySubstituteArrangements(
+        db5,
+        [
+          { lessonId: "L1", action: "cancel" },
+          { lessonId: "L_NOT_EXIST", action: "cancel" },
+        ],
+        { id: "ACC", name: "审批人" },
+      ),
+    /课次不存在/,
+  );
+  assert.equal(JSON.stringify(db5.lessonInstances), before, "失败时课表必须整体回滚，不留半改状态");
+  assert.equal(db5.scheduleChangeRequests.length, 0, "回滚后不应残留变更单");
+
+  // 未指定代课教师时拒绝，且原课次不变
+  const db6 = buildScheduleDb();
+  assert.throws(
+    () => applySubstituteArrangements(db6, [{ lessonId: "L1", substituteTeacherId: "" }], { id: "ACC" }),
+    /未指定代课教师/,
+  );
+  assert.equal(db6.lessonInstances.find((item) => item.id === "L1").teacherId, "T1", "拒绝后原课次不变");
+
+  // 空安排是允许的（请假期间本就没课）
+  assert.deepEqual(applySubstituteArrangements(buildScheduleDb(), []), { applied: [], cancelled: [] });
 }
 
 console.log("oa flows checks passed");

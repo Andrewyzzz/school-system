@@ -4724,7 +4724,10 @@ function validatePublishedLessonChange(db, config, lesson, next) {
     error.statusCode = 409;
     throw error;
   }
-  if (!teacherCanTeachSubject(config, next.teacherId, lesson.subjectId, lesson.classId)) {
+  // 代课（换人）允许同学科任课池内的其他老师临时顶课——班级级任课白名单是长期
+  // 任课关系，用它卡代课会让代课功能永远无人可选；仅调整时间/教室时仍按原任课关系校验。
+  const isSubstitute = next.teacherId !== lesson.teacherId;
+  if (!teacherCanTeachSubject(config, next.teacherId, lesson.subjectId, isSubstitute ? "" : lesson.classId)) {
     const error = new Error("目标老师不属于该科目的可排老师");
     error.statusCode = 400;
     throw error;
@@ -5351,4 +5354,191 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
   });
 
   return { config, draft };
+}
+
+// ---------------------------------------------------------------------------
+// 请假代课联动（审批中心调用）
+//
+// 目标：请假审批通过时，把上级安排的代课真正落到课表，而不是只留一句话。
+// 原则：复用既有调课引擎（createScheduleChangeRequest + approveScheduleChangeRequest），
+//       所有冲突校验、签到保护、薪资锁定保护自动生效，不另开绕过校验的写入路径。
+// ---------------------------------------------------------------------------
+
+// 列出某教师在日期区间内、已发布且仍可变更的课次
+export function listTeacherLessonsInRange(db, teacherId, startDate, endDate) {
+  ensureSchedulingStore(db);
+  const from = String(startDate || "");
+  const to = String(endDate || from);
+  if (!teacherId || !from) return [];
+
+  return (db.lessonInstances || [])
+    .filter(
+      (lesson) =>
+        lesson.teacherId === teacherId &&
+        lesson.source === "backend-scheduling" &&
+        lesson.date >= from &&
+        lesson.date <= to,
+    )
+    .map((lesson) => {
+      const draft = (db.scheduleDrafts || []).find((item) => item.id === lesson.schedulingDraftId) || null;
+      const hasAttendance = (db.attendanceRecords || []).some((record) => record.lessonId === lesson.id);
+      const locked = payrollLocked(db, lesson.teacherId, monthKey(lesson.date));
+      // 已签到/已完成/已锁薪的课次不能再动，前端据此禁用操作并说明原因
+      const blockedReason = ["completed", "checkedIn"].includes(lesson.status)
+        ? "该课次已签到或已完成，不能变更"
+        : hasAttendance
+          ? "该课次已有签到记录，不能变更"
+          : locked
+            ? "该月工资已锁定，不能变更"
+            : !draft || draft.status !== "published"
+              ? "课表未发布，无法变更"
+              : "";
+      return {
+        lessonId: lesson.id,
+        assignmentId: lesson.scheduleAssignmentId || "",
+        date: lesson.date,
+        time: lesson.time,
+        period: periodForLesson(lesson),
+        className: lesson.className,
+        classId: lesson.classId,
+        subjectId: lesson.subjectId,
+        subjectName: lesson.subjectName,
+        room: lesson.room,
+        roomId: lesson.roomId,
+        status: lesson.status,
+        termId: draft?.termId || "",
+        divisionId: draft?.divisionId || "",
+        gradeId: draft?.gradeId || "",
+        changeable: !blockedReason,
+        blockedReason,
+      };
+    })
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
+}
+
+// 计算某节课的可代课教师：能教该科目、同一时段无课、该月工资未锁定
+export function listSubstituteCandidates(db, lessonId) {
+  ensureSchedulingStore(db);
+  const lesson = (db.lessonInstances || []).find((item) => item.id === lessonId);
+  if (!lesson) return [];
+  const draft = (db.scheduleDrafts || []).find((item) => item.id === lesson.schedulingDraftId);
+  if (!draft) return [];
+  const config = buildSchedulingConfig(db, {
+    termId: draft.termId,
+    divisionId: draft.divisionId,
+    gradeId: draft.gradeId,
+  });
+
+  // 同一时段（跨学部全局）已有课的教师不可代课
+  const busyTeacherIds = new Set(
+    (db.lessonInstances || [])
+      .filter((item) => item.id !== lesson.id && item.date === lesson.date && item.time === lesson.time)
+      .map((item) => item.teacherId),
+  );
+
+  return (db.teachers || [])
+    .filter((teacher) => teacher.id !== lesson.teacherId)
+    .map((teacher) => {
+      // 与 validatePublishedLessonChange 的代课口径一致：按学科任课池判定，不卡班级白名单
+      const canTeach = teacherCanTeachSubject(config, teacher.id, lesson.subjectId, "");
+      const busy = busyTeacherIds.has(teacher.id);
+      const locked = payrollLocked(db, teacher.id, monthKey(lesson.date));
+      const eligible = teacherEligibility(db, teacher.id);
+      const reason = !canTeach
+        ? "未承担该学科教学"
+        : !eligible.inTeachingPool
+          ? "人事状态不可排课"
+          : busy
+            ? "该时段已有课"
+            : locked
+              ? "该月工资已锁定"
+              : "";
+      return {
+        teacherId: teacher.id,
+        name: teacher.name,
+        employeeNo: teacher.employeeNo || teacher.id,
+        stageName: teacher.department || teacher.stageName || "",
+        available: !reason,
+        reason,
+      };
+    })
+    .filter((item) => item.available || item.reason === "该时段已有课")
+    .sort((a, b) => Number(b.available) - Number(a.available) || a.name.localeCompare(b.name, "zh-CN"));
+}
+
+// 批量执行代课/取消安排；任一失败整体回滚，避免课表出现半改状态
+export function applySubstituteArrangements(db, arrangements = [], actorAccount = null) {
+  ensureSchedulingStore(db);
+  const list = Array.isArray(arrangements) ? arrangements.filter((item) => item && item.lessonId) : [];
+  if (!list.length) return { applied: [], cancelled: [] };
+
+  const snapshot = JSON.stringify({
+    lessonInstances: db.lessonInstances || [],
+    scheduleDrafts: db.scheduleDrafts || [],
+    scheduleChangeRequests: db.scheduleChangeRequests || [],
+  });
+
+  const applied = [];
+  const cancelled = [];
+  try {
+    list.forEach((item) => {
+      const lesson = (db.lessonInstances || []).find((entry) => entry.id === item.lessonId);
+      if (!lesson) throw Object.assign(new Error(`课次不存在：${item.lessonId}`), { statusCode: 404 });
+      const draft = (db.scheduleDrafts || []).find((entry) => entry.id === lesson.schedulingDraftId);
+      if (!draft) throw Object.assign(new Error("课次所属课表不存在"), { statusCode: 404 });
+      const scope = { termId: draft.termId, divisionId: draft.divisionId, gradeId: draft.gradeId };
+
+      if (item.action === "cancel") {
+        // 取消课次：走请假停课，课次标记取消不再计薪，不产生代课记录
+        lesson.status = "cancelled";
+        lesson.cancelledAt = new Date().toISOString();
+        lesson.cancelReason = String(item.reason || "教师请假，课程取消");
+        cancelled.push({
+          lessonId: lesson.id,
+          date: lesson.date,
+          time: lesson.time,
+          className: lesson.className,
+          subjectName: lesson.subjectName,
+        });
+        return;
+      }
+
+      const substituteTeacherId = String(item.substituteTeacherId || "").trim();
+      if (!substituteTeacherId) {
+        throw Object.assign(new Error(`${lesson.date} ${lesson.time} ${lesson.className} 未指定代课教师`), {
+          statusCode: 400,
+        });
+      }
+      // 复用调课引擎：createScheduleChangeRequest 会做全部校验，approve 落到课表
+      const { request } = createScheduleChangeRequest(
+        db,
+        {
+          ...scope,
+          assignmentId: lesson.scheduleAssignmentId,
+          teacherId: substituteTeacherId,
+          reason: String(item.reason || "请假代课安排"),
+        },
+        actorAccount,
+      );
+      approveScheduleChangeRequest(db, { ...scope, requestId: request.id }, actorAccount);
+      applied.push({
+        lessonId: lesson.id,
+        date: lesson.date,
+        time: lesson.time,
+        className: lesson.className,
+        subjectName: lesson.subjectName,
+        substituteTeacherId,
+        substituteTeacherName: request.to.teacherName,
+      });
+    });
+  } catch (error) {
+    // 回滚到执行前状态，保证课表不出现部分生效
+    const restored = JSON.parse(snapshot);
+    db.lessonInstances = restored.lessonInstances;
+    db.scheduleDrafts = restored.scheduleDrafts;
+    db.scheduleChangeRequests = restored.scheduleChangeRequests;
+    throw error;
+  }
+
+  return { applied, cancelled };
 }

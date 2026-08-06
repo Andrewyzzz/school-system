@@ -34,6 +34,9 @@ import {
   updateGradeCourseRules,
   updateRoomResources,
   updateTeacherScheduleRule,
+  listTeacherLessonsInRange,
+  listSubstituteCandidates,
+  applySubstituteArrangements,
 } from "./scheduling.js";
 import {
   confirmMonthlyWorkload,
@@ -124,6 +127,7 @@ import {
   withdrawProfileChangeRequest,
 } from "./hr.js";
 import {
+  registerOaSideEffect,
   listTemplatesForRole,
   listAllTemplates,
   createOaTemplate,
@@ -1726,6 +1730,34 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
+      // 请假审批用：列出申请人在请假期间的课次 + 每节课的可代课教师
+      if (req.method === "GET" && url.pathname === "/api/oa/lesson-arrangements") {
+        const auth = requireAuth(req, res, db, ["admin", "division_head", "hr", "system_admin"]);
+        if (!auth) return;
+        const requestId = url.searchParams.get("requestId") || "";
+        const request = db.oaRequests?.find((item) => item.id === requestId);
+        if (!request) {
+          sendError(res, 404, "审批单不存在");
+          return;
+        }
+        // 申请人账号 → 教师
+        const applicantAccount = db.accounts.find((item) => item.id === request.applicantAccountId);
+        const teacherId = applicantAccount?.teacherId || "";
+        const startDate = request.formData?.startDate || "";
+        const endDate = request.formData?.endDate || startDate;
+        const lessons = teacherId ? listTeacherLessonsInRange(db, teacherId, startDate, endDate) : [];
+        sendJson(res, 200, {
+          teacherId,
+          startDate,
+          endDate,
+          lessons: lessons.map((lesson) => ({
+            ...lesson,
+            candidates: lesson.changeable ? listSubstituteCandidates(db, lesson.lessonId) : [],
+          })),
+        });
+        return;
+      }
+
       // 待办数（前端角标）
       if (req.method === "GET" && url.pathname === "/api/oa/todos") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
@@ -1883,6 +1915,11 @@ export async function createServer() {
   // M3：人事审批超时扫描（每小时一次，停留超 3 个工作日提醒；启动即扫一次）
   // 审批模板首次运行时播种（幂等，已有模板不会被覆盖）
   if (ensureOaTemplates(db)) await saveDatabase(db);
+
+  // 请假审批通过后由调课引擎真正更新课表（含全部冲突与锁定校验）
+  registerOaSideEffect("applySubstitutes", (database, arrangements, account) =>
+    applySubstituteArrangements(database, arrangements, account),
+  );
 
   const runHrTimeoutScan = async () => {
     try {

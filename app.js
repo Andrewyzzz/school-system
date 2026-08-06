@@ -14405,6 +14405,175 @@ async function openOaCreateDialog(templateKey) {
   });
 }
 
+// 请假审批专用：逐节课安排代课教师或取消，通过后直接写入课表
+async function openLessonArrangementDialog(detail, approverFields) {
+  let data;
+  try {
+    data = await apiRequest(`/api/oa/lesson-arrangements?requestId=${encodeURIComponent(detail.id)}`);
+  } catch (error) {
+    showToast(error.message || "无法读取请假期间的课程");
+    return;
+  }
+  const lessons = data.lessons || [];
+  const otherFields = approverFields.filter((field) => field.type !== "lessonArrangement");
+
+  const lessonRows = lessons
+    .map((lesson, index) => {
+      if (!lesson.changeable) {
+        return `
+          <div class="arrange-row is-blocked">
+            <div class="arrange-lesson">
+              <strong>${escapeHtml(lesson.date)} ${escapeHtml(lesson.time)}</strong>
+              <small>${escapeHtml(lesson.className)} · ${escapeHtml(lesson.subjectName)}</small>
+            </div>
+            <div class="arrange-blocked">${escapeHtml(lesson.blockedReason)}</div>
+          </div>
+        `;
+      }
+      const available = (lesson.candidates || []).filter((item) => item.available);
+      const busy = (lesson.candidates || []).filter((item) => !item.available);
+      const options = available
+        .map((item) => `<option value="${escapeHtml(item.teacherId)}">${escapeHtml(item.name)}（${escapeHtml(item.stageName || "")}）</option>`)
+        .join("");
+      return `
+        <div class="arrange-row" data-arrange-index="${index}" data-lesson-id="${escapeHtml(lesson.lessonId)}">
+          <div class="arrange-lesson">
+            <strong>${escapeHtml(lesson.date)} ${escapeHtml(lesson.time)}</strong>
+            <small>${escapeHtml(lesson.className)} · ${escapeHtml(lesson.subjectName)} · ${escapeHtml(lesson.room || "")}</small>
+          </div>
+          <div class="arrange-controls">
+            <select class="lesson-select" data-arrange-action="${index}">
+              <option value="substitute">安排代课</option>
+              <option value="cancel">取消该课</option>
+            </select>
+            <select class="lesson-select" data-arrange-teacher="${index}" ${available.length ? "" : "disabled"}>
+              ${options || '<option value="">无可用代课教师</option>'}
+            </select>
+          </div>
+          ${busy.length ? `<div class="arrange-busy">${busy.length} 位同学科教师该时段已有课</div>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+
+  const otherFieldRows = otherFields
+    .map(
+      (field) => `
+        <label class="dialog-field">
+          <span>${escapeHtml(field.label)}${field.required ? '<span class="dialog-required">*</span>' : ""}</span>
+          <input data-arrange-extra="${escapeHtml(field.key)}" type="text" placeholder="${escapeHtml(field.hint || "")}" />
+        </label>
+      `,
+    )
+    .join("");
+
+  const root = document.querySelector("#dialogRoot");
+  root.innerHTML = `
+    <div class="dialog-overlay" data-dialog-overlay>
+      <div class="dialog-card arrange-card" role="dialog" aria-modal="true">
+        <div class="dialog-head">
+          <h3>安排课程后通过</h3>
+          <p>${escapeHtml(detail.applicantName)} 请假 ${escapeHtml(data.startDate)} 至 ${escapeHtml(data.endDate)}，共 ${lessons.length} 节课。安排通过后课表立即更新，代课教师会收到通知。</p>
+        </div>
+        <div class="arrange-body">
+          ${lessons.length ? lessonRows : '<div class="empty-state compact">请假期间没有已排课程，可直接通过</div>'}
+          ${otherFieldRows}
+          <label class="dialog-field">
+            <span>审批意见</span>
+            <input data-arrange-comment type="text" value="同意" />
+          </label>
+        </div>
+        <p class="dialog-error" data-dialog-error></p>
+        <div class="dialog-actions">
+          <button class="ghost-button" data-dialog-cancel type="button">取消</button>
+          <button class="primary-button" data-arrange-submit type="button">确认并通过</button>
+        </div>
+      </div>
+    </div>
+  `;
+  root.setAttribute("aria-hidden", "false");
+  document.body.classList.add("dialog-open");
+
+  const close = () => {
+    root.innerHTML = "";
+    root.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("dialog-open");
+    activeDialogClose = null;
+  };
+  activeDialogClose = close;
+  root.querySelector("[data-dialog-cancel]").addEventListener("click", close);
+  root.querySelector("[data-dialog-overlay]").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) close();
+  });
+
+  // 选择"取消该课"时隐藏代课教师下拉
+  root.querySelectorAll("[data-arrange-action]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const index = select.dataset.arrangeAction;
+      const teacherSelect = root.querySelector(`[data-arrange-teacher="${index}"]`);
+      if (teacherSelect) teacherSelect.style.display = select.value === "cancel" ? "none" : "";
+    });
+  });
+
+  const errorEl = root.querySelector("[data-dialog-error]");
+  const submitButton = root.querySelector("[data-arrange-submit]");
+  submitButton.addEventListener("click", async () => {
+    const arrangements = [];
+    let invalid = "";
+    root.querySelectorAll("[data-arrange-index]").forEach((row) => {
+      const index = row.dataset.arrangeIndex;
+      const action = root.querySelector(`[data-arrange-action="${index}"]`)?.value || "substitute";
+      const lessonId = row.dataset.lessonId;
+      if (action === "cancel") {
+        arrangements.push({ lessonId, action: "cancel" });
+        return;
+      }
+      const teacherId = root.querySelector(`[data-arrange-teacher="${index}"]`)?.value || "";
+      if (!teacherId) {
+        const lesson = lessons.find((item) => item.lessonId === lessonId);
+        invalid = `${lesson?.date || ""} ${lesson?.time || ""} 没有可用代课教师，请改为取消该课`;
+        return;
+      }
+      arrangements.push({ lessonId, substituteTeacherId: teacherId });
+    });
+    if (invalid) {
+      errorEl.textContent = invalid;
+      return;
+    }
+    const approverData = { lessonArrangements: arrangements };
+    // 请假期间无课时显式标记，避免被必填校验拦下
+    if (!lessons.length) approverData.lessonArrangements__empty = true;
+    root.querySelectorAll("[data-arrange-extra]").forEach((input) => {
+      approverData[input.dataset.arrangeExtra] = input.value.trim();
+    });
+    const comment = root.querySelector("[data-arrange-comment]")?.value.trim() || "";
+
+    submitButton.disabled = true;
+    submitButton.classList.add("is-loading");
+    errorEl.textContent = "";
+    try {
+      const result = await apiRequest(`/api/oa/requests/${detail.id}/approve`, {
+        method: "POST",
+        body: { comment, approverData },
+      });
+      const applied = result.request?.steps?.[0]?.approverData?.lessonArrangementResult;
+      close();
+      const appliedCount = applied?.applied?.length || 0;
+      const cancelledCount = applied?.cancelled?.length || 0;
+      showToast(
+        appliedCount || cancelledCount
+          ? `已通过：${appliedCount} 节安排代课、${cancelledCount} 节取消，课表已更新`
+          : "已通过",
+      );
+      loadOaRequests();
+    } catch (error) {
+      errorEl.textContent = error.message || "操作失败";
+      submitButton.disabled = false;
+      submitButton.classList.remove("is-loading");
+    }
+  });
+}
+
 // 详情：表单内容 + 流程进度时间线 + 操作
 async function openOaDetail(requestId) {
   let detail;
@@ -14433,6 +14602,22 @@ async function openOaDetail(requestId) {
       const arrangements = (step.approverFields || [])
         .map((field) => {
           const value = step.approverData?.[field.key];
+          // 课程安排展示实际执行结果：哪节课由谁代、哪节课取消
+          if (field.type === "lessonArrangement") {
+            const result = step.approverData?.lessonArrangementResult;
+            if (!result) return "";
+            const rows = [
+              ...(result.applied || []).map(
+                (item) =>
+                  `${escapeHtml(item.date)} ${escapeHtml(item.time)} ${escapeHtml(item.className)}${escapeHtml(item.subjectName)} → ${escapeHtml(item.substituteTeacherName)} 代课`,
+              ),
+              ...(result.cancelled || []).map(
+                (item) => `${escapeHtml(item.date)} ${escapeHtml(item.time)} ${escapeHtml(item.className)}${escapeHtml(item.subjectName)} → 已取消`,
+              ),
+            ];
+            if (!rows.length) return "";
+            return `<small class="approval-step-arrangement"><b>${escapeHtml(field.label)}（课表已更新）：</b><br>${rows.join("<br>")}</small>`;
+          }
           return value ? `<small class="approval-step-arrangement"><b>${escapeHtml(field.label)}：</b>${escapeHtml(value)}</small>` : "";
         })
         .join("");
@@ -14496,8 +14681,13 @@ async function openOaDetail(requestId) {
   };
 
   root.querySelector("[data-oa-approve]")?.addEventListener("click", async () => {
-    // 当前环节若要求审批人填写内容（如代课安排），在通过时一并收集
     const approverFields = detail.currentApproverFields || [];
+    // 课程安排是结构化的，需要单独的逐节课界面
+    if (approverFields.some((field) => field.type === "lessonArrangement")) {
+      close();
+      openLessonArrangementDialog(detail, approverFields);
+      return;
+    }
     const dialogFields = [
       ...approverFields.map((field) => ({
         name: field.key,

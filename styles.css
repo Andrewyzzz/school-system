@@ -7648,3 +7648,22 @@ body.dialog-open { overflow: hidden; }
   .approval-chain-arrow { transform: rotate(90deg); align-self: flex-start; margin-left: 20px; }
   .approval-chain-node { min-width: 0; }
 }
+
+/* 请假审批：逐节课安排代课 */
+.arrange-card { width: min(100%, 620px); }
+.arrange-body { display: grid; gap: 10px; max-height: 56vh; overflow-y: auto; }
+.arrange-row {
+  display: grid; gap: 8px; padding: 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface);
+}
+.arrange-row.is-blocked { background: var(--surface-soft); opacity: 0.75; }
+.arrange-lesson { display: grid; gap: 2px; }
+.arrange-lesson strong { font-size: 13px; font-weight: 600; }
+.arrange-lesson small { font-size: 12px; color: var(--muted); }
+.arrange-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.arrange-controls select { flex: 1 1 150px; min-width: 0; }
+.arrange-blocked { font-size: 12px; color: var(--rose-strong, #c9353f); }
+.arrange-busy { font-size: 11px; color: var(--faint); }
+@media (max-width: 900px) {
+  .arrange-controls select { flex: 1 1 100%; }
+}
