@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260708-oa-substitute-1" />
+    <link rel="stylesheet" href="styles.css?v=20260708-hr-facts-2" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -1767,25 +1767,11 @@
                   <button class="ghost-button" id="saveTeacherSalaryProfile" type="button">编辑档案</button>
                 </div>
               </div>
+              <div class="hr-owned-facts" id="salaryHrFacts">
+                <p class="hr-owned-title">以下由人事维护（财务不可修改）</p>
+                <div class="hr-owned-grid" id="salaryHrFactsGrid"></div>
+              </div>
               <div class="payroll-rule-grid salary-profile-grid">
-                <label class="field-label">职称档
-                  <select id="salaryQualificationGrade" class="lesson-select">
-                    <option value="seniorProfessor">正高</option>
-                    <option value="seniorTeacher">高级</option>
-                    <option value="first">一级</option>
-                    <option value="second">二级</option>
-                    <option value="third">三级</option>
-                    <option value="ungraded">未评级</option>
-                  </select>
-                </label>
-                <label class="field-label">学历
-                  <select id="salaryDegree" class="lesson-select">
-                    <option value="">本科及以下（无补贴）</option>
-                    <option value="master">硕士</option>
-                    <option value="doctor">博士</option>
-                  </select>
-                </label>
-                <label class="field-label">校龄<input id="salarySchoolYears" type="number" min="0" /></label>
                 <label class="field-label">考核档
                   <select id="salaryAssessmentBand" class="lesson-select">
                     <option value="high">高中专任</option>
@@ -1793,15 +1779,6 @@
                     <option value="primaryCoreHigh">小学高段核心</option>
                     <option value="primaryCoreLow">小学低段核心</option>
                     <option value="primarySpecial">小学艺体信息心理</option>
-                  </select>
-                </label>
-                <label class="field-label">本月考核结果
-                  <select id="salaryAssessmentGrade" class="lesson-select">
-                    <option value="default">合格（全额）</option>
-                    <option value="excellent">优秀（上浮）</option>
-                    <option value="good">良好（上浮）</option>
-                    <option value="warning">基本合格（扣减）</option>
-                    <option value="unqualified">不合格（扣减）</option>
                   </select>
                 </label>
                 <label class="field-label">住房档
@@ -1813,47 +1790,15 @@
                   </select>
                 </label>
               </div>
-              <div class="checkbox-grid salary-role-grid" aria-label="教师岗位津贴">
-                <label><input id="salaryRoleHomeroom" type="checkbox" /><span>班主任</span></label>
-                <label><input id="salaryRoleGradeHead" type="checkbox" /><span>年级主任</span></label>
-                <label><input id="salaryRoleDeputyGradeHead" type="checkbox" /><span>年级副主任</span></label>
-                <label><input id="salaryRoleTeachingResearchLeader" type="checkbox" /><span>教研组长</span></label>
-                <label><input id="salaryRoleLessonPrepLeader" type="checkbox" /><span>备课组长</span></label>
-                <label><input id="salaryRoleGraduatingClass" type="checkbox" /><span>毕业班</span></label>
-                <label><input id="salaryRoleEliteClass" type="checkbox" /><span>特优班</span></label>
-                <label><input id="salaryRoleQingbeiClass" type="checkbox" /><span>清北班</span></label>
-                <label><input id="salaryRoleBusDuty" type="checkbox" /><span>跟车老师</span></label>
-              </div>
-              <div class="homeroom-student-field" id="homeroomStudentField">
-                <label class="field-label" for="salaryHomeroomStudentCount">
-                  班主任学生数
-                  <input id="salaryHomeroomStudentCount" type="number" min="0" />
-                </label>
-                <p>仅勾选“班主任”后参与计算，用于按学生人数核算班主任津贴。</p>
-              </div>
-              <div class="homeroom-student-field" id="gradeHeadClassField">
-                <label class="field-label" for="salaryGradeClassCount">
-                  年级管辖班级数
-                  <input id="salaryGradeClassCount" type="number" min="0" />
-                </label>
-                <p>仅勾选“年级主任”后参与计算，初高中按“班数 × 单价 + 固定额”核算年级长津贴。</p>
-              </div>
+              <p class="action-hint">兼岗任命（班主任、年级主任等）与学生数由人事在「人员档案」维护，此处仅按其结果计算津贴。</p>
               <details class="special-employment-details">
                 <summary>特殊用工状态</summary>
                 <div class="special-employment-grid">
                   <label class="field-label" for="salaryProbationRate">
-                    试用期比例
-                    <input id="salaryProbationRate" type="number" min="0" max="1" step="0.01" />
+                    试用期比例（由人事状态自动推导）
+                    <input id="salaryProbationRate" type="number" min="0" max="1" step="0.01" readonly />
                   </label>
-                  <p>默认 1.00 表示全额工资；试用期按制度填 0.80（整体八折，低于最低工资标准时系统自动补足）。</p>
-                  <label class="field-label" for="salaryPostAllowanceMode">
-                    兼岗津贴发放方式
-                    <select id="salaryPostAllowanceMode" class="lesson-select">
-                      <option value="stack">授课教师：多岗位叠加</option>
-                      <option value="highest">行政管理人员：择最高一项</option>
-                    </select>
-                  </label>
-                  <p>制度规定授课教师兼多岗可叠加，行政管理人员兼任多职务时就高不就低。</p>
+                  <p>人事档案状态为“试用期”时自动按 80% 计发，低于最低工资标准系统自动补足；如需调整请人事变更状态。</p>
                 </div>
               </details>
               <section class="manual-item-editor" aria-labelledby="manualItemTitle">
@@ -2074,6 +2019,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260708-oa-substitute-1"></script>
+    <script src="app.js?v=20260708-hr-facts-2"></script>
   </body>
 </html>

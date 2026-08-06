@@ -3551,32 +3551,12 @@ async function saveBackendPayrollRules() {
 }
 
 function salaryProfileFromInputs() {
-  const assessmentGrade = document.querySelector("#salaryAssessmentGrade")?.value || "default";
+  // 财务只维护金额相关项：考核档位、住房档、补充奖扣。
+  // 职称、学历、兼岗任命、校龄、试用期比例均由人事档案决定，此处不再提交。
   return {
-    qualificationGrade: document.querySelector("#salaryQualificationGrade")?.value || "third",
-    // 学历与职称各自独立：博士/硕士按学历补贴发放，不影响职称档
-    degree: document.querySelector("#salaryDegree")?.value || "",
-    schoolYears: Number(document.querySelector("#salarySchoolYears")?.value || 0),
     assessmentBand: document.querySelector("#salaryAssessmentBand")?.value || "high",
-    // 线下评审结果由财务/学部在档案中选择，系统按等级系数浮动考核工资
-    monthlyAssessment: { grade: assessmentGrade },
     housingTier: document.querySelector("#salaryHousingTier")?.value || "teacher",
-    probationRate: Number(document.querySelector("#salaryProbationRate")?.value || 1),
-    postAllowanceMode: document.querySelector("#salaryPostAllowanceMode")?.value || "stack",
     attendanceDeduction: 0,
-    roles: {
-      homeroom: Boolean(document.querySelector("#salaryRoleHomeroom")?.checked),
-      homeroomStudentCount: Number(document.querySelector("#salaryHomeroomStudentCount")?.value || 0),
-      gradeClassCount: Number(document.querySelector("#salaryGradeClassCount")?.value || 0),
-      gradeHead: Boolean(document.querySelector("#salaryRoleGradeHead")?.checked),
-      deputyGradeHead: Boolean(document.querySelector("#salaryRoleDeputyGradeHead")?.checked),
-      teachingResearchLeader: Boolean(document.querySelector("#salaryRoleTeachingResearchLeader")?.checked),
-      lessonPrepLeader: Boolean(document.querySelector("#salaryRoleLessonPrepLeader")?.checked),
-      graduatingClass: Boolean(document.querySelector("#salaryRoleGraduatingClass")?.checked),
-      eliteClass: Boolean(document.querySelector("#salaryRoleEliteClass")?.checked),
-      qingbeiClass: Boolean(document.querySelector("#salaryRoleQingbeiClass")?.checked),
-      busDuty: Boolean(document.querySelector("#salaryRoleBusDuty")?.checked),
-    },
   };
 }
 
@@ -10490,6 +10470,8 @@ function settlementSalaryProfileSource(teacherId = state.selectedFinanceTeacherI
   return {
     teacher,
     salaryProfile: payroll?.salaryProfile || teacher?.salaryProfile || {},
+    // 带上明细行，供只读展示人事维护的事实（职称/学历/校龄/兼岗/考核）
+    rows: payroll?.rows || payroll?.components || [],
   };
 }
 
@@ -11367,32 +11349,6 @@ function canEditSalaryProfile(profile = null) {
   return Boolean(salaryProfileEditContextAllowsInput() && profile);
 }
 
-function syncHomeroomStudentField(profile = null) {
-  const isHomeroom = Boolean(document.querySelector("#salaryRoleHomeroom")?.checked);
-  const field = document.querySelector("#homeroomStudentField");
-  const input = document.querySelector("#salaryHomeroomStudentCount");
-  const canEdit = profile ? canEditSalaryProfile(profile) : salaryProfileEditContextAllowsInput();
-  if (field) field.hidden = !isHomeroom;
-  if (input) {
-    input.disabled = !canEdit || !isHomeroom;
-    if (!isHomeroom) input.value = "0";
-  }
-  syncGradeHeadClassField(profile);
-}
-
-// 年级主任津贴按管辖班级数计算（初高中），仅勾选年级主任后可填
-function syncGradeHeadClassField(profile = null) {
-  const isGradeHead = Boolean(document.querySelector("#salaryRoleGradeHead")?.checked);
-  const field = document.querySelector("#gradeHeadClassField");
-  const input = document.querySelector("#salaryGradeClassCount");
-  const canEdit = profile ? canEditSalaryProfile(profile) : salaryProfileEditContextAllowsInput();
-  if (field) field.hidden = !isGradeHead;
-  if (input) {
-    input.disabled = !canEdit || !isGradeHead;
-    if (!isGradeHead) input.value = "0";
-  }
-}
-
 function syncSalaryProfileEditState(profile) {
   const panel = document.querySelector(".settlement-profile-panel");
   const saveButton = document.querySelector("#saveTeacherSalaryProfile");
@@ -11417,16 +11373,7 @@ function syncSalaryProfileEditState(profile) {
     cancelButton.disabled = financeTeacherDetailState.loading;
   }
 
-  [
-    "#salaryQualificationGrade",
-    "#salaryDegree",
-    "#salarySchoolYears",
-    "#salaryAssessmentBand",
-    "#salaryAssessmentGrade",
-    "#salaryHousingTier",
-    "#salaryProbationRate",
-    "#salaryPostAllowanceMode",
-  ].forEach((selector) => {
+  ["#salaryAssessmentBand", "#salaryHousingTier"].forEach((selector) => {
     const element = document.querySelector(selector);
     if (element) element.disabled = !editable;
   });
@@ -11460,77 +11407,84 @@ function syncSalaryProfileEditState(profile) {
     if (element) element.disabled = !canEditMonthlyAdjustment;
   });
 
-  syncHomeroomStudentField(profile);
-}
-
-// 存量档案的职称档旧键（把职称与学历混在一起）在表单中归一到纯职称档
-const LEGACY_QUALIFICATION_FORM_ALIASES = {
-  firstOrDoctor: "first",
-  secondOrMaster: "second",
-  thirdOrBachelor: "third",
-  ungradedOrJuniorCollege: "ungraded",
-};
-
-function normalizeQualificationGradeForForm(grade) {
-  return LEGACY_QUALIFICATION_FORM_ALIASES[grade] || grade || "third";
 }
 
 function renderSalaryProfilePanel(payroll) {
   const profile = payroll?.teacher?.salaryProfile || payroll?.salaryProfile || null;
   salaryProfilePanelCurrentProfile = profile;
 
+  // 人事维护的事实只读展示：让财务看得到依据，但改不了
+  renderSalaryHrFacts(payroll);
+
   if (!profile) {
-    [
-      "#salaryQualificationGrade",
-      "#salaryDegree",
-      "#salarySchoolYears",
-      "#salaryAssessmentBand",
-      "#salaryAssessmentGrade",
-      "#salaryHousingTier",
-      "#salaryProbationRate",
-      "#salaryPostAllowanceMode",
-      "#salaryHomeroomStudentCount",
-      "#salaryGradeClassCount",
-      "#salaryManualItemsJson",
-    ].forEach((selector) => setInputValue(selector, selector === "#salaryManualItemsJson" ? "[]" : ""));
-    [
-      "#salaryRoleHomeroom",
-      "#salaryRoleGradeHead",
-      "#salaryRoleDeputyGradeHead",
-      "#salaryRoleTeachingResearchLeader",
-      "#salaryRoleLessonPrepLeader",
-      "#salaryRoleGraduatingClass",
-      "#salaryRoleEliteClass",
-      "#salaryRoleQingbeiClass",
-      "#salaryRoleBusDuty",
-    ].forEach((selector) => setCheckboxValue(selector, false));
+    ["#salaryAssessmentBand", "#salaryHousingTier", "#salaryProbationRate", "#salaryManualItemsJson"].forEach(
+      (selector) => setInputValue(selector, selector === "#salaryManualItemsJson" ? "[]" : ""),
+    );
     renderSalaryManualItemsEditor([]);
     syncSalaryProfileEditState(null);
     return;
   }
 
-  setInputValue("#salaryQualificationGrade", normalizeQualificationGradeForForm(profile.qualificationGrade));
-  setInputValue("#salaryDegree", profile.degree || "");
-  setInputValue("#salarySchoolYears", profile.schoolYears || 0);
   setInputValue("#salaryAssessmentBand", profile.assessmentBand || "high");
-  setInputValue("#salaryAssessmentGrade", profile.monthlyAssessment?.grade || "default");
   setInputValue("#salaryHousingTier", profile.housingTier || "teacher");
   setInputValue("#salaryProbationRate", profile.probationRate ?? 1);
-  setInputValue("#salaryPostAllowanceMode", profile.postAllowanceMode || "stack");
-  setInputValue("#salaryHomeroomStudentCount", profile.roles?.homeroomStudentCount || 0);
-  setInputValue("#salaryGradeClassCount", profile.roles?.gradeClassCount || 0);
   setInputValue("#salaryManualItemsJson", JSON.stringify(profile.manualItems || [], null, 2));
-  setCheckboxValue("#salaryRoleHomeroom", profile.roles?.homeroom);
-  setCheckboxValue("#salaryRoleGradeHead", profile.roles?.gradeHead);
-  setCheckboxValue("#salaryRoleDeputyGradeHead", profile.roles?.deputyGradeHead);
-  setCheckboxValue("#salaryRoleTeachingResearchLeader", profile.roles?.teachingResearchLeader);
-  setCheckboxValue("#salaryRoleLessonPrepLeader", profile.roles?.lessonPrepLeader);
-  setCheckboxValue("#salaryRoleGraduatingClass", profile.roles?.graduatingClass);
-  setCheckboxValue("#salaryRoleEliteClass", profile.roles?.eliteClass);
-  setCheckboxValue("#salaryRoleQingbeiClass", profile.roles?.qingbeiClass);
-  setCheckboxValue("#salaryRoleBusDuty", profile.roles?.busDuty);
   renderSalaryManualItemsEditor(profile.manualItems || []);
   syncSalaryProfileEditState(profile);
+}
+
+// 从工资单反推人事事实并展示（数据源是人事档案，财务侧只读）
+const SALARY_HR_FACT_ROWS = [
+  { name: "基本工资", label: "职称档", from: "basis" },
+  { name: "学历补贴", label: "学历", from: "basis" },
+  { name: "校龄工资", label: "校龄", from: "basis" },
+];
+
+function renderSalaryHrFacts(payroll) {
+  const grid = document.querySelector("#salaryHrFactsGrid");
+  if (!grid) return;
+  // 工资明细在不同调用处分别以 components / rows / payroll.rows 提供，统一取用
+  const components =
+    payroll?.components || payroll?.rows || payroll?.payroll?.rows || payroll?.payroll?.components || [];
+  if (!components.length) {
+    grid.innerHTML = `<span class="hr-owned-empty">选择老师后显示</span>`;
+    return;
+  }
+  const rows = SALARY_HR_FACT_ROWS.map((row) => {
+    const component = components.find((item) => item.name === row.name);
+    if (!component) return "";
+    return `
+      <div class="hr-owned-row">
+        <span>${escapeHtml(row.label)}</span>
+        <strong>${escapeHtml(component.basis)}</strong>
+        <em>${formatCurrency(component.amount)}</em>
+      </div>
+    `;
+  }).join("");
+  // 兼岗津贴逐项列出，来源同样是人事的任命
+  const allowanceRows = components
+    .filter((item) => item.category === "allowance" && item.name !== "住房补贴")
+    .map(
+      (item) => `
+        <div class="hr-owned-row">
+          <span>兼岗</span>
+          <strong>${escapeHtml(item.name)}：${escapeHtml(item.basis)}</strong>
+          <em>${formatCurrency(item.amount)}</em>
+        </div>
+      `,
+    )
+    .join("");
+  const assessment = components.find((item) => item.name === "考核工资");
+  const assessmentRow = assessment
+    ? `
+      <div class="hr-owned-row">
+        <span>本月考核</span>
+        <strong>${escapeHtml(assessment.basis)}</strong>
+        <em>${formatCurrency(assessment.amount)}</em>
+      </div>
+    `
+    : "";
+  grid.innerHTML = rows + assessmentRow + allowanceRows || `<span class="hr-owned-empty">暂无数据</span>`;
 }
 
 function currentSalaryManualItemsFromInput() {
@@ -13453,6 +13407,125 @@ const HR_STATUS_OPTIONS = [
   ["suspended", "停用"],
 ];
 
+// 职称与学历：人事评定/证书事实，决定基本工资档与学历补贴
+const HR_TITLE_GRADES = [
+  ["", "未设置"],
+  ["seniorProfessor", "正高级教师"],
+  ["seniorTeacher", "高级教师"],
+  ["first", "一级教师"],
+  ["second", "二级教师"],
+  ["third", "三级教师"],
+  ["ungraded", "未评级"],
+];
+
+const HR_DEGREES = [
+  ["", "本科及以下"],
+  ["master", "硕士"],
+  ["doctor", "博士"],
+];
+
+// 兼岗任命：由人事维护的职务，直接决定兼岗津贴
+const HR_TEACHER_ROLE_FIELDS = [
+  { key: "homeroom", label: "班主任", type: "boolean" },
+  { key: "gradeHead", label: "年级主任", type: "boolean" },
+  { key: "teachingResearchLeader", label: "教研组长", type: "boolean" },
+  { key: "teachingResearchDeputy", label: "教研副组长", type: "boolean" },
+  { key: "lessonPrepLeader", label: "备课组长", type: "boolean" },
+  { key: "lessonPrepLargeGroup", label: "备课组长(语数外)", type: "boolean" },
+  { key: "lessonPrepStandardizedGrade", label: "备课组长(统考年级)", type: "boolean" },
+  { key: "graduatingClass", label: "毕业班任课", type: "boolean" },
+  { key: "eliteClass", label: "特优班任课", type: "boolean" },
+  { key: "qingbeiClass", label: "清北班任课", type: "boolean" },
+  { key: "firstGrade", label: "一年级任课", type: "boolean" },
+  { key: "doubleChinese", label: "双班语文", type: "boolean" },
+  { key: "standardizedExam", label: "统考科目", type: "boolean" },
+  { key: "olympiadHomeroom", label: "奥数班主任", type: "boolean" },
+  { key: "busDuty", label: "跟车老师", type: "boolean" },
+  { key: "homeroomStudentCount", label: "班级学生数", type: "number" },
+  { key: "gradeClassCount", label: "年级管辖班级数", type: "number" },
+];
+
+// 月度考核：学部负责人与人事录入，财务只读。等级驱动考核工资浮动。
+const HR_ASSESSMENT_GRADES = [
+  ["excellent", "优秀（上浮）"],
+  ["good", "良好（上浮）"],
+  ["default", "合格（全额）"],
+  ["warning", "基本合格（扣减）"],
+  ["unqualified", "不合格（扣减）"],
+];
+
+let hrAssessmentState = { teacherId: "", month: "", record: null, loading: false };
+
+function currentAssessmentMonth() {
+  return hrAssessmentState.month || new Date().toISOString().slice(0, 7);
+}
+
+function hrAssessmentSection(employee) {
+  const month = currentAssessmentMonth();
+  const record = hrAssessmentState.teacherId === employee.teacherId ? hrAssessmentState.record : null;
+  return `
+    <div class="hr-detail-section" data-hr-assessment-section>
+      <h3>月度考核</h3>
+      <p class="action-hint">线下评审结果录入后驱动考核工资浮动；财务只读，不可修改。修改会使该月未锁定工资单重算。</p>
+      <div class="hr-inline-form">
+        <input id="hrAssessMonth" type="month" value="${escapeHtml(month)}" />
+        <select id="hrAssessGrade">
+          ${HR_ASSESSMENT_GRADES.map(
+            ([value, label]) =>
+              `<option value="${value}" ${record?.grade === value ? "selected" : ""}>${label}</option>`,
+          ).join("")}
+        </select>
+        <input id="hrAssessAmount" type="number" min="0" placeholder="核定金额（选填，留空按等级浮动）" value="${record?.amount ?? ""}" />
+        <button class="ghost-button compact-button" data-hr-assess-load type="button">查询</button>
+        <button class="primary-button compact-button" data-hr-assess-save type="button">保存考核</button>
+      </div>
+      <input class="hr-assess-note" id="hrAssessNote" placeholder="评语（选填）" value="${escapeHtml(record?.note || "")}" />
+      ${
+        record
+          ? `<p class="action-hint">当前记录：${escapeHtml(record.month)} · ${escapeHtml(HR_ASSESSMENT_GRADES.find(([v]) => v === record.grade)?.[1] || record.grade)}${record.amount != null ? ` · 核定 ${record.amount} 元` : ""} · 录入人 ${escapeHtml(record.updatedByName || "")}</p>`
+          : `<p class="action-hint">该月尚未录入考核，计薪按“合格”全额发放。</p>`
+      }
+    </div>
+  `;
+}
+
+async function loadHrAssessment(teacherId, month) {
+  try {
+    const result = await apiRequest(`/api/hr/assessments?teacherId=${encodeURIComponent(teacherId)}&month=${encodeURIComponent(month)}`);
+    hrAssessmentState = { teacherId, month, record: result.assessments?.[0] || null, loading: false };
+  } catch (error) {
+    hrAssessmentState = { teacherId, month, record: null, loading: false };
+  }
+  renderHrEmployeeDetail();
+}
+
+function hrTitleGradeOptions(selected = "") {
+  return HR_TITLE_GRADES.map(
+    ([value, label]) => `<option value="${value}" ${value === (selected || "") ? "selected" : ""}>${label}</option>`,
+  ).join("");
+}
+
+function hrDegreeOptions(selected = "") {
+  return HR_DEGREES.map(
+    ([value, label]) => `<option value="${value}" ${value === (selected || "") ? "selected" : ""}>${label}</option>`,
+  ).join("");
+}
+
+// 收集兼岗任命勾选结果，随档案保存一并提交
+function hrTeacherRolesFromInputs() {
+  const roles = {};
+  HR_TEACHER_ROLE_FIELDS.forEach((field) => {
+    if (field.type === "number") {
+      const input = document.querySelector(`[data-hr-role-number="${field.key}"]`);
+      roles[field.key] = Number(input?.value || 0);
+    } else {
+      const input = document.querySelector(`[data-hr-role="${field.key}"]`);
+      roles[field.key] = Boolean(input?.checked);
+    }
+  });
+  return roles;
+}
+
 const HR_ACTION_LABELS = {
   org_unit_create: "新增组织节点",
   org_unit_update: "修改组织节点",
@@ -13796,8 +13869,34 @@ function renderHrEmployeeDetail() {
         <label class="field-label">入职日期<input id="hrEmp-hiredAt" type="date" value="${escapeHtml(employee.hiredAt)}" /></label>
         <label class="field-label">组织<select id="hrEmp-orgUnitId">${hrOrgUnitOptions(employee.orgUnitId)}</select></label>
         <label class="field-label">岗位<select id="hrEmp-positionId">${hrPositionOptions(employee.positionId)}</select></label>
+        <label class="field-label">职称<select id="hrEmp-titleGrade">${hrTitleGradeOptions(employee.titleGrade)}</select></label>
+        <label class="field-label">学历<select id="hrEmp-degree">${hrDegreeOptions(employee.degree)}</select></label>
         <label class="field-label">证件号（填写即更新，加密存储）<input id="hrEmp-idCard" placeholder="${employee.hasIdCard ? "已录入，填写新值可替换" : "未录入"}" /></label>
         <label class="field-label">银行卡号（填写即更新，加密存储）<input id="hrEmp-bankCard" placeholder="${employee.hasBankCard ? "已录入，填写新值可替换" : "未录入"}" /></label>
+      </div>
+      <p class="action-hint">职称与学历是人事评定/证书事实，决定基本工资档与学历补贴；财务不可修改。</p>
+
+      <div class="hr-detail-section">
+        <h3>兼岗任命</h3>
+        <p class="action-hint">班主任、年级主任等职务由人事任命，直接决定兼岗津贴；财务侧只读。</p>
+        <div class="checkbox-grid hr-role-grid">
+          ${HR_TEACHER_ROLE_FIELDS.filter((field) => field.type === "boolean")
+            .map(
+              (field) => `
+                <label><input data-hr-role="${escapeHtml(field.key)}" type="checkbox" ${employee.teacherRoles?.[field.key] ? "checked" : ""} /><span>${escapeHtml(field.label)}</span></label>
+              `,
+            )
+            .join("")}
+        </div>
+        <div class="hr-form-grid">
+          ${HR_TEACHER_ROLE_FIELDS.filter((field) => field.type === "number")
+            .map(
+              (field) => `
+                <label class="field-label">${escapeHtml(field.label)}<input data-hr-role-number="${escapeHtml(field.key)}" type="number" min="0" value="${Number(employee.teacherRoles?.[field.key] || 0)}" /></label>
+              `,
+            )
+            .join("")}
+        </div>
       </div>
 
       ${hrSensitiveRow("证件号", employee.idCardMasked, employee.hasIdCard, "idCard")}
@@ -13808,6 +13907,8 @@ function renderHrEmployeeDetail() {
       <div class="action-row">
         <button class="primary-button compact-button" data-hr-emp-save type="button">保存档案</button>
       </div>
+
+      ${employee.teacherId ? hrAssessmentSection(employee) : ""}
 
       <div class="hr-detail-section">
         <h3>人事状态</h3>
@@ -15325,17 +15426,57 @@ document.addEventListener("click", async (event) => {
     const employeeId = hrEmployeeDetailState.id;
     await hrApiAction(async () => {
       const body = { reason: document.querySelector("#hrEmp-reason").value.trim() };
-      ["personName", "gender", "phone", "emergencyContact", "emergencyPhone", "hiredAt", "orgUnitId", "positionId"].forEach(
-        (field) => {
-          body[field] = document.querySelector(`#hrEmp-${field}`).value;
-        },
-      );
+      [
+        "personName",
+        "gender",
+        "phone",
+        "emergencyContact",
+        "emergencyPhone",
+        "hiredAt",
+        "orgUnitId",
+        "positionId",
+        // 职称与学历：人事事实，决定基本工资档与学历补贴
+        "titleGrade",
+        "degree",
+      ].forEach((field) => {
+        const input = document.querySelector(`#hrEmp-${field}`);
+        if (input) body[field] = input.value;
+      });
+      // 兼岗任命随档案一并保存
+      body.teacherRoles = hrTeacherRolesFromInputs();
       const idCard = document.querySelector("#hrEmp-idCard").value.trim();
       const bankCard = document.querySelector("#hrEmp-bankCard").value.trim();
       if (idCard) body.idCard = idCard;
       if (bankCard) body.bankCard = bankCard;
       await apiRequest(`/api/hr/employees/${employeeId}`, { method: "PATCH", body });
     }, "档案已保存");
+    return;
+  }
+
+  // 月度考核：查询与保存
+  if (event.target.closest("[data-hr-assess-load]")) {
+    const teacherId = hrEmployeeDetailState.detail?.employee?.teacherId;
+    const month = document.querySelector("#hrAssessMonth")?.value || "";
+    if (teacherId && month) loadHrAssessment(teacherId, month);
+    return;
+  }
+  if (event.target.closest("[data-hr-assess-save]")) {
+    const teacherId = hrEmployeeDetailState.detail?.employee?.teacherId;
+    const month = document.querySelector("#hrAssessMonth")?.value || "";
+    const grade = document.querySelector("#hrAssessGrade")?.value || "default";
+    const amountRaw = document.querySelector("#hrAssessAmount")?.value ?? "";
+    const note = document.querySelector("#hrAssessNote")?.value.trim() || "";
+    if (!teacherId) {
+      showToast("该档案未关联教师，无法录入考核");
+      return;
+    }
+    await hrApiAction(async () => {
+      await apiRequest("/api/hr/assessments", {
+        method: "POST",
+        body: { teacherId, month, grade, amount: amountRaw === "" ? null : Number(amountRaw), note },
+      });
+      await loadHrAssessment(teacherId, month);
+    }, "考核已保存，该月未锁定工资单将重算");
     return;
   }
 
@@ -16347,7 +16488,6 @@ document.querySelector("#unlockTeacherPayroll").addEventListener("click", unlock
 document.querySelector("#saveTeacherSalaryProfile").addEventListener("click", handleTeacherSalaryProfileAction);
 document.querySelector("#cancelTeacherSalaryProfileEdit")?.addEventListener("click", cancelTeacherSalaryProfileEdit);
 document.querySelector("#saveSalaryManualItems")?.addEventListener("click", saveBackendTeacherMonthlyAdjustments);
-document.querySelector("#salaryRoleHomeroom").addEventListener("change", syncHomeroomStudentField);
 
 render();
 

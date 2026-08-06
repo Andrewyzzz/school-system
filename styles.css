@@ -7667,3 +7667,31 @@ body.dialog-open { overflow: hidden; }
 @media (max-width: 900px) {
   .arrange-controls select { flex: 1 1 100%; }
 }
+
+/* 财务侧：人事维护的事实只读展示 */
+.hr-owned-facts {
+  padding: 12px 14px; margin-bottom: 14px;
+  background: var(--surface-soft); border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+.hr-owned-title {
+  margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted);
+}
+.hr-owned-grid { display: grid; gap: 6px; }
+.hr-owned-row {
+  display: grid; grid-template-columns: 84px 1fr auto; gap: 10px; align-items: baseline;
+  font-size: 12px; padding: 5px 0; border-bottom: 1px dashed var(--line);
+}
+.hr-owned-row:last-child { border-bottom: 0; }
+.hr-owned-row span { color: var(--muted); }
+.hr-owned-row strong { font-weight: 500; color: var(--ink); }
+.hr-owned-row em { font-style: normal; font-weight: 600; color: var(--primary-strong); }
+.hr-owned-empty { font-size: 12px; color: var(--faint); }
+
+/* 人事侧：兼岗任命与月度考核 */
+.hr-role-grid { margin: 8px 0 12px; }
+.hr-assess-note { width: 100%; margin-top: 8px; }
+@media (max-width: 900px) {
+  .hr-owned-row { grid-template-columns: 1fr; gap: 2px; }
+  .hr-owned-row em { justify-self: start; }
+}
