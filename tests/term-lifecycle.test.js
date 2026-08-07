@@ -5,6 +5,8 @@ import {
   createAcademicTerm,
   createInitialData,
   generateTeacherPayrollDetail,
+  queryTerms,
+  termDatePhase,
   setCurrentAcademicTerm,
   teacherLessonsForWeek,
   teacherMonthlyWorkload,
@@ -162,3 +164,66 @@ try {
 }
 
 console.log("term lifecycle checks passed");
+
+// ---------------- 学期换届：跨学期主键隔离与到期提示（2026-08 修复）
+{
+  const rolloverDb = createInitialData({ teacherCount: 20 });
+  const rolloverAdmin = rolloverDb.accounts.find((item) => item.username === "admin");
+  const sourceTerm = queryTerms(rolloverDb).currentTerm;
+  const sourceClassIds = new Set(
+    (rolloverDb.classes || []).filter((item) => !item.termId || item.termId === sourceTerm.id).map((item) => item.id),
+  );
+
+  const created = createAcademicTerm(
+    rolloverDb,
+    {
+      name: "下一学年上学期",
+      schoolYear: "2027-2028",
+      semester: "上学期",
+      startDate: "2027-09-01",
+      endDate: "2028-01-20",
+      copyConfig: true,
+    },
+    rolloverAdmin,
+  ).term;
+
+  const copiedClasses = (rolloverDb.classes || []).filter((item) => item.termId === created.id);
+  const copiedRooms = (rolloverDb.rooms || []).filter((item) => item.termId === created.id);
+  assert.ok(copiedClasses.length > 0, "复制配置应生成新学期班级");
+  assert.ok(copiedRooms.length > 0, "复制配置应生成新学期教室");
+
+  // 关键：新学期的班级/教室 ID 不得与源学期重复，否则持久化会因主键冲突失败
+  copiedClasses.forEach((item) => {
+    assert.ok(!sourceClassIds.has(item.id), `班级 ID 与源学期冲突：${item.id}`);
+  });
+  const allClassIds = (rolloverDb.classes || []).map((item) => item.id);
+  assert.equal(new Set(allClassIds).size, allClassIds.length, "班级 ID 全局唯一");
+  const allRoomIds = (rolloverDb.rooms || []).map((item) => item.id);
+  assert.equal(new Set(allRoomIds).size, allRoomIds.length, "教室 ID 全局唯一");
+
+  // 引用完整性：班级默认教室、任课配置的按班指定都要指向新学期的实体
+  const copiedRoomIds = new Set(copiedRooms.map((item) => item.id));
+  copiedClasses.forEach((item) => {
+    if (item.roomId) assert.ok(copiedRoomIds.has(item.roomId), `班级默认教室未重映射：${item.id}`);
+  });
+  const copiedClassIds = new Set(copiedClasses.map((item) => item.id));
+  (rolloverDb.teacherAssignments || [])
+    .filter((item) => item.termId === created.id && item.classTeacherIds)
+    .forEach((item) => {
+      Object.keys(item.classTeacherIds).forEach((classId) => {
+        assert.ok(copiedClassIds.has(classId), `任课配置引用了非本学期班级：${classId}`);
+      });
+    });
+
+  // 到期提示：已过结束日期的当前学期应被标记为需换届
+  const endedTerm = { id: "T-ENDED", startDate: "2026-06-15", endDate: "2026-07-31", current: true, status: "active" };
+  assert.equal(termDatePhase(endedTerm, "2026-08-07"), "ended", "已过结束日期应为 ended");
+  assert.equal(termDatePhase(endedTerm, "2026-07-01"), "ongoing");
+  assert.equal(termDatePhase(endedTerm, "2026-06-01"), "upcoming");
+
+  const decorated = queryTerms(rolloverDb).terms.find((item) => item.id === created.id);
+  assert.equal(decorated.datePhase, "upcoming", "未来学期应标记为 upcoming");
+  assert.equal(decorated.needsRollover, false, "非当前学期不提示换届");
+}
+
+console.log("term rollover checks passed");

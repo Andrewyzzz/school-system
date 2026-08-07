@@ -7435,15 +7435,18 @@ function renderSchedule() {
   focusWeeklyCalendarDate(grid, selectedIndex);
 }
 
-function termStatusText(status = "planned") {
-  if (status === "active") return "进行中";
+function termStatusText(status = "planned", term = null) {
   if (status === "archived") return "已归档";
+  // 已过结束日期但尚未归档：如实显示"已结束"，避免让人误以为学期还在进行
+  if (term?.datePhase === "ended") return status === "active" ? "已结束待归档" : "已结束";
+  if (status === "active") return term?.datePhase === "upcoming" ? "未开始" : "进行中";
   return "计划中";
 }
 
-function termStatusClass(status = "planned") {
-  if (status === "active") return "status-pill done";
+function termStatusClass(status = "planned", term = null) {
   if (status === "archived") return "status-pill locked";
+  if (term?.datePhase === "ended") return "status-pill warning";
+  if (status === "active") return "status-pill done";
   return "status-pill warning";
 }
 
@@ -7458,15 +7461,17 @@ function renderTermManagement() {
     status: state.schedulingConfig.termStatus || "active",
     current: true,
   };
-  status.textContent = termManagementState.loading ? "处理中" : termStatusText(currentTerm.status);
-  status.className = termStatusClass(currentTerm.status);
+  status.textContent = termManagementState.loading ? "处理中" : termStatusText(currentTerm.status, currentTerm);
+  status.className = termStatusClass(currentTerm.status, currentTerm);
   document.querySelector("#currentTermName").textContent = currentTerm.name || "当前学期";
   document.querySelector("#currentTermRange").textContent =
     currentTerm.startDate && currentTerm.endDate ? `${currentTerm.startDate} 至 ${currentTerm.endDate}` : "未设置日期";
   document.querySelector("#currentTermMeta").textContent =
     currentTerm.status === "archived"
       ? "该学期已归档，排课、调课、工作量和工资写操作均只读。"
-      : "排课、签到、工作量和工资均归属当前学期。";
+      : currentTerm.needsRollover
+        ? `该学期已于 ${currentTerm.endDate} 结束。请新建下一学期并切换为当前学期，完成结算后再归档本学期。`
+        : "排课、签到、工作量和工资均归属当前学期。";
 
   const terms = termManagementState.terms.length ? termManagementState.terms : [currentTerm];
   document.querySelector("#termList").innerHTML = terms
@@ -7483,7 +7488,7 @@ function renderTermManagement() {
             <span>${escapeHtml(term.startDate || "")} 至 ${escapeHtml(term.endDate || "")}</span>
           </div>
           <div class="term-row-meta">
-            <span class="${termStatusClass(term.status)}">${termStatusText(term.status)}</span>
+            <span class="${termStatusClass(term.status, term)}">${termStatusText(term.status, term)}</span>
             <span>${escapeHtml(copiedSummary)}</span>
           </div>
           <div class="term-row-actions">

@@ -1150,10 +1150,30 @@ export function createSession(db, account, token, context = {}) {
   return session;
 }
 
-export function queryTerms(db) {
+// 学期是否已过结束日期。状态字段仍由人工推进（active→archived 需归档操作，
+// 因为归档会把课表工资转为只读，不能到点自动执行），但界面需要如实提示"已过结束日期"。
+export function termDatePhase(term, today = new Date().toISOString().slice(0, 10)) {
+  if (!term?.startDate || !term?.endDate) return "";
+  if (today < term.startDate) return "upcoming";
+  if (today > term.endDate) return "ended";
+  return "ongoing";
+}
+
+function decorateTerm(term, today) {
+  const datePhase = termDatePhase(term, today);
   return {
-    currentTerm: currentTerm(db),
-    terms: listTerms(db),
+    ...term,
+    datePhase,
+    // 仍是当前学期但已过结束日期：提示行政该归档并切换到新学期了
+    needsRollover: Boolean(term.current && datePhase === "ended" && term.status !== "archived"),
+  };
+}
+
+export function queryTerms(db) {
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    currentTerm: decorateTerm(currentTerm(db), today),
+    terms: listTerms(db).map((term) => decorateTerm(term, today)),
   };
 }
 
@@ -1241,8 +1261,42 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
     db[key].push(...rows);
   };
 
-  replaceTargetRows("classes", sourceTermRows(db.classes || [], sourceTermId).map(withScope));
-  replaceTargetRows("rooms", sourceTermRows(db.rooms || [], sourceTermId).map(withScope));
+  // 班级与教室必须生成学期内唯一的新 ID：直接沿用源学期 ID 会造成跨学期主键冲突，
+  // 导致新学期无法持久化。同时记录 旧ID→新ID 映射，重写所有引用它们的配置行。
+  const classIdMap = new Map();
+  const roomIdMap = new Map();
+  // 用学期 ID 的短后缀做前缀，既保证跨学期唯一，又不让班级 ID 长到难以辨认
+  const termSuffix = String(targetTerm.id).replace(/^TERM-/, "").slice(-13);
+  const scopedRowId = (sourceId) => `${sourceId}@${termSuffix}`;
+
+  const clonedClasses = sourceTermRows(db.classes || [], sourceTermId).map((row) => {
+    const nextId = scopedRowId(row.id);
+    classIdMap.set(row.id, nextId);
+    return { ...withScope(row), id: nextId, sourceClassId: row.id };
+  });
+  const clonedRooms = sourceTermRows(db.rooms || [], sourceTermId).map((row) => {
+    const nextId = scopedRowId(row.id);
+    roomIdMap.set(row.id, nextId);
+    return { ...withScope(row), id: nextId, sourceRoomId: row.id };
+  });
+  // 班级的默认教室指向新教室 ID
+  clonedClasses.forEach((row) => {
+    if (row.roomId && roomIdMap.has(row.roomId)) row.roomId = roomIdMap.get(row.roomId);
+  });
+  replaceTargetRows("classes", clonedClasses);
+  replaceTargetRows("rooms", clonedRooms);
+
+  // 引用重写：任课配置按班级指定老师、教室资源覆盖按教室列举
+  const remapClassKeyedObject = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const next = {};
+    Object.entries(value).forEach(([classId, entry]) => {
+      next[classIdMap.get(classId) || classId] = entry;
+    });
+    return next;
+  };
+  const remapIdList = (list, map) =>
+    Array.isArray(list) ? list.map((id) => map.get(id) || id) : list;
   replaceTargetRows(
     "gradeCourseRules",
     sourceTermRows(db.gradeCourseRules || [], sourceTermId).map((row) => ({
@@ -1255,6 +1309,8 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
     sourceTermRows(db.teacherAssignments || [], sourceTermId).map((row) => ({
       ...withScope(row),
       id: scopedStorageConfigId("TA", targetTerm.id, row.stageId, row.grade, row.subjectId),
+      // 按班指定的任课老师，键为班级 ID，需指向新学期的班级
+      classTeacherIds: remapClassKeyedObject(row.classTeacherIds),
     })),
   );
   replaceTargetRows(
@@ -1276,6 +1332,15 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
     sourceTermRows(db.roomResourceOverrides || [], sourceTermId).map((row) => ({
       ...withScope(row),
       id: scopedStorageConfigId("RRC", targetTerm.id, row.stageId),
+      // 覆盖项列举的教室需指向新学期的教室
+      roomIds: remapIdList(row.roomIds, roomIdMap),
+      rooms: Array.isArray(row.rooms)
+        ? row.rooms.map((item) =>
+            item && typeof item === "object" && item.id
+              ? { ...item, id: roomIdMap.get(item.id) || item.id }
+              : item,
+          )
+        : row.rooms,
     })),
   );
   replaceTargetRows(
