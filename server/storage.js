@@ -308,7 +308,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       passwordHash: defaultPasswordHash,
       role: "admin",
       name: "周主任",
-      department: "教务行政",
+      department: "教研所",
       status: "active",
     },
     {
@@ -316,7 +316,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       username: "sysadmin",
       passwordHash: defaultPasswordHash,
       role: "system_admin",
-      name: "系统管理员",
+      name: "行政管理",
       department: "系统管理",
       status: "active",
     },
@@ -611,8 +611,35 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
   return db;
 }
 
-function normalizeDatabase(db) {
+// 角色显示名升级（2026-08-07 学校口径变更）：admin→教研所、system_admin→行政管理。
+// 角色 key 不变，只更新存量库里的展示文本，幂等执行。
+const ACCOUNT_DISPLAY_RENAMES = [
+  { role: "admin", from: ["教务行政"], department: "教研所" },
+  { role: "system_admin", from: ["系统管理"], department: "行政管理" },
+  { role: "system_admin", fromName: ["系统管理员"], name: "行政管理" },
+];
+
+function normalizeAccountDisplayNames(db) {
   let changed = false;
+  (db.accounts || []).forEach((account) => {
+    ACCOUNT_DISPLAY_RENAMES.forEach((rule) => {
+      if (account.role !== rule.role) return;
+      if (rule.department && rule.from?.includes(account.department)) {
+        account.department = rule.department;
+        changed = true;
+      }
+      if (rule.name && rule.fromName?.includes(account.displayName || account.name)) {
+        if (account.displayName) account.displayName = rule.name;
+        if (account.name) account.name = rule.name;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+
+function normalizeDatabase(db) {
+  let changed = normalizeAccountDisplayNames(db);
   const defaults = createInitialData({ teacherCount: db.meta?.teacherCount || DEFAULT_TEACHER_COUNT });
   const arrayKeys = [
     "stages",
@@ -1868,7 +1895,7 @@ function publicPersonnelRows(db) {
           : account.role === "finance"
             ? "财务"
             : account.role === "system_admin"
-              ? "系统管理员"
+              ? "行政管理"
               : "账号",
       accountId: account.id,
       username: account.username,

@@ -333,7 +333,7 @@ const initialState = {
       audience: "admin",
       source: "教务处",
       title: "学部年级排课任务",
-      text: "请行政账号先选择学部和年级，再生成自然周课表，校验老师同一时间无冲突后确认发布。",
+      text: "请教研所账号先选择学部和年级，再生成自然周课表，校验老师同一时间无冲突后确认发布。",
       time: "2026-06-10 08:30",
       level: "warning",
     },
@@ -359,14 +359,14 @@ const initialState = {
       id: "admin-zhou",
       role: "admin",
       name: "周主任",
-      title: "行政账号",
-      department: "教务行政",
+      title: "教研所账号",
+      department: "教研所",
     },
     {
       id: "system-admin",
       role: "system_admin",
-      name: "系统管理员",
-      title: "系统管理员",
+      name: "行政管理",
+      title: "行政管理",
       department: "系统管理",
     },
     {
@@ -1367,8 +1367,8 @@ async function apiRequest(path, options = {}) {
 function roleTitle(role) {
   if (role === "teacher") return "老师账号";
   if (role === "finance") return "财务账号";
-  if (role === "admin") return "行政账号";
-  if (role === "system_admin") return "系统管理员";
+  if (role === "admin") return "教研所账号";
+  if (role === "system_admin") return "行政管理";
   if (role === "classroom") return "教室屏账号";
   if (role === "hr") return "人事账号";
   if (role === "division_head") return "学部负责人";
@@ -1493,7 +1493,7 @@ function isFinanceRole(role = currentRole()) {
 }
 
 function isPersonnelRole(role = currentRole()) {
-  // 角色收敛（2026-07-08）：账号管理是技术操作，收归系统管理员；教务(admin)专注排课
+  // 角色收敛（2026-07-08）：账号管理是技术操作，收归行政管理；教务(admin)专注排课
   return role === "system_admin";
 }
 
@@ -3511,7 +3511,7 @@ function payrollRulesFromInputs() {
 
 async function saveBackendPayrollRules() {
   if (!backendMode() || !isFinanceRole()) {
-    showToast("请使用后端财务或系统管理员账号保存薪资规则");
+    showToast("请使用后端财务或行政管理账号保存薪资规则");
     return;
   }
   let payrollRules;
@@ -3563,7 +3563,7 @@ function salaryProfileFromInputs() {
 function handleTeacherSalaryProfileAction() {
   const teacherId = state.selectedFinanceTeacherId;
   if (!backendMode() || !isFinanceRole() || !teacherId) {
-    showToast("请使用后端财务或系统管理员账号维护教师工资档案");
+    showToast("请使用后端财务或行政管理账号维护教师工资档案");
     return;
   }
   if (!salaryProfileEditMode) {
@@ -3583,7 +3583,7 @@ function cancelTeacherSalaryProfileEdit() {
 async function saveBackendTeacherSalaryProfile() {
   const teacherId = state.selectedFinanceTeacherId;
   if (!backendMode() || !isFinanceRole() || !teacherId) {
-    showToast("请使用后端财务或系统管理员账号维护教师工资档案");
+    showToast("请使用后端财务或行政管理账号维护教师工资档案");
     return;
   }
   let salaryProfile;
@@ -3619,7 +3619,7 @@ async function saveBackendTeacherSalaryProfile() {
 async function saveBackendTeacherMonthlyAdjustments() {
   const teacherId = state.selectedFinanceTeacherId;
   if (!backendMode() || !isFinanceRole() || !teacherId) {
-    showToast("请使用后端财务或系统管理员账号维护本月奖扣");
+    showToast("请使用后端财务或行政管理账号维护本月奖扣");
     return;
   }
   let manualItems;
@@ -4085,7 +4085,7 @@ async function disputeBackendPayroll(teacherId = currentTeacherId(), month = cur
 async function approveBackendWorkload(step) {
   const teacherId = state.selectedFinanceTeacherId;
   if (!backendMode() || currentRole() !== "admin" || !teacherId) {
-    showToast("请使用行政账号审批工作量");
+    showToast("请使用教研所账号审批工作量");
     return;
   }
   const month = financeTeacherDetailState.month || currentSettlementMonth();
@@ -6263,7 +6263,7 @@ async function regenerateUnlockedSchedule() {
 
 async function saveTeacherScheduleRule() {
   if (!backendMode() || currentRole() !== "admin") {
-    showToast("请使用后端行政账号保存老师时间规则");
+    showToast("请使用后端教研所账号保存老师时间规则");
     return;
   }
   const teacherId = document.querySelector("#teacherRuleTeacherSelect").value;
@@ -6322,7 +6322,7 @@ async function saveTeacherScheduleRule() {
 
 async function submitScheduleChangeRequest() {
   if (!backendMode() || currentRole() !== "admin") {
-    showToast("请使用后端行政账号发起调课申请");
+    showToast("请使用后端教研所账号发起调课申请");
     return;
   }
   const assignmentId = document.querySelector("#changeAssignmentSelect").value;
@@ -6658,7 +6658,7 @@ async function previewTeacherImportCsv() {
   syncTeacherImportText();
   const csvText = teacherImportState.csvText;
   if (!backendMode() || currentRole() !== "system_admin") {
-    showToast("请通过后端服务登录系统管理员账号后再导入");
+    showToast("请通过后端服务登录行政管理账号后再导入");
     return;
   }
   if (!csvText.trim()) {
@@ -6706,7 +6706,7 @@ async function commitTeacherImportCsv() {
   syncTeacherImportText();
   const csvText = teacherImportState.csvText;
   if (!backendMode() || currentRole() !== "system_admin") {
-    showToast("请通过后端服务登录系统管理员账号后再导入");
+    showToast("请通过后端服务登录行政管理账号后再导入");
     return;
   }
   if (!teacherImportState.preview?.canImport || teacherImportState.previewCsvText !== csvText) {
@@ -8202,7 +8202,7 @@ function renderTeacherImport() {
         ? teacherImportState.error
         : connected
           ? "已连接后端导入接口"
-          : "请通过后端服务登录系统管理员账号";
+          : "请通过后端服务登录行政管理账号";
     status.className = teacherImportState.error
       ? "status-pill warning"
       : connected
@@ -8345,7 +8345,7 @@ function personnelRoleLabel(role) {
   if (role === "teacher") return "任课教师";
   if (role === "admin") return "行政";
   if (role === "finance") return "财务";
-  if (role === "system_admin") return "系统管理员";
+  if (role === "system_admin") return "行政管理";
   return "账号";
 }
 
@@ -8441,7 +8441,7 @@ function personnelRow(row) {
         </button>
       </div>
     `
-    : `<span class="muted">${row.accountId ? "仅系统管理员可操作" : "未开通账号"}</span>`;
+    : `<span class="muted">${row.accountId ? "仅行政管理可操作" : "未开通账号"}</span>`;
   const subjectAndTitle =
     row.subjectName && row.subjectName !== "不适用"
       ? `${escapeHtml(row.subjectName)}<span class="cell-subline">${escapeHtml(row.title || "")}</span>`
@@ -8705,7 +8705,7 @@ function collectClassSubjectTeacherAssignments() {
 
 async function autoAssignClassSubjectTeachers(overwrite = false) {
   if (!backendMode() || currentRole() !== "admin") {
-    showToast("请使用后端行政账号执行自动分配");
+    showToast("请使用后端教研所账号执行自动分配");
     return;
   }
   if (
@@ -8743,7 +8743,7 @@ async function autoAssignClassSubjectTeachers(overwrite = false) {
 
 async function saveClassSubjectTeacherAssignments() {
   if (!backendMode() || currentRole() !== "admin") {
-    showToast("请使用后端行政账号保存任课配置");
+    showToast("请使用后端教研所账号保存任课配置");
     return;
   }
   try {
@@ -14847,7 +14847,7 @@ async function openOaDetail(requestId) {
 }
 
 // ===========================================================================
-// 审批流程设置（系统管理员自定义审批链路与表单）
+// 审批流程设置（行政管理自定义审批链路与表单）
 // ===========================================================================
 let oaAdminState = { templates: [], approverRoles: [], fieldTypes: [], loading: false, error: "" };
 

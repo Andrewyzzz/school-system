@@ -1251,7 +1251,7 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "PATCH" && parts[3] === "salary-profile") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或系统管理员可以维护教师工资档案");
+          sendError(res, 403, "只有财务或行政管理可以维护教师工资档案");
           return;
         }
         const body = await readJsonBody(req);
@@ -1283,7 +1283,7 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "generate") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或系统管理员可以生成薪资明细");
+          sendError(res, 403, "只有财务或行政管理可以生成薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1296,7 +1296,7 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "review") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或系统管理员可以复核薪资明细");
+          sendError(res, 403, "只有财务或行政管理可以复核薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1336,7 +1336,7 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "lock") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或系统管理员可以锁定薪资明细");
+          sendError(res, 403, "只有财务或行政管理可以锁定薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1349,7 +1349,7 @@ async function handleApi(req, res, db, url) {
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "unlock") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或系统管理员可以解锁薪资");
+          sendError(res, 403, "只有财务或行政管理可以解锁薪资");
           return;
         }
         const body = await readJsonBody(req);
@@ -1719,7 +1719,7 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
-      // ---- 审批流程配置（系统管理员自定义）----
+      // ---- 审批流程配置（行政管理自定义）----
       if (req.method === "GET" && url.pathname === "/api/oa/admin/templates") {
         const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;

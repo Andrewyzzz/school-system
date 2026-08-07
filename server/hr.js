@@ -1574,7 +1574,7 @@ export function seedHrData(db) {
 import { hashPassword } from "./auth.js";
 
 // 审批链定义：approverRoles 允许处理该步骤的角色；scope 限定学部负责人只能处理
-// 本学部相关步骤（from=原学部 / to=目标学部）。hr 与总校管理员可代理任何学部步骤，
+// 本学部相关步骤（from=原学部 / to=目标学部）。hr 与行政管理可代理任何学部步骤，
 // 覆盖非教学部门（行政后勤等）没有学部负责人的情况。
 export const HR_FLOW_DEFINITIONS = {
   onboard: {
@@ -1709,7 +1709,7 @@ export function createHrFlow(db, account, input = {}, context = {}) {
     throw httpError(400, `流程类型无效：${flowType}`);
   }
   if (!["division_head", "hr", "system_admin"].includes(account?.role || "")) {
-    throw httpError(403, "只有学部负责人、人事专员或总校管理员可以发起人事流程");
+    throw httpError(403, "只有学部负责人、人事专员或行政管理可以发起人事流程");
   }
   const reason = requireReason(input.reason, `发起${definition.label}流程`);
   const now = nowIso();

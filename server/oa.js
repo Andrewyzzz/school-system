@@ -43,7 +43,7 @@ function ensureCollections(db) {
   return db;
 }
 
-// 模板以库内数据为准（系统管理员可自定义流程）；首次运行用内置定义播种。
+// 模板以库内数据为准（行政管理可自定义流程）；首次运行用内置定义播种。
 // 已存在的模板不会被覆盖，避免学校改过的流程被升级重置。
 export function ensureOaTemplates(db) {
   ensureCollections(db);
@@ -275,7 +275,7 @@ export function listTemplatesForRole(db, role = "") {
 }
 
 // ---------------------------------------------------------------------------
-// 模板配置（系统管理员自定义审批流程）
+// 模板配置（行政管理自定义审批流程）
 // ---------------------------------------------------------------------------
 
 export const OA_APPROVER_ROLES = [
@@ -283,7 +283,7 @@ export const OA_APPROVER_ROLES = [
   { value: "admin", label: "教务" },
   { value: "hr", label: "人事专员" },
   { value: "finance", label: "财务" },
-  { value: "system_admin", label: "总校管理员" },
+  { value: "system_admin", label: "行政管理" },
 ];
 
 export const OA_FIELD_TYPES = [
