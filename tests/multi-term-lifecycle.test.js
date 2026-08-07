@@ -526,6 +526,42 @@ history.push(runTermCycle(db, { term: thirdTerm, month: "2027-03", label: "学�
     });
   }
 
+  // 同一配置存在新旧两种 ID 格式的重复行时，复制到新学期会被重算成同一个 ID，
+  // 触发重复主键使建学期失败——规范化阶段必须先按业务作用域去重
+  {
+    const legacy = makeLegacyDb();
+    const sample = (legacy.teacherAssignments || [])[0];
+    assert.ok(sample, "应有任课配置样本");
+    // 制造历史遗留：同作用域再插一行旧格式 ID
+    legacy.teacherAssignments.push({
+      ...JSON.parse(JSON.stringify(sample)),
+      id: `TA-${sample.stageId}-${sample.grade}-${sample.subjectId}`,
+      classTeacherIds: {},
+    });
+    backfillCheck(legacy);
+    const scopeKey = (row) => `${row.termId || ""}|${row.stageId}|${row.grade}|${row.subjectId}`;
+    const groups = new Map();
+    (legacy.teacherAssignments || []).forEach((row) => {
+      groups.set(scopeKey(row), (groups.get(scopeKey(row)) || 0) + 1);
+    });
+    assert.ok(
+      [...groups.values()].every((count) => count === 1),
+      "同一(学期,学部,年级,学科)不应残留多行任课配置",
+    );
+
+    // 去重后建新学期应当成功且不产生重复主键
+    const created = createAcademicTerm(
+      legacy,
+      { name: "去重后学期", schoolYear: "2028-2029", semester: "上学期", startDate: "2028-09-01", endDate: "2029-01-20", copyConfig: true },
+      actor(legacy, "admin"),
+    ).term;
+    assertPersistable(legacy, "重复任课配置去重后建学期");
+    assert.ok(
+      (legacy.teacherAssignments || []).some((row) => row.termId === created.id),
+      "新学期应复制到任课配置",
+    );
+  }
+
   // 老库下保存课程规则：应为覆盖而非累加
   {
     const legacy = makeLegacyDb();

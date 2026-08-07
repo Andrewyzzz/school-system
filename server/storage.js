@@ -667,6 +667,41 @@ function backfillTermScopedRows(db) {
       }
     });
   });
+  if (dedupeTeacherAssignments(db)) changed = true;
+  return changed;
+}
+
+// 任课配置的 ID 规则改过（早期按 学部-年级-学科，后改为带学期前缀），升级过程中
+// 同一配置可能同时存在新旧两行。它们的业务作用域相同，复制到新学期时会被重算成
+// 同一个 ID，触发重复主键并使整次持久化失败——新建学期因此报错。
+// 这里按 (学期, 学部, 年级, 学科) 去重，保留信息最完整的一行。
+function dedupeTeacherAssignments(db) {
+  const rows = db.teacherAssignments || [];
+  if (rows.length < 2) return false;
+  const groups = new Map();
+  rows.forEach((row) => {
+    const key = `${row.termId || ""}|${row.stageId || ""}|${row.grade}|${row.subjectId || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  });
+  let changed = false;
+  const kept = [];
+  groups.forEach((group) => {
+    if (group.length === 1) {
+      kept.push(group[0]);
+      return;
+    }
+    // 优先保留按班指定最完整的一行，其次是更新时间较新的
+    const best = [...group].sort((a, b) => {
+      const aClasses = Object.keys(a.classTeacherIds || {}).length;
+      const bClasses = Object.keys(b.classTeacherIds || {}).length;
+      if (aClasses !== bClasses) return bClasses - aClasses;
+      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    })[0];
+    kept.push(best);
+    changed = true;
+  });
+  if (changed) db.teacherAssignments = kept;
   return changed;
 }
 
