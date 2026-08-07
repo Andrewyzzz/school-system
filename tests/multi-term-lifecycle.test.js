@@ -28,7 +28,7 @@ import {
   teacherPayrollPreview,
   updateTeacherAssignment,
 } from "../server/storage.js";
-import { buildSchedulingConfig } from "../server/scheduling.js";
+import { buildSchedulingConfig, updateGradeClassStructure } from "../server/scheduling.js";
 
 const actor = (db, username) => db.accounts.find((item) => item.username === username);
 
@@ -55,6 +55,24 @@ const PERSISTED_COLLECTIONS = [
   "employees",
   "oaRequests",
 ];
+
+// 存量数据（无 termId）必须在读取时被补齐到首个学期，否则按学期替换会匹配不到旧行
+function backfillCheck(db) {
+  const firstTerm = (db.terms || [])[0];
+  assert.ok(firstTerm?.id, "应存在首个学期");
+  ["classes", "rooms"].forEach((key) => {
+    (db[key] || []).forEach((row) => {
+      if (!row.termId) {
+        row.termId = firstTerm.id;
+        row.termName = firstTerm.name || "";
+      }
+    });
+    assert.ok(
+      (db[key] || []).every((row) => row.termId),
+      `${key} 中不应残留无学期归属的行`,
+    );
+  });
+}
 
 function assertPersistable(db, stage) {
   PERSISTED_COLLECTIONS.forEach((key) => {
@@ -453,6 +471,42 @@ history.push(runTermCycle(db, { term: thirdTerm, month: "2027-03", label: "学�
   assert.ok(newMonthPreview, "新月份应可试算");
   const newBase = newMonthPreview.components.find((item) => item.name === "基本工资");
   assert.equal(newBase.amount, originalBase + 500, "新月份应按调整后的标准计算");
+}
+
+// ---------------------------------------------------------------------------
+// 存量数据（无 termId）下的按学期替换：历史上导致"保存班级结构"产生重复主键
+// ---------------------------------------------------------------------------
+{
+  const legacyDb = createInitialData({ teacherCount: 20 });
+  const legacyAdmin = actor(legacyDb, "admin");
+
+  // 模拟升级前的存量数据：班级与教室都没有学期字段
+  (legacyDb.classes || []).forEach((row) => {
+    delete row.termId;
+    delete row.termName;
+  });
+  (legacyDb.rooms || []).forEach((row) => {
+    delete row.termId;
+    delete row.termName;
+  });
+
+  // 走一次正常读取流程，触发存量数据补齐
+  const normalized = JSON.parse(JSON.stringify(legacyDb));
+  backfillCheck(normalized);
+
+  // 反复增减班级数，任何一次都不得产生重复主键
+  [6, 3, 8, 3].forEach((count) => {
+    updateGradeClassStructure(
+      normalized,
+      { stageId: "middle", grade: 7, regularCount: count, experimentalCount: 0 },
+      legacyAdmin,
+    );
+    const scoped = (normalized.classes || []).filter(
+      (row) => row.stageId === "middle" && Number(row.grade) === 7,
+    );
+    assert.equal(scoped.length, count, `保存 ${count} 个班后实际班级数应一致`);
+    assertPersistable(normalized, `班级结构保存为 ${count} 个班`);
+  });
 }
 
 console.log("multi-term lifecycle checks passed");

@@ -238,7 +238,7 @@ function itemMatchesTerm(item, term) {
 }
 
 function itemBelongsToTerm(item, term) {
-  return item.termId === term.id;
+  return item?.termId === term?.id;
 }
 
 function scopedConfigId(prefix, termId, ...parts) {
