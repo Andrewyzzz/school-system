@@ -638,18 +638,31 @@ function normalizeAccountDisplayNames(db) {
   return changed;
 }
 
-// 学期字段是后加的：早于该字段的存量班级/教室没有 termId，导致按学期替换的操作
-// （如保存班级结构）匹配不到旧行，新旧并存产生重复主键，整次持久化被拒绝。
-// 这里一次性把它们归属到首个学期，之后所有按 termId 的逻辑都能正常工作。
+// 按学期作用域的集合：这些集合的写操作都是"先删本学期旧行、再写新行"，
+// 依赖 termId 匹配旧行。学期字段是后加的，存量行没有它就永远删不掉，
+// 导致新旧并存产生重复主键、整次持久化被拒绝。启动时统一补齐到首个学期。
+export const TERM_SCOPED_COLLECTIONS = [
+  "classes",
+  "rooms",
+  "roomResourceOverrides",
+  "schedulePeriodTemplates",
+  "gradeCourseRules",
+  "scheduleConstraints",
+  "teacherAssignments",
+  "teacherScheduleRules",
+  "scheduleDrafts",
+  "scheduleChangeRequests",
+];
+
 function backfillTermScopedRows(db) {
   const firstTerm = (db.terms || [])[0];
   if (!firstTerm?.id) return false;
   let changed = false;
-  ["classes", "rooms"].forEach((key) => {
+  TERM_SCOPED_COLLECTIONS.forEach((key) => {
     (db[key] || []).forEach((row) => {
       if (row && !row.termId) {
         row.termId = firstTerm.id;
-        row.termName = firstTerm.name || "";
+        row.termName = row.termName || firstTerm.name || "";
         changed = true;
       }
     });
@@ -657,7 +670,7 @@ function backfillTermScopedRows(db) {
   return changed;
 }
 
-function normalizeDatabase(db) {
+export function normalizeDatabase(db) {
   let changed = normalizeAccountDisplayNames(db);
   if (backfillTermScopedRows(db)) changed = true;
   const defaults = createInitialData({ teacherCount: db.meta?.teacherCount || DEFAULT_TEACHER_COUNT });

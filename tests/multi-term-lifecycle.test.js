@@ -26,9 +26,11 @@ import {
   setCurrentAcademicTerm,
   termDatePhase,
   teacherPayrollPreview,
+  TERM_SCOPED_COLLECTIONS,
+  normalizeDatabase,
   updateTeacherAssignment,
 } from "../server/storage.js";
-import { buildSchedulingConfig, updateGradeClassStructure } from "../server/scheduling.js";
+import { buildSchedulingConfig, updateGradeClassStructure, updateGradeCourseRules } from "../server/scheduling.js";
 
 const actor = (db, username) => db.accounts.find((item) => item.username === username);
 
@@ -56,20 +58,16 @@ const PERSISTED_COLLECTIONS = [
   "oaRequests",
 ];
 
-// 存量数据（无 termId）必须在读取时被补齐到首个学期，否则按学期替换会匹配不到旧行
+// 存量数据（无 termId）必须在读取时被补齐到首个学期，否则按学期替换会匹配不到旧行。
+// 关键：这里调用产品代码的 normalizeDatabase，而不是在测试里另写一份补齐逻辑——
+// 否则补齐范围若在产品侧漏掉某个集合，测试也发现不了。
 function backfillCheck(db) {
-  const firstTerm = (db.terms || [])[0];
-  assert.ok(firstTerm?.id, "应存在首个学期");
-  ["classes", "rooms"].forEach((key) => {
-    (db[key] || []).forEach((row) => {
-      if (!row.termId) {
-        row.termId = firstTerm.id;
-        row.termName = firstTerm.name || "";
-      }
-    });
+  assert.ok((db.terms || [])[0]?.id, "应存在首个学期");
+  normalizeDatabase(db);
+  TERM_SCOPED_COLLECTIONS.forEach((key) => {
     assert.ok(
       (db[key] || []).every((row) => row.termId),
-      `${key} 中不应残留无学期归属的行`,
+      `${key} 中不应残留无学期归属的行（产品侧补齐范围可能遗漏了该集合）`,
     );
   });
 }
@@ -474,39 +472,77 @@ history.push(runTermCycle(db, { term: thirdTerm, month: "2027-03", label: "学�
 }
 
 // ---------------------------------------------------------------------------
-// 存量数据（无 termId）下的按学期替换：历史上导致"保存班级结构"产生重复主键
+// 存量数据兼容性：所有"按学期作用域"的集合
+//
+// 这些集合的写操作都是"先删本学期旧行、再写新行"，依赖 termId 匹配旧行。
+// termId 是后加字段，存量行没有它就永远删不掉，新旧并存产生重复主键并导致
+// 整次持久化被拒绝——历史上"保存班级结构报后端异常"即由此而来。
+// 本用例模拟升级前的老库，逐一驱动这些写操作，确保补齐机制覆盖到位。
 // ---------------------------------------------------------------------------
 {
-  const legacyDb = createInitialData({ teacherCount: 20 });
-  const legacyAdmin = actor(legacyDb, "admin");
+  // 构造老库：抹掉所有按学期作用域集合的 termId
+  const makeLegacyDb = () => {
+    const legacy = createInitialData({ teacherCount: 30 });
+    TERM_SCOPED_COLLECTIONS.forEach((key) => {
+      (legacy[key] || []).forEach((row) => {
+        delete row.termId;
+        delete row.termName;
+      });
+    });
+    return legacy;
+  };
 
-  // 模拟升级前的存量数据：班级与教室都没有学期字段
-  (legacyDb.classes || []).forEach((row) => {
-    delete row.termId;
-    delete row.termName;
-  });
-  (legacyDb.rooms || []).forEach((row) => {
-    delete row.termId;
-    delete row.termName;
-  });
+  // 补齐机制必须覆盖每一个按学期作用域的集合，漏掉任何一个都会重现该缺陷。
+  // 注：种子数据里部分集合（如 teacherAssignments）本身不带 termId，
+  // 由 sourceTermRows 的"无 termId 视为首学期"兜底保证读取正确；这里断言的是
+  // 补齐后不应再有残留，从而让按学期的删除逻辑可靠工作。
+  {
+    const legacy = makeLegacyDb();
+    const populated = TERM_SCOPED_COLLECTIONS.filter((key) => (legacy[key] || []).length > 0);
+    assert.ok(populated.length > 0, "应有可供验证的按学期集合");
+    backfillCheck(legacy);
+    populated.forEach((key) => {
+      assert.ok(
+        (legacy[key] || []).every((row) => row.termId),
+        `集合 ${key} 未被补齐 termId，其按学期替换操作会产生重复主键`,
+      );
+    });
+  }
 
-  // 走一次正常读取流程，触发存量数据补齐
-  const normalized = JSON.parse(JSON.stringify(legacyDb));
-  backfillCheck(normalized);
+  // 老库下反复保存班级结构：任何一次都不得产生重复主键或数据残留
+  {
+    const legacy = makeLegacyDb();
+    backfillCheck(legacy);
+    const legacyAdmin = actor(legacy, "admin");
+    [6, 3, 8, 3].forEach((count) => {
+      updateGradeClassStructure(
+        legacy,
+        { stageId: "middle", grade: 7, regularCount: count, experimentalCount: 0 },
+        legacyAdmin,
+      );
+      const scoped = (legacy.classes || []).filter((row) => row.stageId === "middle" && Number(row.grade) === 7);
+      assert.equal(scoped.length, count, `保存 ${count} 个班后实际班级数应一致`);
+      assertPersistable(legacy, `班级结构保存为 ${count} 个班`);
+    });
+  }
 
-  // 反复增减班级数，任何一次都不得产生重复主键
-  [6, 3, 8, 3].forEach((count) => {
-    updateGradeClassStructure(
-      normalized,
-      { stageId: "middle", grade: 7, regularCount: count, experimentalCount: 0 },
-      legacyAdmin,
-    );
-    const scoped = (normalized.classes || []).filter(
-      (row) => row.stageId === "middle" && Number(row.grade) === 7,
-    );
-    assert.equal(scoped.length, count, `保存 ${count} 个班后实际班级数应一致`);
-    assertPersistable(normalized, `班级结构保存为 ${count} 个班`);
-  });
+  // 老库下保存课程规则：应为覆盖而非累加
+  {
+    const legacy = makeLegacyDb();
+    backfillCheck(legacy);
+    const legacyAdmin = actor(legacy, "admin");
+    const before = (legacy.gradeCourseRules || []).length;
+    [5, 6, 4].forEach((weekly) => {
+      updateGradeCourseRules(
+        legacy,
+        { stageId: "middle", grade: 7, rules: [{ subjectId: "chinese", weeklyLessons: weekly, maxDaily: 2 }] },
+        legacyAdmin,
+      );
+      assertPersistable(legacy, `课程规则保存 ${weekly} 课时`);
+    });
+    const after = (legacy.gradeCourseRules || []).length;
+    assert.equal(after, before + 1, "重复保存同一条课程规则应覆盖而非累加");
+  }
 }
 
 console.log("multi-term lifecycle checks passed");
