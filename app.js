@@ -348,12 +348,43 @@ const initialState = {
       teacherId: "T001",
       deviceId: "li-phone-001",
     },
+    // 财务分四摊，与服务端种子账号一一对应。本地演示模式也要有这四个，
+    // 否则后端不可达时快捷登录会退回这里、找不到账号而报"用户名或密码不正确"。
     {
       id: "finance-zhang",
       role: "finance",
+      financeScope: "headquarters",
+      financeScopeName: "总校行政后勤",
       name: "张会计",
-      title: "财务账号",
-      department: "财务部",
+      title: "总校财务",
+      department: "财务处 · 总校",
+    },
+    {
+      id: "finance-primary",
+      role: "finance",
+      financeScope: "primary",
+      financeScopeName: "小学部",
+      name: "小学部会计",
+      title: "小学部财务",
+      department: "财务处 · 小学部",
+    },
+    {
+      id: "finance-middle",
+      role: "finance",
+      financeScope: "middle",
+      financeScopeName: "初中部",
+      name: "初中部会计",
+      title: "初中部财务",
+      department: "财务处 · 初中部",
+    },
+    {
+      id: "finance-high",
+      role: "finance",
+      financeScope: "high",
+      financeScopeName: "高中部",
+      name: "高中部会计",
+      title: "高中部财务",
+      department: "财务处 · 高中部",
     },
     {
       id: "admin-zhou",
@@ -711,6 +742,9 @@ const ELEMENTARY_SCHEDULED_TEACHER_LOGIN_FALLBACK = [
 const loginUsers = [
   { username: "teacher0003", password: "123456", accountId: "teacher-li" },
   { username: "finance", password: "123456", accountId: "finance-zhang" },
+  { username: "finance_primary", password: "123456", accountId: "finance-primary" },
+  { username: "finance_middle", password: "123456", accountId: "finance-middle" },
+  { username: "finance_high", password: "123456", accountId: "finance-high" },
   { username: "admin", password: "123456", accountId: "admin-zhou" },
   { username: "sysadmin", password: "123456", accountId: "system-admin" },
   { username: "classroom", password: "123456", accountId: "classroom-screen" },
@@ -739,56 +773,52 @@ let notificationRecipientState = {
   loaded: false,
   error: "",
 };
-let teacherWorkloadState = {
-  teacherId: "",
-  month: "2026-06",
-  loading: false,
-  loaded: false,
-  error: "",
-  data: null,
-};
-let attendanceRecordState = {
-  teacherId: "",
-  month: "2026-06",
-  loading: false,
-  loaded: false,
-  error: "",
-  records: [],
-  summary: null,
-  teacher: null,
-};
-let teacherPayrollState = {
-  teacherId: "",
-  month: "2026-06",
-  loading: false,
-  loaded: false,
-  error: "",
-  data: null,
-};
-let payrollRuleState = {
-  loading: false,
-  loaded: false,
-  error: "",
-  rules: null,
-};
-let financeTeacherPage = {
-  items: [],
-  meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 },
-  summary: null,
-  page: 1,
-  pageSize: 20,
-  stageId: "",
-  grade: "",
-  search: "",
-  loaded: false,
-  loading: false,
-  error: "",
-};
+function initialTeacherWorkloadState() {
+  return { teacherId: "", month: "2026-06", loading: false, loaded: false, error: "", data: null };
+}
+let teacherWorkloadState = initialTeacherWorkloadState();
+function initialAttendanceRecordState() {
+  return {
+    teacherId: "", month: "2026-06", loading: false, loaded: false,
+    error: "", records: [], summary: null, teacher: null,
+  };
+}
+let attendanceRecordState = initialAttendanceRecordState();
+function initialTeacherPayrollState() {
+  return { teacherId: "", month: "2026-06", loading: false, loaded: false, error: "", data: null };
+}
+let teacherPayrollState = initialTeacherPayrollState();
+function initialPayrollRuleState() {
+  return { loading: false, loaded: false, error: "", rules: null };
+}
+let payrollRuleState = initialPayrollRuleState();
+// ---- 学期薪酬预算 ----------------------------------------------------------
+// 学部财务只拿到本学部一条，总校财务拿到行政后勤一条，行政管理拿到全部四条。
+// 服务端按登录账号收敛范围，前端不做二次过滤。
+function initialTermBudgetState() {
+  return { loaded: false, loading: false, error: "", data: null };
+}
+let termBudgetState = initialTermBudgetState();
+
+function initialFinanceTeacherPage() {
+  return {
+    items: [], meta: { page: 1, pageSize: 20, total: 0, totalPages: 1 }, summary: null,
+    page: 1, pageSize: 20, stageId: "", grade: "", search: "",
+    loaded: false, loading: false, error: "",
+  };
+}
+let financeTeacherPage = initialFinanceTeacherPage();
 const financeStageCatalog = [
   { id: "primary", name: "小学部", grades: [1, 2, 3, 4, 5, 6] },
   { id: "middle", name: "初中部", grades: [7, 8, 9] },
   { id: "high", name: "高中部", grades: [10, 11, 12] },
 ];
+
+// 学段枚举的中文名。界面任何位置都不应出现 primary/middle/high 这类内部标识，
+// 需要展示学段时一律走这里；查无对应时返回空串，宁可不显示也不漏出英文。
+function stageLabel(stageId) {
+  return financeStageCatalog.find((item) => item.id === String(stageId || ""))?.name || "";
+}
 let personnelPage = {
   items: [],
   summary: { total: 0, active: 0, teachers: 0, adminFinance: 0, filtered: 0 },
@@ -803,27 +833,20 @@ let personnelPage = {
   loading: false,
   error: "",
 };
-let financeTeacherDetailState = {
-  teacherId: "",
-  month: "2026-06",
-  loading: false,
-  loaded: false,
-  error: "",
-  workload: null,
-  payroll: null,
-  payrollGenerated: false,
-  lockBlockers: [],
-};
-let payrollHistoryState = {
-  termId: "",
-  month: "2026-06",
-  loadedTermId: "",
-  loadedMonth: "",
-  loading: false,
-  loaded: false,
-  error: "",
-  data: null,
-};
+function initialFinanceTeacherDetailState() {
+  return {
+    teacherId: "", month: "2026-06", loading: false, loaded: false, error: "",
+    workload: null, payroll: null, payrollGenerated: false, lockBlockers: [],
+  };
+}
+let financeTeacherDetailState = initialFinanceTeacherDetailState();
+function initialPayrollHistoryState() {
+  return {
+    termId: "", month: "2026-06", loadedTermId: "", loadedMonth: "",
+    loading: false, loaded: false, error: "", data: null,
+  };
+}
+let payrollHistoryState = initialPayrollHistoryState();
 let salaryProfileEditMode = false;
 let salaryProfilePanelCurrentProfile = null;
 let teacherImportState = {
@@ -1142,9 +1165,29 @@ function loadBackendSession() {
   }
 }
 
+// 换账号必须丢掉所有按登录身份取回的数据。四个财务账号各管一摊，
+// 沿用上一个账号的缓存会把别人的名单、工资汇总、预算显示给现在这个人——
+// 表现就是"四个账号登进去看到的东西完全一样"。
+//
+// 新增任何按账号取数的缓存，都必须在这里登记，并把初始值抽成 initialXxx()
+// 工厂函数，让声明和重置共用同一份定义。
+function resetScopedCaches() {
+  termBudgetState = initialTermBudgetState();
+  financeTeacherPage = initialFinanceTeacherPage();
+  financeTeacherDetailState = initialFinanceTeacherDetailState();
+  payrollHistoryState = initialPayrollHistoryState();
+  teacherWorkloadState = initialTeacherWorkloadState();
+  attendanceRecordState = initialAttendanceRecordState();
+  teacherPayrollState = initialTeacherPayrollState();
+  payrollRuleState = initialPayrollRuleState();
+  // 选中的老师也要清：上一个账号选中的老师往往不在本账号范围内
+  state.selectedFinanceTeacherId = "";
+}
+
 function saveBackendSession(session) {
   backendAuthExpiredHandled = false;
   backendSession = session;
+  resetScopedCaches();
   try {
     window.localStorage.setItem(API_SESSION_KEY, JSON.stringify(session));
   } catch (error) {
@@ -1155,6 +1198,7 @@ function saveBackendSession(session) {
 
 function clearBackendSession() {
   backendSession = null;
+  resetScopedCaches();
   disconnectEventStream();
   try {
     window.localStorage.removeItem(API_SESSION_KEY);
@@ -2988,21 +3032,36 @@ function financeGradeLabel(grade) {
 }
 
 function financeStageOptions(selectedId = "") {
+  // 学部财务只管一个学部，列出另外两个只会让人误以为能查——按范围收敛。
+  // 总校财务管的是行政后勤，没有学部维度，同样不给学部选项。
+  const scope = currentFinanceScopeId();
+  const scopeName = currentFinanceScopeName();
+  if (scope === "headquarters") {
+    return `<option value="" selected>${escapeHtml(scopeName || "总校行政后勤")}</option>`;
+  }
+  const catalog = scope ? financeStageCatalog.filter((stage) => stage.id === scope) : financeStageCatalog;
   return [
-    `<option value="" ${selectedId ? "" : "selected"}>全部学部</option>`,
-    ...financeStageCatalog.map(
+    ...(scope ? [] : [`<option value="" ${selectedId ? "" : "selected"}>全部学部</option>`]),
+    ...catalog.map(
       (stage) => `<option value="${stage.id}" ${stage.id === selectedId ? "selected" : ""}>${stage.name}</option>`,
     ),
   ].join("");
 }
 
 function financeGradeOptions(stageId = "", selectedGrade = "") {
-  const stage = financeStageCatalog.find((item) => item.id === stageId);
-  const grades = stage
-    ? stage.grades
-    : financeStageCatalog.flatMap((item) => item.grades);
+  // 未显式选学部时，学部财务的年级也要收敛到本学部：
+  // 否则小学部会计会看到初一、高三这些永远查不出人的年级选项。
+  const scope = currentFinanceScopeId();
+  const effectiveStageId = stageId || (scope && scope !== "headquarters" ? scope : "");
+  const stage = financeStageCatalog.find((item) => item.id === effectiveStageId);
+  // 总校财务管行政后勤，没有年级维度
+  const grades = scope === "headquarters"
+    ? []
+    : stage
+      ? stage.grades
+      : financeStageCatalog.flatMap((item) => item.grades);
   return [
-    `<option value="" ${selectedGrade ? "" : "selected"}>${stage ? "全部年级" : "全部年级"}</option>`,
+    `<option value="" ${selectedGrade ? "" : "selected"}>全部年级</option>`,
     ...grades.map(
       (grade) => `<option value="${grade}" ${String(grade) === String(selectedGrade) ? "selected" : ""}>${financeGradeLabel(grade)}</option>`,
     ),
@@ -3679,6 +3738,7 @@ async function unlockBackendPayroll() {
       lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
+    termBudgetState.loaded = false; // 解锁会退回已使用预算
     showToast("工资已解锁，请重新生成、复核并锁定");
   } catch (error) {
     financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资解锁失败", lockBlockers: error.details?.blockers || [] };
@@ -3743,6 +3803,7 @@ async function lockBackendPayroll() {
       lockBlockers: payroll.lockBlockers || [],
     };
     financeTeacherPage.loaded = false;
+    termBudgetState.loaded = false; // 锁定会改变已使用预算
     showToast("该老师本月工资已锁定");
   } catch (error) {
     financeTeacherDetailState = { ...financeTeacherDetailState, loading: false, error: error.message || "工资锁定失败", lockBlockers: error.details?.blockers || [] };
@@ -3816,6 +3877,7 @@ async function batchLockBackendPayroll() {
       body: { month },
     });
     financeTeacherPage.loaded = false;
+    termBudgetState.loaded = false; // 批量锁定会大幅推高已使用预算
     resetFinanceTeacherDetailState();
     showToast(`已锁定 ${result.successCount} 份工资，未锁定 ${result.failedCount} 份`);
     const status = document.querySelector("#payrollExportStatus");
@@ -4122,6 +4184,122 @@ async function approveBackendWorkload(step) {
     showToast(financeTeacherDetailState.error);
   }
   render();
+}
+
+async function loadTermBudget(force = false) {
+  if (!backendMode()) return;
+  if (termBudgetState.loading) return;
+  if (termBudgetState.loaded && !force) return;
+  termBudgetState = { ...termBudgetState, loading: true, error: "" };
+  try {
+    const data = await apiRequest("/api/payroll/budget");
+    termBudgetState = { loaded: true, loading: false, error: "", data };
+  } catch (error) {
+    termBudgetState = {
+      loaded: true,
+      loading: false,
+      error: error.message || "预算读取失败",
+      data: null,
+    };
+  }
+  render();
+}
+
+// 财务账号看到的是自己那一摊，页面上"全校"的措辞要跟着范围走，
+// 否则学部会计会以为看到的是全校数字。
+function currentFinanceScopeId() {
+  // 后端会话优先；本地演示模式下 backendSession 为 null，退回当前登录的本地账号
+  return backendSession?.account?.financeScope || currentAccount()?.financeScope || "";
+}
+
+function currentFinanceScopeName() {
+  return backendSession?.account?.financeScopeName || currentAccount()?.financeScopeName || "";
+}
+
+function applyFinanceScopeLabels() {
+  const scopeName = currentFinanceScopeName();
+  const prefix = scopeName || "全校";
+  const grossLabel = document.querySelector("#financeGrossLabel");
+  const netLabel = document.querySelector("#financeNetLabel");
+  const grossHint = document.querySelector("#financeGrossHint");
+  if (grossLabel) grossLabel.textContent = `${prefix}应发`;
+  if (netLabel) netLabel.textContent = `${prefix}实发`;
+  if (grossHint) grossHint.textContent = scopeName ? `${scopeName}工资总额` : "全校工资总额";
+}
+
+function budgetBarClass(ratio) {
+  if (ratio === null || ratio === undefined) return "budget-bar";
+  if (ratio > 1) return "budget-bar is-over";
+  if (ratio >= 0.9) return "budget-bar is-warning";
+  return "budget-bar";
+}
+
+function budgetCardMarkup(item, { isTotal = false } = {}) {
+  const ratioText = item.usedRatio === null || item.usedRatio === undefined
+    ? "未编制预算"
+    : `执行率 ${(item.usedRatio * 100).toFixed(1)}%`;
+  // 进度条最多画满，超支时靠颜色提示；这里不拦截任何发放动作
+  const width = item.usedRatio ? Math.min(item.usedRatio, 1) * 100 : 0;
+  return `
+    <article class="budget-card${isTotal ? " is-total" : ""}">
+      <div class="budget-card-head">
+        <strong>${escapeHtml(item.scopeName || "合计")}</strong>
+        <em>${escapeHtml(ratioText)}</em>
+      </div>
+      <div class="budget-amount">${formatCurrency(item.budget)}</div>
+      <div class="${budgetBarClass(item.usedRatio)}"><i style="width:${width.toFixed(1)}%"></i></div>
+      <div class="budget-meta">
+        <span>已使用<b>${formatCurrency(item.used)}</b></span>
+        <span>剩余<b>${formatCurrency(item.remaining)}</b></span>
+        <span>结算中<b>${formatCurrency(item.pending)}</b></span>
+        <span>已锁定<b>${item.lockedCount ?? 0} 人</b></span>
+      </div>
+    </article>`;
+}
+
+function renderBudgetPanel(panelId, gridId, sourceId) {
+  const panel = document.querySelector(`#${panelId}`);
+  const grid = document.querySelector(`#${gridId}`);
+  const source = document.querySelector(`#${sourceId}`);
+  if (!panel || !grid) return;
+  if (!backendMode() || !isFinanceRole()) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  loadTermBudget();
+
+  if (termBudgetState.loading && !termBudgetState.data) {
+    grid.innerHTML = `<p class="budget-empty">正在读取本学期预算…</p>`;
+    return;
+  }
+  if (termBudgetState.error) {
+    grid.innerHTML = `<p class="budget-empty">预算读取失败：${escapeHtml(termBudgetState.error)}</p>`;
+    return;
+  }
+  const data = termBudgetState.data;
+  const items = data?.items || [];
+  if (!items.length) {
+    grid.innerHTML = `<p class="budget-empty">本学期尚未编制薪酬预算。</p>`;
+    return;
+  }
+  // 只管一个口径的学部财务不需要再看一遍合计，那只是同一个数字重复一次
+  const showTotal = items.length > 1;
+  grid.innerHTML =
+    items.map((item) => budgetCardMarkup(item)).join("") +
+    (showTotal ? budgetCardMarkup({ ...data.total, scopeName: "全校合计" }, { isTotal: true }) : "");
+
+  if (source) {
+    const hasBudget = items.some((item) => item.hasBudget);
+    if (!hasBudget) {
+      source.textContent = "未编制";
+      source.className = "status-pill";
+    } else {
+      const approvedAt = String(data.approvedAt || "").slice(0, 10);
+      source.textContent = approvedAt ? `审批确定 ${approvedAt}` : "审批确定";
+      source.className = "status-pill done";
+    }
+  }
 }
 
 async function loadFinanceTeacherPage(overrides = {}) {
@@ -10215,6 +10393,9 @@ function renderTeacherPayroll() {
 }
 
 function renderFinanceDashboard() {
+  // 范围文案两条渲染路径都要刷新：只在后端分支里刷的话，
+  // 切到本地演示模式后 DOM 会留着上一个账号的"××部应发"字样。
+  applyFinanceScopeLabels();
   if (backendMode() && isFinanceRole()) {
     renderBackendFinanceDashboard();
     return;
@@ -10306,6 +10487,7 @@ function renderBackendFinanceDashboard() {
   document.querySelector("#financeSettledCount").textContent = totals.locked || 0;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
   document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
+  renderBudgetPanel("financeBudgetPanel", "financeBudgetGrid", "financeBudgetSource");
 
   renderFinanceTeacherFilters("overview");
   const pageInfo = document.querySelector("#financeTeacherPageInfo");
@@ -10490,6 +10672,27 @@ function confirmationStageValue(status = "", teacherId = "") {
   return teacherId ? state.confirmationStages[teacherId] || 0 : 0;
 }
 
+// 当前老师卡片上的状态标签。
+// 确认状态与工资单状态在后端模式下同源（都取自工资单 status），两个标签会出现
+// 一模一样的文字（例如并排两个「老师已确认」）。文案相同时只保留一个。
+function settlementTeacherTags({
+  confirmationLabel,
+  confirmationStage,
+  payrollLabel,
+  payrollStatus,
+  hasPayrollSnapshot,
+}) {
+  const confirmationClass =
+    payrollStatus === "disputed" ? "exception" : confirmationStage > 0 ? "completed" : "pending";
+  const payrollClass =
+    payrollStatus === "locked" ? "locked" : hasPayrollSnapshot ? "completed" : "pending";
+  const tags = [`<span class="tag ${confirmationClass}">${confirmationLabel}</span>`];
+  if (payrollLabel !== confirmationLabel) {
+    tags.push(`<span class="tag ${payrollClass}">${payrollLabel}</span>`);
+  }
+  return tags.join("");
+}
+
 function settlementStepState({ complete = false, current = false, blocked = false } = {}) {
   if (complete) return "done";
   if (current) return "current";
@@ -10569,10 +10772,13 @@ function renderSettlementWorkspaceState({
           <strong>${selectedTeacher?.name || teacherName(teacherId)}</strong>
           <small>${teacherMeta}</small>
         </div>
-	        <div class="settlement-teacher-state">
-	          <span class="tag ${payrollStatus === "disputed" ? "exception" : confirmationStage > 0 ? "completed" : "pending"}">${confirmationLabel}</span>
-	          <span class="tag ${payrollStatus === "locked" ? "locked" : hasPayrollSnapshot ? "completed" : "pending"}">${payrollLabel}</span>
-	        </div>
+	        <div class="settlement-teacher-state">${settlementTeacherTags({
+	          confirmationLabel,
+	          confirmationStage,
+	          payrollLabel,
+	          payrollStatus,
+	          hasPayrollSnapshot,
+	        })}</div>
       `
       : `
         <div>
@@ -10624,13 +10830,36 @@ function renderSettlementWorkspaceState({
   }
 }
 
+// 档位中文名沿用《深圳市富源学校薪酬制度》的措辞，与 server/payroll.js 里的
+// QUALIFICATION_GRADE_LABELS / ASSESSMENT_BAND_LABELS / HOUSING_TIER_LABELS 保持一致。
+// 界面上不出现 third、primaryCoreHigh 这类内部枚举。
 const salaryQualificationLabels = {
-  seniorProfessor: "正高",
-  seniorTeacher: "高级",
-  firstOrDoctor: "一级/博士",
-  secondOrMaster: "二级/硕士",
-  thirdOrBachelor: "三级/本科",
-  ungradedOrJuniorCollege: "未评级/大专",
+  seniorProfessor: "正高级教师",
+  seniorTeacher: "高级教师",
+  first: "一级教师",
+  second: "二级教师",
+  third: "三级教师",
+  ungraded: "未评级",
+};
+
+// 旧库遗留键：职称曾与学历绑定（一级/博士），现已拆开——职称归职称，学历另发补贴。
+// 只用于把历史数据译成中文，不参与薪资配置表单，否则配置页会多出一套重复档位。
+const legacyQualificationLabels = {
+  firstOrDoctor: "一级教师",
+  secondOrMaster: "二级教师",
+  thirdOrBachelor: "三级教师",
+  ungradedOrJuniorCollege: "未评级",
+};
+
+// 展示用：现行档位查不到时回退到遗留键
+function qualificationLabelOf(key) {
+  return salaryQualificationLabels[key] || legacyQualificationLabels[key] || key;
+}
+
+// 学历补贴（制度：硕士 500 元/月、博士 800 元/月），与职称档并行发放
+const salaryDegreeLabels = {
+  master: "硕士",
+  doctor: "博士",
 };
 
 const salaryAssessmentLabels = {
@@ -10642,9 +10871,11 @@ const salaryAssessmentLabels = {
 };
 
 const salaryHousingLabels = {
+  teacher: "专任教师",
   chief: "首席",
   backboneOrGradeHead: "骨干/年级主任",
-  teacher: "普通教师",
+  middleManager: "中层干部",
+  otherAdmin: "其他行政人员",
 };
 
 const salaryRoleLabels = {
@@ -10670,10 +10901,16 @@ const salaryRoleLabels = {
 
 const salarySchemeMoneyGroups = [
   {
-    title: "职称/学历档基本工资",
-    description: "老师工资档案选择哪个职称/学历档，就命中这里对应的基本工资金额。",
+    title: "职称档基本工资",
+    description: "老师人事档案里的职称档命中这里对应的基本工资金额。职称与学历互不绑定，学历另按下方标准发补贴。",
     path: "baseSalaryByQualification",
     labels: salaryQualificationLabels,
+  },
+  {
+    title: "学历补贴",
+    description: "按最高学历发放，与职称档基本工资并行计发。本科及以下不发。",
+    path: "degreeAllowance",
+    labels: salaryDegreeLabels,
   },
   {
     title: "考核工资档位",
@@ -10687,20 +10924,42 @@ const salarySchemeMoneyGroups = [
     path: "housingAllowance",
     labels: salaryHousingLabels,
   },
+  // 校龄津贴按岗位类别取不同公式，参数与 server/payroll.js 的 seniorityRules 一一对应。
+  // 早先这里配的是一张 1-6 年的阶梯表（seniorityAllowance），但计算侧读的是公式，
+  // 改了阶梯表根本不生效——现在直接配公式参数。
   {
-    title: "校龄工资阶梯",
-    description: "按校龄年限取值，6 年及以上按 6 年档封顶。",
-    path: "seniorityAllowance",
-    labels: {
-      1: "1 年",
-      2: "2 年",
-      3: "3 年",
-      4: "4 年",
-      5: "5 年",
-      6: "6 年及以上",
+    title: "校龄津贴 · 专任教师、校医",
+    description:
+      "制度：3 年及以内按 校龄×单价；3 年以上按 基数+(校龄-3)×单价。校龄取实数，进校满一年才算一年，按封顶金额封顶。",
+    fields: {
+      "seniorityRules.teacher.tier1Years": "分段年限（年）",
+      "seniorityRules.teacher.tier1Rate": "分段内单价（元/年）",
+      "seniorityRules.teacher.tier2Base": "超出分段的基数（元）",
+      "seniorityRules.teacher.tier2Rate": "超出部分单价（元/年）",
+      "seniorityRules.teacher.cap": "封顶（元/月）",
+    },
+  },
+  {
+    title: "校龄津贴 · 生活教师、司机",
+    description: "制度：校龄×单价，按封顶金额封顶。后勤职工制度未设校龄津贴，故不在此列。",
+    fields: {
+      "seniorityRules.lifeTeacher.flatRate": "生活教师单价（元/年）",
+      "seniorityRules.lifeTeacher.cap": "生活教师封顶（元/月）",
+      "seniorityRules.driver.flatRate": "司机单价（元/年）",
+      "seniorityRules.driver.cap": "司机封顶（元/月）",
     },
   },
 ];
+
+// 薪资配置里的学段区块（岗位津贴、课时档位）按财务范围裁剪：
+// 小学部会计不该看到初中、高中的计薪标准。这些区块是写死的表单结构，
+// 服务端把数据摘掉后标签仍会留在页面上，必须在渲染时一并滤掉。
+function stageGroupInFinanceScope(group) {
+  const scope = currentFinanceScopeId();
+  if (!scope) return true; // 行政管理等不受限角色看全部
+  if (scope === "headquarters") return false; // 总校财务管行政后勤，没有教学档位
+  return group.stageId === scope;
+}
 
 const stageAllowanceGroups = [
   {
@@ -10757,6 +11016,7 @@ const stageAllowanceGroups = [
 
 const stageLessonRuleGroups = [
   {
+    stageId: "high",
     title: "高中部课时与自习补贴",
     description: "高中正课、早晚自习、补课、周末课和代课的计薪标准。",
     fields: {
@@ -10774,6 +11034,7 @@ const stageLessonRuleGroups = [
     },
   },
   {
+    stageId: "middle",
     title: "初中部课时与自习补贴",
     description: "初中正课、晚自习、活动课、补课、周末课和代课的计薪标准。",
     fields: {
@@ -10790,6 +11051,7 @@ const stageLessonRuleGroups = [
     },
   },
   {
+    stageId: "primary",
     title: "小学部课时与自习补贴",
     description: "小学正课、晚自习、非正课、补课、周末课和代课的计薪标准。",
     fields: {
@@ -10835,8 +11097,13 @@ function renderPayrollSchemeEditor(rules = {}) {
   const scheme = rules.teacherSalaryScheme || {};
   const fixedGroups = salarySchemeMoneyGroups
     .map((group) => {
-      const fields = Object.entries(group.labels)
-        .map(([key, label]) => schemeNumberInput(`${group.path}.${key}`, label, getNestedValue(scheme, `${group.path}.${key}`, 0)))
+      // 两种写法：{path, labels} 用同一前缀拼子键；{fields} 直接给完整路径，
+      // 供校龄公式这类参数不在同一层级的区块使用
+      const entries = group.fields
+        ? Object.entries(group.fields)
+        : Object.entries(group.labels).map(([key, label]) => [`${group.path}.${key}`, label]);
+      const fields = entries
+        .map(([pathValue, label]) => schemeNumberInput(pathValue, label, getNestedValue(scheme, pathValue, 0)))
         .join("");
       return `
         <section class="payroll-scheme-card">
@@ -10850,6 +11117,7 @@ function renderPayrollSchemeEditor(rules = {}) {
     })
     .join("");
   const allowanceGroups = stageAllowanceGroups
+    .filter(stageGroupInFinanceScope)
     .map((group) => {
       const fields = Object.entries(group.fields)
         .map(([key, label]) =>
@@ -10868,6 +11136,7 @@ function renderPayrollSchemeEditor(rules = {}) {
     })
     .join("");
   const lessonRuleGroups = stageLessonRuleGroups
+    .filter(stageGroupInFinanceScope)
     .map((group) => {
       const fields = Object.entries(group.fields)
         .map(([pathValue, label]) => schemeNumberInput(pathValue, label, getNestedValue(scheme, pathValue, 0)))
@@ -10903,11 +11172,15 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// 历史工资单文案里可能还留着枚举，展示前兜底译成中文。
+// 遗留职称键也要带上——旧数据里就是 firstOrDoctor 这类写法。
 function humanizePayrollBasis(basis = "") {
   const replacements = {
     ...salaryQualificationLabels,
+    ...legacyQualificationLabels,
     ...salaryAssessmentLabels,
     ...salaryHousingLabels,
+    ...salaryDegreeLabels,
   };
   return Object.entries(replacements)
     .sort((a, b) => b[0].length - a[0].length)
@@ -10968,6 +11241,7 @@ function renderBackendSettlement() {
 	  if (!financeTeacherPage.loaded && !financeTeacherPage.loading) {
 	    loadFinanceTeacherPage();
 	  }
+	  renderBudgetPanel("settlementBudgetPanel", "settlementBudgetGrid", "settlementBudgetSource");
 		  renderFinanceTeacherFilters("settlement");
 		  renderSettlementStatusBoard();
 	  renderSettlementMonthProgress();
@@ -11430,12 +11704,45 @@ function renderSalaryProfilePanel(payroll) {
     return;
   }
 
-  setInputValue("#salaryAssessmentBand", profile.assessmentBand || "high");
+  // 学段取自当前工资单携带的老师信息；本地演示模式回退到 state 里的老师
+  const profileStageId =
+    payroll?.teacher?.stageId || teacherById(state.selectedFinanceTeacherId)?.stageId || "";
+  renderAssessmentBandSelect(profileStageId, profile.assessmentBand || "");
   setInputValue("#salaryHousingTier", profile.housingTier || "teacher");
   setInputValue("#salaryProbationRate", profile.probationRate ?? 1);
   setInputValue("#salaryManualItemsJson", JSON.stringify(profile.manualItems || [], null, 2));
   renderSalaryManualItemsEditor(profile.manualItems || []);
   syncSalaryProfileEditState(profile);
+}
+
+// 考核档与学段绑定（与 server/payroll.js 的 ASSESSMENT_BANDS_BY_STAGE 一致）：
+// 小学老师只能选小学三档，初中、高中各自只有一档。学段未知时不限制，
+// 交由后端按同一规则校验——行政后勤等无学段人员不该被这条挡住。
+const assessmentBandsByStage = {
+  high: ["high"],
+  middle: ["middle"],
+  primary: ["primaryCoreHigh", "primaryCoreLow", "primarySpecial"],
+};
+
+function assessmentBandOptionsFor(stageId, selected = "") {
+  const allowed = assessmentBandsByStage[String(stageId || "")] || Object.keys(salaryAssessmentLabels);
+  return allowed
+    .map(
+      (band) =>
+        `<option value="${band}" ${band === selected ? "selected" : ""}>${escapeHtml(salaryAssessmentLabels[band] || band)}</option>`,
+    )
+    .join("");
+}
+
+// 学段变了要重建下拉，否则会留着上一位老师学段的选项
+function renderAssessmentBandSelect(stageId, selected) {
+  const select = document.querySelector("#salaryAssessmentBand");
+  if (!select) return;
+  const allowed = assessmentBandsByStage[String(stageId || "")] || Object.keys(salaryAssessmentLabels);
+  // 档位与学段不匹配时（老数据）保留原值并置顶，避免静默改档
+  const value = allowed.includes(selected) ? selected : allowed[0] || "";
+  select.innerHTML = assessmentBandOptionsFor(stageId, value);
+  select.value = value;
 }
 
 // 从工资单反推人事事实并展示（数据源是人事档案，财务侧只读）
@@ -14028,7 +14335,7 @@ function renderHrOrg() {
             <div class="hr-org-node-main">
               <strong>${escapeHtml(unit.name)}</strong>
               <span class="hr-badge">${ORG_TYPE_LABELS[unit.type] || unit.type}</span>
-              ${unit.stageId ? `<span class="hr-badge stage">排课:${escapeHtml(unit.stageId)}</span>` : ""}
+              ${stageLabel(unit.stageId) ? `<span class="hr-badge stage">排课学段：${escapeHtml(stageLabel(unit.stageId))}</span>` : ""}
               <span class="hr-org-count">${unit.activeEmployeeCount} 人</span>
             </div>
             ${

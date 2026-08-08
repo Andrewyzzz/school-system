@@ -30,7 +30,12 @@ import {
   normalizeDatabase,
   updateTeacherAssignment,
 } from "../server/storage.js";
-import { buildSchedulingConfig, updateGradeClassStructure, updateGradeCourseRules } from "../server/scheduling.js";
+import {
+  buildSchedulingConfig,
+  updateGradeClassStructure,
+  updateGradeCourseRules,
+  updateRoomResources,
+} from "../server/scheduling.js";
 
 const actor = (db, username) => db.accounts.find((item) => item.username === username);
 
@@ -292,6 +297,44 @@ roundTrip(db, "学期2创建落盘");
 setCurrentAcademicTerm(db, secondTerm.id, admin);
 assert.equal(queryTerms(db).currentTerm.id, secondTerm.id, "应切换到第二学期");
 roundTrip(db, "学期2切换落盘");
+
+// 新学期里"重新配置"而非"复制"产生的行，同样必须与上学期主键隔离。
+// 历史缺陷：班级/教室行的 ID 由 学部-年级-序号 拼成、不含学期，
+// 因此在新学期保存班级结构或教室资源时会与上学期同名行撞主键，整批写入被拒
+// （表现为前端"服务端错误"）。复制路径已有断言，这里补上重新配置路径。
+{
+  const firstTermRowIds = (key) =>
+    new Set((db[key] || []).filter((row) => !row.termId || row.termId === firstTerm.id).map((row) => row.id));
+  const beforeClassIds = firstTermRowIds("classes");
+  const beforeRoomIds = firstTermRowIds("rooms");
+
+  updateGradeClassStructure(db, { stageId: "middle", grade: 7, regularCount: 5, experimentalCount: 1 }, admin);
+  assertPersistable(db, "学期2重新保存班级结构");
+  updateRoomResources(db, { stageId: "middle", grade: 7, roomCounts: { lab: 4, computer: 3 } }, admin);
+  assertPersistable(db, "学期2重新保存教室资源");
+
+  (db.classes || [])
+    .filter((row) => row.termId === secondTerm.id)
+    .forEach((row) => {
+      assert.ok(!beforeClassIds.has(row.id), `学期2新建班级与上学期撞 ID：${row.id}`);
+    });
+  (db.rooms || [])
+    .filter((row) => row.termId === secondTerm.id)
+    .forEach((row) => {
+      assert.ok(!beforeRoomIds.has(row.id), `学期2新建教室与上学期撞 ID：${row.id}`);
+    });
+
+  // 上一学期的行不能被这次写入删掉
+  assert.equal(firstTermRowIds("classes").size, beforeClassIds.size, "重新配置不应影响上学期班级");
+
+  // 二维码是门牌上的物理标识，跨学期必须稳定，否则贴纸全部作废
+  const labs = (db.rooms || []).filter((row) => row.termId === secondTerm.id && row.roomType === "lab");
+  assert.ok(labs.length > 0, "学期2应配置出实验室");
+  labs.forEach((row) => {
+    assert.ok(!row.qrCode.includes("@"), `教室二维码不应带学期后缀：${row.qrCode}`);
+  });
+  roundTrip(db, "学期2重新配置后落盘");
+}
 
 // 归档第一学期后，其数据转为只读但仍完整保留
 archiveAcademicTerm(db, firstTerm.id, admin);

@@ -889,10 +889,16 @@ function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = [], room
     if (!catalogByType.has(room.roomType)) catalogByType.set(room.roomType, []);
     catalogByType.get(room.roomType).push(room);
   });
+  // 专用教室 ID 必须带学期作用域：不同学期各自持有同名实验室/机房行，
+  // 若沿用无作用域 ID，新学期重新配置就会与旧学期撞主键、整批写入被拒。
+  // 后缀规则与 cloneTermConfigRows 的 scopedRowId 保持一致。
+  const termSuffix = String(term.id).replace(/^TERM-/, "").slice(-13);
   roomResourceTypes.forEach((resource) => {
     const count = normalizeClassCount(roomCounts[resource.type], resource.defaultCount, { min: 0, max: resource.max });
     for (let index = 1; index <= count; index += 1) {
-      const roomId = `ROOM-${division.stageId}-${resource.code}-${String(index).padStart(2, "0")}`;
+      // 物理教室编号：二维码贴在门上，跨学期必须稳定，因此不带学期后缀。
+      const physicalRoomId = `ROOM-${division.stageId}-${resource.code}-${String(index).padStart(2, "0")}`;
+      const roomId = `${physicalRoomId}@${termSuffix}`;
       const catalogRoom = (catalogByType.get(resource.type) || [])[index - 1] || null;
       rows.push({
         id: roomId,
@@ -904,9 +910,10 @@ function buildSpecialRoomRows(division, term, roomCounts, roomCatalog = [], room
         roomTypeName: resource.name,
         unit: resource.unit,
         capacity: 1,
-        qrCode: `ROOM:${roomId}`,
-        displayKey: `screen-${roomId.toLowerCase()}`,
+        qrCode: `ROOM:${physicalRoomId}`,
+        displayKey: `screen-${physicalRoomId.toLowerCase()}`,
         active: true,
+        sourceRoomId: physicalRoomId,
       });
     }
   });
@@ -1033,10 +1040,15 @@ function buildClassAndRoomRows(division, grade, options = {}) {
 
   const classRows = [];
   const roomRows = [];
+  // 班级与教室行按学期存放，ID 必须带学期作用域，否则在新学期重新保存班级结构时
+  // 会与上一学期的同名行撞主键，整批写入被拒。后缀规则与 cloneTermConfigRows 一致；
+  // 二维码沿用不带作用域的物理编号，保证门牌贴纸跨学期继续可用。
+  const termSuffix = term?.id ? `@${String(term.id).replace(/^TERM-/, "").slice(-13)}` : "";
   const pushClass = (classType, index, displayOrder) => {
     const suffix = classType === "experimental" ? `E${pad(index)}` : pad(index);
-    const classId = `CLS-${division.stageId}-${grade.grade}-${suffix}`;
-    const roomId = `ROOM-${division.stageId}-${grade.grade}-${suffix}`;
+    const physicalRoomId = `ROOM-${division.stageId}-${grade.grade}-${suffix}`;
+    const classId = `CLS-${division.stageId}-${grade.grade}-${suffix}${termSuffix}`;
+    const roomId = `${physicalRoomId}${termSuffix}`;
     const className =
       classType === "experimental"
         ? `${grade.name}实验${index}班`
@@ -1068,9 +1080,10 @@ function buildClassAndRoomRows(division, grade, options = {}) {
       name: catalogRoomName,
       roomType: "homeroom",
       capacity: 1,
-      qrCode: `ROOM:${roomId}`,
-      displayKey: `screen-${roomId.toLowerCase()}`,
+      qrCode: `ROOM:${physicalRoomId}`,
+      displayKey: `screen-${physicalRoomId.toLowerCase()}`,
       active: true,
+      sourceRoomId: physicalRoomId,
     });
   };
 

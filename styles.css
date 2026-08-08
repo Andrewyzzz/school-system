@@ -7695,3 +7695,68 @@ body.dialog-open { overflow: hidden; }
   .hr-owned-row { grid-template-columns: 1fr; gap: 2px; }
   .hr-owned-row em { justify-self: start; }
 }
+
+/* ---- 学期薪酬预算展示（仅呈现执行情况，不做超支拦截） ---- */
+.budget-panel { margin-bottom: 16px; }
+.budget-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+.budget-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px 16px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.budget-card.is-total { background: var(--surface-muted, #f7f8fa); }
+.budget-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.budget-card-head strong { font-size: 15px; }
+.budget-card-head em {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--muted);
+}
+.budget-amount { font-size: 22px; font-weight: 600; line-height: 1.2; }
+.budget-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.budget-meta span { display: flex; justify-content: space-between; gap: 6px; }
+.budget-meta b { font-weight: 600; color: var(--text); }
+.budget-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+.budget-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--brand, #3370ff);
+  transition: width 0.3s ease;
+}
+/* 执行率偏高只做视觉提示，不阻断任何操作 */
+.budget-bar.is-warning i { background: #f0a020; }
+.budget-bar.is-over i { background: #d83931; }
+.budget-empty {
+  padding: 20px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+@media (max-width: 720px) {
+  .budget-grid { grid-template-columns: 1fr; padding: 12px; }
+}

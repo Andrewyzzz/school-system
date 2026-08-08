@@ -42,14 +42,19 @@ export const DEFAULT_PAYROLL_RULES = {
       scope: "all",
       minimumWage: 2520,
     },
-    // 校龄津贴：按岗位类别取不同公式（制度中教师/生活教师/司机/食堂四套并存）
-    // tiered：≤tier1Years 按 校龄×tier1Rate；超出按 tier2Base+(校龄-tier1Years)×tier2Rate；统一封顶 cap
-    // flat：校龄×flatRate，封顶 cap
+    // 校龄津贴（制度第二章各岗位方案「校龄津贴」条）。校龄取实数：进校满一年才算一年。
+    //   专任教师、校医：3 年及以内 校龄×100；3 年以上 300+(校龄-3)×50；封顶 500 元/月
+    //   生活教师：      校龄×50，封顶 300 元/月
+    //   司机：          校龄×20，封顶 500 元/月
+    //   食堂等后勤职工：制度未设校龄津贴（工资=基本+岗位+考核+加班+住房），故不列
+    // tiered：≤tier1Years 按 校龄×tier1Rate；超出按 tier2Base+(校龄-tier1Years)×tier2Rate
+    // flat：  校龄×flatRate
+    // 两种模式都按 cap 封顶。以上参数均可在薪资配置页调整。
     seniorityRules: {
       teacher: { mode: "tiered", tier1Years: 3, tier1Rate: 100, tier2Base: 300, tier2Rate: 50, cap: 500 },
+      medical: { mode: "tiered", tier1Years: 3, tier1Rate: 100, tier2Base: 300, tier2Rate: 50, cap: 500 },
       lifeTeacher: { mode: "flat", flatRate: 50, cap: 300 },
       driver: { mode: "flat", flatRate: 20, cap: 500 },
-      canteen: { mode: "flat", flatRate: 20, cap: 500 },
     },
     housingAllowance: {
       // 专任教师：制度规定小初高统一 2100 元/月，不分骨干/年级长
@@ -306,7 +311,23 @@ export function normalizePayrollRules(rules = {}) {
     const value = Number(merged[key]);
     merged[key] = Number.isFinite(value) && value >= 0 ? value : defaults[key];
   });
+  pruneDeprecatedSchemeKeys(merged.teacherSalaryScheme, defaults.teacherSalaryScheme);
   return merged;
+}
+
+// 废弃配置清理。deepMerge 只会补齐、不会删除，库里早先写入的键会一直留着：
+//   seniorityAllowance —— 1-6 年阶梯表，计算侧从不读它，留着只会让人误以为改它有效
+//   seniorityRules 里制度未设的岗位类别（如食堂）—— 留着就有按此发钱的风险
+// 校龄类别由制度规定，学校不自定义，因此以默认方案为准裁剪是安全的。
+function pruneDeprecatedSchemeKeys(scheme, defaultScheme) {
+  if (!scheme || typeof scheme !== "object") return;
+  delete scheme.seniorityAllowance;
+  if (scheme.seniorityRules && typeof scheme.seniorityRules === "object") {
+    const allowed = new Set(Object.keys(defaultScheme.seniorityRules || {}));
+    Object.keys(scheme.seniorityRules).forEach((category) => {
+      if (!allowed.has(category)) delete scheme.seniorityRules[category];
+    });
+  }
 }
 
 function numberFromTeacherId(teacher = {}) {
@@ -324,6 +345,82 @@ const LEGACY_QUALIFICATION_ALIASES = {
 
 export function normalizeQualificationGrade(grade = "") {
   return LEGACY_QUALIFICATION_ALIASES[grade] || grade || "third";
+}
+
+// ---------------------------------------------------------------------------
+// 档位中文名：工资单的计算口径要给人看，不能把 third、primaryCoreHigh 这类
+// 内部枚举直接印在明细上。命名沿用《深圳市富源学校薪酬制度》的措辞。
+// 前端展示统一读这里，避免同一个枚举在前后端各有一套译名。
+// ---------------------------------------------------------------------------
+export const QUALIFICATION_GRADE_LABELS = {
+  seniorProfessor: "正高级教师",
+  seniorTeacher: "高级教师",
+  first: "一级教师",
+  second: "二级教师",
+  third: "三级教师",
+  ungraded: "未评级",
+};
+
+export const ASSESSMENT_BAND_LABELS = {
+  high: "高中专任",
+  middle: "初中专任",
+  primaryCoreHigh: "小学高段核心",
+  primaryCoreLow: "小学低段核心",
+  primarySpecial: "小学艺体信息心理",
+};
+
+// 考核档与学段绑定：小学老师不可能是"高中专任"，制度上考核工资标准本就按学段划分。
+// 前端下拉按此收敛可选项，后端保存时按此校验，避免把老师配成跨学段的档位。
+export const ASSESSMENT_BANDS_BY_STAGE = {
+  high: ["high"],
+  middle: ["middle"],
+  primary: ["primaryCoreHigh", "primaryCoreLow", "primarySpecial"],
+};
+
+/** 该学段允许的考核档；学段未知时不做限制，交由调用方决定（避免挡住行政后勤等无学段人员）。 */
+export function assessmentBandsForStage(stageId) {
+  return ASSESSMENT_BANDS_BY_STAGE[String(stageId || "")] || Object.keys(ASSESSMENT_BAND_LABELS);
+}
+
+export function isAssessmentBandAllowedForStage(band, stageId) {
+  return assessmentBandsForStage(stageId).includes(String(band || ""));
+}
+
+export const HOUSING_TIER_LABELS = {
+  teacher: "专任教师",
+  chief: "首席",
+  backboneOrGradeHead: "骨干/年级主任",
+  middleManager: "中层干部",
+  otherAdmin: "其他行政人员",
+};
+
+export const DEGREE_LABELS = {
+  "": "本科及以下",
+  bachelor: "本科",
+  master: "硕士",
+  doctor: "博士",
+};
+
+// 没有登记译名时原样返回，至少不会显示成 undefined
+function labelOf(map, key, fallback = "") {
+  const value = String(key ?? "");
+  return map[value] || fallback || value;
+}
+
+export function qualificationGradeLabel(grade) {
+  return labelOf(QUALIFICATION_GRADE_LABELS, normalizeQualificationGrade(grade));
+}
+
+export function assessmentBandLabel(band) {
+  return labelOf(ASSESSMENT_BAND_LABELS, band);
+}
+
+export function housingTierLabel(tier) {
+  return labelOf(HOUSING_TIER_LABELS, tier || "teacher");
+}
+
+export function degreeLabel(degree) {
+  return labelOf(DEGREE_LABELS, degree, "本科及以下");
 }
 
 // 只按【职称】判档，学历不参与（博士/硕士走 degreeAllowance）
@@ -349,10 +446,44 @@ export function degreeFromTeacher(teacher = {}) {
   return "";
 }
 
-function schoolYearsFromHiredAt(hiredAt = "", fallback = 1) {
-  const year = Number.parseInt(String(hiredAt).slice(0, 4), 10);
-  if (!Number.isFinite(year)) return fallback;
-  return Math.max(1, Math.min(12, 2026 - year));
+/**
+ * 由入职日期推算校龄。制度：「校龄时间计算都为实数，即进校满一年才能计算为一年校龄」。
+ *
+ * 因此必须比到月日而不是只比年份——2020-09-01 入职的人，在 2026-08 时只满 5 年，
+ * 到 9 月才满 6 年。只做年份相减会整整多算一年，直接多发钱。
+ *
+ * asOf 默认取当天：校龄随时间自然增长，不能写死某一年。
+ * 计算月度工资时应传入该月份，避免月初月末算出不同结果。
+ */
+function schoolYearsFromHiredAt(hiredAt = "", fallback = 1, asOf = new Date()) {
+  const text = String(hiredAt || "").trim();
+  const match = text.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+  if (!match) return fallback;
+  const hiredYear = Number(match[1]);
+  const hiredMonth = Number(match[2]);
+  const hiredDay = Number(match[3] || 1);
+
+  const ref = asOf instanceof Date ? asOf : new Date(asOf);
+  if (Number.isNaN(ref.getTime())) return fallback;
+  const refYear = ref.getFullYear();
+  const refMonth = ref.getMonth() + 1;
+  const refDay = ref.getDate();
+
+  let years = refYear - hiredYear;
+  // 今年的入职纪念日还没到，说明差一点才满整年
+  if (refMonth < hiredMonth || (refMonth === hiredMonth && refDay < hiredDay)) years -= 1;
+  // 不满一年记 0：制度规定满一年才算一年，未满不计校龄津贴
+  return Math.max(0, years);
+}
+
+// 结算月的月末作为校龄参照点：同一个月内算出的校龄必须一致，
+// 否则月初生成工资单和月末重算会得出不同金额。
+function referenceDateForMonth(month = "") {
+  const match = String(month || "").match(/^(\d{4})-(\d{2})/);
+  if (!match) return new Date();
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]);
+  return new Date(year, monthIndex, 0); // 第 0 天 = 上个月最后一天 = 本月月末
 }
 
 function defaultAssessmentBand(teacher = {}) {
@@ -542,7 +673,7 @@ function baseSalaryComponent(profile, scheme) {
   const amount = Number(scheme.baseSalaryByQualification?.[grade] || 0);
   return {
     name: "基本工资",
-    basis: `职称档：${grade}`,
+    basis: `职称档：${qualificationGradeLabel(grade)}`,
     amount: roundMoney(amount),
     category: "fixed",
   };
@@ -576,8 +707,8 @@ function assessmentComponent(teacher, profile, scheme, monthlyAssessment = null)
   const hasOverride = rawAmount !== null && rawAmount !== undefined && rawAmount !== "" && Number.isFinite(Number(rawAmount));
   const amount = hasOverride ? Number(rawAmount) : standard * rate;
   const basis = hasOverride
-    ? `考核档 ${band}，按考核结果核定金额`
-    : `考核档 ${band}（标准 ${standard} 元）× ${gradeCfg.label} ${rate}`;
+    ? `考核档 ${assessmentBandLabel(band)}，按考核结果核定金额`
+    : `考核档 ${assessmentBandLabel(band)}（标准 ${standard} 元）× ${gradeCfg.label} ${rate}`;
   return {
     name: "考核工资",
     basis,
@@ -619,7 +750,13 @@ export function seniorityAllowanceFor(years, rule = {}) {
 
 function seniorityComponent(profile, scheme) {
   const category = profile.seniorityCategory || "teacher";
-  const rule = scheme.seniorityRules?.[category] || scheme.seniorityRules?.teacher || {};
+  const rule = scheme.seniorityRules?.[category];
+  // 没有配置规则的岗位类别不发校龄津贴——制度只给专任教师、校医、生活教师、
+  // 司机设了这一项，后勤职工没有。此处绝不能回退到教师规则：那会给不该拿的人
+  // 按 100 元/年发钱，且金额越算越多不易察觉。
+  if (!rule) {
+    return { name: "校龄工资", basis: "该岗位类别未设校龄津贴", amount: 0, category: "fixed" };
+  }
   const { amount, basis } = seniorityAllowanceFor(profile.schoolYears, rule);
   return {
     name: "校龄工资",
@@ -633,7 +770,7 @@ function housingComponent(profile, scheme) {
   const tier = profile.housingTier || "teacher";
   return {
     name: "住房补贴",
-    basis: `住房补贴档：${tier}`,
+    basis: `住房补贴档：${housingTierLabel(tier)}`,
     amount: Number(scheme.housingAllowance?.[tier] || 0),
     category: "allowance",
   };
@@ -807,8 +944,15 @@ export function calculateDedicatedTeacherPayroll({
     if (hrFacts.titleGrade) profile.qualificationGrade = hrFacts.titleGrade;
     if (hrFacts.degree !== undefined && hrFacts.degree !== null) profile.degree = hrFacts.degree;
     if (hrFacts.roles) profile.roles = { ...profile.roles, ...hrFacts.roles };
-    // 校龄按入职日期推算，不再手工维护，避免与人事档案不一致
-    if (hrFacts.hiredAt) profile.schoolYears = schoolYearsFromHiredAt(hrFacts.hiredAt, profile.schoolYears);
+    // 校龄按入职日期推算，不再手工维护，避免与人事档案不一致。
+    // 参照点取结算月月末，保证同一个月无论哪天生成工资单，算出的校龄都一样。
+    if (hrFacts.hiredAt) {
+      profile.schoolYears = schoolYearsFromHiredAt(
+        hrFacts.hiredAt,
+        profile.schoolYears,
+        referenceDateForMonth(month),
+      );
+    }
     // 试用期折算由人事状态推导：试用期 80%，其余全额
     if (hrFacts.status) profile.probationRate = hrFacts.status === "probation" ? 0.8 : 1;
   }

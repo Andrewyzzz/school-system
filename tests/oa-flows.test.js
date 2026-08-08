@@ -112,7 +112,12 @@ function leaveForm(overrides = {}) {
           totalBudget: 1000000,
           payoutRatio: 90,
           reserveRatio: 20,
-          breakdown: "小学部,300000",
+          // 分部门明细已改为四个结构化口径（v2），此处各口径之和刻意配平，
+          // 让断言只被"比例之和不为 100%"这一条规则命中
+          budget_primary: 400000,
+          budget_middle: 300000,
+          budget_high: 200000,
+          budget_headquarters: 100000,
           reason: "测试",
         },
       }),

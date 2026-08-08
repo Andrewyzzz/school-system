@@ -10,11 +10,46 @@
 //   本模块承载请假、加班、补卡、调课以及学期初各类确认事项等通用审批，审批结果本身即为结论。
 // ---------------------------------------------------------------------------
 
+// budget.js 只依赖 financeScope.js（两者都不反向依赖本模块），直接引入不构成循环
+import { BUDGET_SCOPE_FIELDS, applyTermBudgetFromApproval, ensureBudgetStore } from "./budget.js";
+
 function httpError(statusCode, message, details = null) {
   const error = new Error(message);
   error.statusCode = statusCode;
   if (details) error.details = details;
   return error;
+}
+
+// 审批单指定的学期：按学期名精确匹配，匹配不到落到当前学期。
+// 学期初编预算时申请单上写的就是即将开始的那个学期，通常已经建好。
+function resolveRequestTerm(db, termName) {
+  const terms = db.terms || [];
+  const wanted = String(termName || "").trim();
+  return terms.find((item) => item.name === wanted) || terms.find((item) => item.current) || terms[0] || null;
+}
+
+// 整单通过后落地的业务数据。目前只有预算；后续新增按 templateKey 分支。
+function applyApprovedRequestEffects(db, request, account, actorName) {
+  if (request.templateKey !== "budget_confirm") return;
+  const term = resolveRequestTerm(db, request.formData?.termName);
+  if (!term) return;
+  const amounts = {};
+  BUDGET_SCOPE_FIELDS.forEach((field) => {
+    amounts[field.scopeId] = Number(request.formData?.[field.key] || 0);
+  });
+  const written = applyTermBudgetFromApproval(db, {
+    termId: term.id,
+    termName: term.name,
+    amounts,
+    requestId: request.id,
+    actorName,
+  });
+  request.appliedResult = {
+    type: "term_budget",
+    termId: term.id,
+    termName: term.name,
+    scopes: written.map((row) => ({ scope: row.scope, scopeName: row.scopeName, amount: row.amount })),
+  };
 }
 
 function nowIso() {
@@ -40,6 +75,7 @@ function ensureCollections(db) {
   if (!Array.isArray(db.oaRequests)) db.oaRequests = [];
   if (!Array.isArray(db.oaTemplates)) db.oaTemplates = [];
   if (!Array.isArray(db.notifications)) db.notifications = [];
+  ensureBudgetStore(db);
   return db;
 }
 
@@ -49,7 +85,11 @@ export function ensureOaTemplates(db) {
   ensureCollections(db);
   let changed = false;
   OA_TEMPLATES.forEach((seed, index) => {
-    if (db.oaTemplates.some((item) => item.key === seed.key)) return;
+    const existing = db.oaTemplates.find((item) => item.key === seed.key);
+    if (existing) {
+      if (upgradeTemplateSchema(existing, seed)) changed = true;
+      return;
+    }
     db.oaTemplates.push({
       ...JSON.parse(JSON.stringify(seed)),
       status: "active",
@@ -61,6 +101,21 @@ export function ensureOaTemplates(db) {
     changed = true;
   });
   return changed;
+}
+
+// 表单字段是代码与数据之间的契约：审批通过后的落地逻辑按字段 key 取值，
+// 字段结构改了而库内模板还是旧版，申请就会填不出正确的数据。
+// 因此内置模板提升 schemaVersion 时强制同步 formFields，但不动 steps ——
+// 审批流程是学校可以 DIY 的，升级不该把人家改过的审批线路重置掉。
+function upgradeTemplateSchema(existing, seed) {
+  const seedVersion = Number(seed.schemaVersion || 1);
+  const currentVersion = Number(existing.schemaVersion || 1);
+  if (seedVersion <= currentVersion) return false;
+  existing.formFields = JSON.parse(JSON.stringify(seed.formFields || []));
+  existing.schemaVersion = seedVersion;
+  existing.updatedAt = nowIso();
+  existing.updatedByName = "系统升级";
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,13 +275,20 @@ export const OA_TEMPLATES = [
     icon: "📊",
     category: "学期事项",
     description: "学期初薪酬总额预算方案的审议与审批",
+    // v2：分部门明细由自由文本改为四个结构化口径，审批通过后自动落地为学期预算
+    schemaVersion: 2,
     applicantRoles: ["finance", "hr", "system_admin"],
+    // 分部门明细拆成四个结构化口径，与四个财务账号的管辖范围一一对应：
+    // 审批通过后直接写入本学期预算，财务侧只读展示，无需人工再录一遍。
     formFields: [
       { key: "termName", label: "适用学期", type: "text", required: true },
       { key: "totalBudget", label: "薪酬总额预算（元）", type: "number", required: true },
       { key: "payoutRatio", label: "发放比例（%）", type: "number", required: true, hint: "制度规定原则上 90% 用于薪酬发放" },
       { key: "reserveRatio", label: "预留比例（%）", type: "number", required: true, hint: "预留作学期专项奖金" },
-      { key: "breakdown", label: "分部门预算明细", type: "textarea", required: true, hint: "每行一条，格式：部门,预算金额" },
+      { key: "budget_primary", label: "小学部预算（元）", type: "number", required: true },
+      { key: "budget_middle", label: "初中部预算（元）", type: "number", required: true },
+      { key: "budget_high", label: "高中部预算（元）", type: "number", required: true },
+      { key: "budget_headquarters", label: "总校行政后勤预算（元）", type: "number", required: true, hint: "行政、后勤、教辅职员工薪酬" },
       { key: "reason", label: "编制说明", type: "textarea", required: true },
     ],
     steps: [
@@ -491,6 +553,16 @@ function validateBusinessRules(templateKey, formData) {
     if (Math.abs(total - 100) > 0.01) {
       throw httpError(400, `发放比例与预留比例之和应为 100%，当前为 ${total}%`);
     }
+    // 四个口径之和必须等于总额，否则预算落地后各部合计对不上总校报的数
+    const parts = BUDGET_SCOPE_FIELDS.map((field) => Number(formData[field.key] || 0));
+    const partsSum = parts.reduce((sum, value) => sum + value, 0);
+    const totalBudget = Number(formData.totalBudget || 0);
+    if (Math.abs(partsSum - totalBudget) > 0.01) {
+      throw httpError(
+        400,
+        `各口径预算之和应等于薪酬总额预算 ${totalBudget.toLocaleString("zh-CN")} 元，当前为 ${partsSum.toLocaleString("zh-CN")} 元`,
+      );
+    }
   }
 }
 
@@ -510,7 +582,7 @@ function buildSummary(template, formData) {
     case "lesson_rule_confirm":
       return `${formData.termName} · ${formData.ruleScope}`;
     case "budget_confirm":
-      return `${formData.termName} · 总额 ${Number(formData.totalBudget).toLocaleString("zh-CN")} 元`;
+      return `${formData.termName} · 总额 ${Number(formData.totalBudget).toLocaleString("zh-CN")} 元（分 ${BUDGET_SCOPE_FIELDS.length} 个口径）`;
     default:
       return String(formData.subject || template.name);
   }
@@ -753,6 +825,9 @@ export function actOnOaRequest(db, requestId, action, account, input = {}) {
   request.status = "approved";
   request.completedAt = now;
   request.updatedAt = now;
+  // 整单通过才落地业务数据：预算写入放在这里而不是某一步通过时，
+  // 避免人事复核过了但总校还没批就已经改了预算。
+  applyApprovedRequestEffects(db, request, account, actorName);
   request.timeline.push({
     action: "completed",
     actionLabel: "审批完成",

@@ -29,7 +29,10 @@
         </form>
         <div class="demo-login-grid" aria-label="测试账号">
           <button class="ghost-button" data-demo-login="teacher0003" type="button">老师账号</button>
-          <button class="ghost-button" data-demo-login="finance" type="button">财务账号</button>
+          <button class="ghost-button" data-demo-login="finance" type="button">总校财务</button>
+          <button class="ghost-button" data-demo-login="finance_primary" type="button">小学部财务</button>
+          <button class="ghost-button" data-demo-login="finance_middle" type="button">初中部财务</button>
+          <button class="ghost-button" data-demo-login="finance_high" type="button">高中部财务</button>
           <button class="ghost-button" data-demo-login="admin" type="button">教研所账号</button>
           <button class="ghost-button" data-demo-login="sysadmin" type="button">行政管理</button>
           <button class="ghost-button" data-demo-login="hr" type="button">人事账号</button>
@@ -1516,16 +1519,27 @@
               <small>财务锁定工资</small>
             </article>
             <article class="metric">
-              <span>全校应发</span>
+              <span id="financeGrossLabel">应发合计</span>
               <strong id="financeGrossTotal">¥0</strong>
-              <small>当前试运行工资总额</small>
+              <small id="financeGrossHint">当前范围工资总额</small>
             </article>
             <article class="metric">
-              <span>全校实发</span>
+              <span id="financeNetLabel">实发合计</span>
               <strong id="financeNetTotal">¥0</strong>
               <small>扣款和个税后</small>
             </article>
           </div>
+
+          <section class="panel budget-panel" id="financeBudgetPanel" aria-labelledby="financeBudgetTitle" hidden>
+            <div class="panel-heading">
+              <div>
+                <h2 id="financeBudgetTitle">本学期薪酬预算</h2>
+                <p id="financeBudgetSubtitle">预算由学期初「薪酬总额预算确认」审批确定，此处仅作执行情况展示，不限制发放。</p>
+              </div>
+              <span class="status-pill" id="financeBudgetSource">未编制</span>
+            </div>
+            <div class="budget-grid" id="financeBudgetGrid"></div>
+          </section>
 
           <section class="panel table-panel finance-group-panel" aria-labelledby="financeGroupTitle">
             <div class="panel-heading">
@@ -1661,6 +1675,17 @@
         </section>
 
         <section class="view" id="settlementView" aria-labelledby="settlementTitle">
+          <section class="panel budget-panel" id="settlementBudgetPanel" aria-labelledby="settlementBudgetTitle" hidden>
+            <div class="panel-heading">
+              <div>
+                <h2 id="settlementBudgetTitle">本学期薪酬预算</h2>
+                <p id="settlementBudgetSubtitle">预算由学期初「薪酬总额预算确认」审批确定，此处仅作执行情况展示，不限制发放。</p>
+              </div>
+              <span class="status-pill" id="settlementBudgetSource">未编制</span>
+            </div>
+            <div class="budget-grid" id="settlementBudgetGrid"></div>
+          </section>
+
           <section class="panel table-panel settlement-workspace-panel">
             <div class="panel-heading">
               <div>

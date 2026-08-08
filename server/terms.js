@@ -41,21 +41,42 @@ function startOfNaturalWeek(dateKey) {
   return addDays(dateKey, -offset);
 }
 
+// 把早于开学日的周起点整周顺延回学期内，修正历史脏数据。
+function clampWeekStartsToTerm(weekStarts, startDate, endDate) {
+  const result = {};
+  Object.entries(weekStarts || {}).forEach(([key, value]) => {
+    let week = String(value || "");
+    if (!week) return;
+    let guard = 0;
+    while (week < String(startDate) && guard < 60) {
+      const next = addDays(week, 7);
+      if (endDate && next > String(endDate)) break;
+      week = next;
+      guard += 1;
+    }
+    result[key] = week;
+  });
+  return result;
+}
+
 function normalizeTerm(term = {}, fallback = DEFAULT_TERMS[0]) {
+  const startDate = String(term.startDate || fallback.startDate || "2026-06-15");
+  const endDate = String(term.endDate || fallback.endDate || "2026-07-31");
+  const rawWeekStarts =
+    term.divisionWeekStarts && typeof term.divisionWeekStarts === "object" && !Array.isArray(term.divisionWeekStarts)
+      ? term.divisionWeekStarts
+      : fallback.divisionWeekStarts || {};
   return {
     id: String(term.id || fallback.id || DEFAULT_TERM_ID),
     name: String(term.name || fallback.name || "当前学期"),
     schoolYear: String(term.schoolYear || fallback.schoolYear || ""),
     semester: String(term.semester || fallback.semester || ""),
-    startDate: String(term.startDate || fallback.startDate || "2026-06-15"),
-    endDate: String(term.endDate || fallback.endDate || "2026-07-31"),
+    startDate,
+    endDate,
     settlementMonth: String(term.settlementMonth || fallback.settlementMonth || ""),
     status: String(term.status || fallback.status || "active"),
     current: Boolean(term.current),
-    divisionWeekStarts:
-      term.divisionWeekStarts && typeof term.divisionWeekStarts === "object" && !Array.isArray(term.divisionWeekStarts)
-        ? { ...term.divisionWeekStarts }
-        : { ...(fallback.divisionWeekStarts || {}) },
+    divisionWeekStarts: clampWeekStartsToTerm(rawWeekStarts, startDate, endDate),
   };
 }
 
@@ -136,12 +157,26 @@ export function termForMonth(db, month = "") {
   return overlapping[0]?.term || currentTerm(db);
 }
 
+// 学期首个教学周的周一：自然周的周一有可能早于开学日（例如 8/1 是周六，
+// 自然周周一会退到 7/27），那样排出来的课次会落在学期之外，导致月度结算
+// 归属错乱。此时顺延到学期内的第一个完整周。
+export function firstTeachingWeekStart(term) {
+  const startDate = term?.startDate || DEFAULT_TERMS[0].startDate;
+  const naturalStart = startOfNaturalWeek(startDate);
+  if (naturalStart >= String(startDate)) return naturalStart;
+  const nextWeek = addDays(naturalStart, 7);
+  const endDate = term?.endDate ? String(term.endDate) : "";
+  // 学期本身不足一周时退回自然周，避免算出超出学期结束日的周起点。
+  if (endDate && nextWeek > endDate) return naturalStart;
+  return nextWeek;
+}
+
 export function weekStartForDivision(term, division) {
   const divisionWeekStarts = term?.divisionWeekStarts || {};
   return (
     divisionWeekStarts[division?.id] ||
     divisionWeekStarts[division?.stageId] ||
-    startOfNaturalWeek(term?.startDate || DEFAULT_TERMS[0].startDate)
+    firstTeachingWeekStart(term)
   );
 }
 
@@ -182,8 +217,13 @@ export function naturalWeekStart(dateKey = DEFAULT_TERMS[0].startDate) {
   return startOfNaturalWeek(dateKey);
 }
 
-export function nextDivisionWeekStarts(startDate = DEFAULT_TERMS[0].startDate) {
-  const elementary = startOfNaturalWeek(startDate);
+// 入参兼容字符串（开学日）与学期对象；始终从学期内的首个教学周起算。
+export function nextDivisionWeekStarts(termOrStartDate = DEFAULT_TERMS[0].startDate) {
+  const term =
+    termOrStartDate && typeof termOrStartDate === "object"
+      ? termOrStartDate
+      : { startDate: termOrStartDate };
+  const elementary = firstTeachingWeekStart(term);
   return {
     elementary,
     middle: addDays(elementary, 7),

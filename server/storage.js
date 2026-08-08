@@ -5,11 +5,22 @@ import { loadDatabaseFromPostgres, persistDatabaseToPostgres, resetPostgresStore
 import { ensureHrData, seedHrData, teacherEligibility, findMonthlyAssessment } from "./hr.js";
 import { hashPassword, hashToken, verifyPassword } from "./auth.js";
 import {
+  financeScopeFor,
+  financeScopeLabel,
+  normalizeFinanceScope,
+  payrollScopeOfTeacher,
+} from "./financeScope.js";
+import {
+  assessmentBandLabel,
+  assessmentBandsForStage,
   calculateDedicatedTeacherPayroll,
   createDefaultPayrollRules,
   defaultTeacherSalaryProfile,
   deepMerge,
   ensureTeacherSalaryProfile,
+  housingTierLabel,
+  isAssessmentBandAllowedForStage,
+  qualificationGradeLabel,
   normalizePayrollRules,
 } from "./payroll.js";
 import {
@@ -320,13 +331,49 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       department: "系统管理",
       status: "active",
     },
+    // 财务分四摊：三个学部各管本部任课老师，总校财务管行政后勤人员。
+    // 沿用 finance 这个用户名做总校财务，避免既有登录与脚本失效。
     {
       id: "ACC-FINANCE",
       username: "finance",
       passwordHash: defaultPasswordHash,
       role: "finance",
+      financeScope: "headquarters",
       name: "张会计",
-      department: "财务处",
+      department: "财务处 · 总校",
+      status: "active",
+    },
+    {
+      id: "ACC-FINANCE-PRIMARY",
+      username: "finance_primary",
+      passwordHash: defaultPasswordHash,
+      role: "finance",
+      financeScope: "primary",
+      scopeStageIds: ["primary"],
+      name: "小学部会计",
+      department: "财务处 · 小学部",
+      status: "active",
+    },
+    {
+      id: "ACC-FINANCE-MIDDLE",
+      username: "finance_middle",
+      passwordHash: defaultPasswordHash,
+      role: "finance",
+      financeScope: "middle",
+      scopeStageIds: ["middle"],
+      name: "初中部会计",
+      department: "财务处 · 初中部",
+      status: "active",
+    },
+    {
+      id: "ACC-FINANCE-HIGH",
+      username: "finance_high",
+      passwordHash: defaultPasswordHash,
+      role: "finance",
+      financeScope: "high",
+      scopeStageIds: ["high"],
+      name: "高中部会计",
+      department: "财务处 · 高中部",
       status: "active",
     },
     {
@@ -619,6 +666,42 @@ const ACCOUNT_DISPLAY_RENAMES = [
   { role: "system_admin", fromName: ["系统管理员"], name: "行政管理" },
 ];
 
+// 财务分权升级（2026-08-08）：原先只有一个财务账号统管全校，现按三个学部 +
+// 总校拆成四个。存量库里的老 finance 账号补成总校财务（管行政后勤），
+// 三个学部财务账号若缺失则补建。幂等执行。
+function backfillFinanceScopeAccounts(db, defaultPasswordHash) {
+  let changed = false;
+  (db.accounts || [])
+    .filter((account) => account.role === "finance" && !account.financeScope)
+    .forEach((account) => {
+      account.financeScope = "headquarters";
+      if (account.department === "财务处") account.department = "财务处 · 总校";
+      changed = true;
+    });
+
+  const seeded = [
+    { id: "ACC-FINANCE-PRIMARY", username: "finance_primary", financeScope: "primary", name: "小学部会计", department: "财务处 · 小学部" },
+    { id: "ACC-FINANCE-MIDDLE", username: "finance_middle", financeScope: "middle", name: "初中部会计", department: "财务处 · 初中部" },
+    { id: "ACC-FINANCE-HIGH", username: "finance_high", financeScope: "high", name: "高中部会计", department: "财务处 · 高中部" },
+  ];
+  seeded.forEach((item) => {
+    if ((db.accounts || []).some((account) => account.id === item.id || account.username === item.username)) return;
+    // 老库没有明文口令可复用，沿用与其他种子账号一致的默认口令散列
+    const passwordHash =
+      defaultPasswordHash || (db.accounts || []).find((account) => account.role === "finance")?.passwordHash || "";
+    if (!passwordHash) return;
+    db.accounts.push({
+      ...item,
+      passwordHash,
+      role: "finance",
+      scopeStageIds: [item.financeScope],
+      status: "active",
+    });
+    changed = true;
+  });
+  return changed;
+}
+
 function normalizeAccountDisplayNames(db) {
   let changed = false;
   (db.accounts || []).forEach((account) => {
@@ -705,10 +788,51 @@ function dedupeTeacherAssignments(db) {
   return changed;
 }
 
+
+// 工资单快照里的计算口径曾直接拼内部枚举（职称档：third、考核档 primaryCoreHigh），
+// 印在工资条上看不懂。basis 只是说明文字、不含金额，规整成中文不影响任何金额与审计留痕。
+// 幂等：已是中文的行匹配不到，不会重复替换。
+const PAYROLL_BASIS_LABEL_PATTERNS = [
+  { prefix: "职称档：", label: qualificationGradeLabel },
+  { prefix: "住房补贴档：", label: housingTierLabel },
+  { prefix: "考核档 ", label: assessmentBandLabel },
+];
+
+function localizePayrollBasis(basis) {
+  let next = String(basis || "");
+  PAYROLL_BASIS_LABEL_PATTERNS.forEach(({ prefix, label }) => {
+    if (!next.startsWith(prefix)) return;
+    // 枚举只含 ASCII 字母，取到第一个非字母字符为止；已中文化时匹配不到
+    const rest = next.slice(prefix.length);
+    const match = rest.match(/^[A-Za-z]+/);
+    if (!match) return;
+    next = prefix + label(match[0]) + rest.slice(match[0].length);
+  });
+  return next;
+}
+
+function backfillPayrollBasisLabels(db) {
+  let changed = false;
+  (db.payrollDetails || []).forEach((detail) => {
+    (detail.rowsSnapshot || []).forEach((row) => {
+      const next = localizePayrollBasis(row.basis);
+      if (next !== row.basis) {
+        row.basis = next;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+
 export function normalizeDatabase(db) {
   let changed = normalizeAccountDisplayNames(db);
   if (backfillTermScopedRows(db)) changed = true;
   const defaults = createInitialData({ teacherCount: db.meta?.teacherCount || DEFAULT_TEACHER_COUNT });
+  if (backfillFinanceScopeAccounts(db, defaults.accounts.find((item) => item.id === "ACC-FINANCE")?.passwordHash)) {
+    changed = true;
+  }
+  if (backfillPayrollBasisLabels(db)) changed = true;
   const arrayKeys = [
     "stages",
     "subjects",
@@ -1469,7 +1593,7 @@ export function createAcademicTerm(db, options = {}, actorAccount = null) {
     divisionWeekStarts:
       options.divisionWeekStarts && typeof options.divisionWeekStarts === "object" && !Array.isArray(options.divisionWeekStarts)
         ? { ...options.divisionWeekStarts }
-        : nextDivisionWeekStarts(startDate),
+        : nextDivisionWeekStarts({ startDate, endDate }),
     createdAt: now,
     createdByAccountId: actorAccount?.id || "",
     createdByName: actorAccount?.name || "",
@@ -1716,6 +1840,9 @@ export function publicAccount(account, db) {
     teacherId: account.teacherId || null,
     teacher: account.role === "teacher" ? publicTeacherIdentity(teacher) : teacher,
     mustChangePassword: Boolean(account.mustChangePassword),
+    // 财务分权范围：前端据此调整"全校/本学部"这类措辞，权限仍以服务端为准
+    financeScope: financeScopeFor(account) || "",
+    financeScopeName: financeScopeLabel(financeScopeFor(account)),
   };
 }
 
@@ -2210,6 +2337,22 @@ export function updateTeacherSalaryProfile(db, teacherId, profilePatch = {}, act
     previousProfile,
     normalizeSalaryProfilePatch(profilePatch, previousProfile),
   );
+
+  // 考核档按学段划分，小学老师不可能是「高中专任」。前端下拉已按学段收敛，
+  // 这里再挡一道：接口直调、脚本批改、老库遗留的错配都要拦住。
+  if (
+    nextProfile.assessmentBand &&
+    nextProfile.assessmentBand !== previousProfile.assessmentBand &&
+    !isAssessmentBandAllowedForStage(nextProfile.assessmentBand, teacher.stageId)
+  ) {
+    const allowed = assessmentBandsForStage(teacher.stageId).map(assessmentBandLabel).join("、");
+    const error = new Error(
+      `${teacher.stageName || "该学段"}老师的考核档只能是：${allowed}，不能设为「${assessmentBandLabel(nextProfile.assessmentBand)}」`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
   teacher.salaryProfile = nextProfile;
   ensureTeacherSalaryProfile(teacher);
 
@@ -2377,8 +2520,12 @@ export function queryTeachers(db, query = {}, options = {}) {
   const month = String(query.month || "2026-06").trim();
   const strictGrade = String(query.strictGrade || "false") === "true";
   const includeFinance = options.includeFinance !== false;
+  // 财务分权：学部财务只统计本学部任课老师，总校财务只统计行政后勤人员。
+  // 过滤放在最前面，后面的分组汇总、应发合计等数字都自动收敛到本人范围。
+  const financeScope = normalizeFinanceScope(options.financeScope);
 
   const filtered = db.teachers.filter((teacher) => {
+    if (financeScope && payrollScopeOfTeacher(db, teacher.id) !== financeScope) return false;
     if (status && teacher.status !== status) return false;
     if (stageId && teacher.stageId !== stageId) return false;
     if (Number.isFinite(grade)) {
@@ -3260,12 +3407,33 @@ export function unlockTeacherPayrollDetail(db, teacherId, month = "2026-06", rea
   return teacherPayrollDetail(db, teacherId, month);
 }
 
+// 批量操作的名单收敛：不传名单时默认全校在职，财务账号收敛到本人范围；
+// 显式传了名单则逐个校验，越权直接报错而不是静默跳过——财务需要知道自己点错了。
+function batchTeacherIdsInScope(db, options, actorAccount, actionLabel) {
+  const scope = financeScopeFor(actorAccount);
+  if (Array.isArray(options.teacherIds)) {
+    if (scope) {
+      const outsiders = options.teacherIds.filter((id) => payrollScopeOfTeacher(db, id) !== scope);
+      if (outsiders.length) {
+        const error = new Error(
+          `${actionLabel}失败：${outsiders.length} 位人员不属于${financeScopeLabel(scope)}，无权处理`,
+        );
+        error.statusCode = 403;
+        throw error;
+      }
+    }
+    return options.teacherIds;
+  }
+  return db.teachers
+    .filter((teacher) => teacher.status === "active")
+    .filter((teacher) => !scope || payrollScopeOfTeacher(db, teacher.id) === scope)
+    .map((teacher) => teacher.id);
+}
+
 export function generatePayrollBatch(db, options = {}, actorAccount = null) {
   const month = String(options.month || "2026-06");
   assertMonthTermEditable(db, month, "批量生成薪资");
-  const teacherIds = Array.isArray(options.teacherIds)
-    ? options.teacherIds
-    : db.teachers.filter((teacher) => teacher.status === "active").map((teacher) => teacher.id);
+  const teacherIds = batchTeacherIdsInScope(db, options, actorAccount, "批量生成薪资");
   const now = new Date().toISOString();
   const results = [];
 
@@ -3309,9 +3477,7 @@ export function generatePayrollBatch(db, options = {}, actorAccount = null) {
 export function lockPayrollBatch(db, options = {}, actorAccount = null) {
   const month = String(options.month || "2026-06");
   assertMonthTermEditable(db, month, "批量锁定薪资");
-  const teacherIds = Array.isArray(options.teacherIds)
-    ? options.teacherIds
-    : db.teachers.filter((teacher) => teacher.status === "active").map((teacher) => teacher.id);
+  const teacherIds = batchTeacherIdsInScope(db, options, actorAccount, "批量锁定薪资");
   const now = new Date().toISOString();
   const results = [];
 
@@ -3366,7 +3532,14 @@ export function exportPayrollDetails(db, options = {}) {
   const stageId = String(options.stageId || "").trim();
   const grade = Number.parseInt(options.grade || "", 10);
   const search = String(options.search || "").trim().toLowerCase();
-  const details = payrollDetailsByFilter(db, { month, termId, stageId, grade, search });
+  const details = payrollDetailsByFilter(db, {
+    month,
+    termId,
+    stageId,
+    grade,
+    search,
+    financeScope: options.financeScope,
+  });
   const headers = [
     "学期",
     "月份",
@@ -3457,8 +3630,11 @@ function payrollDetailsByFilter(db, options = {}) {
     : Number.parseInt(options.grade || "", 10);
   const search = String(options.search || "").trim().toLowerCase();
   const status = String(options.status || "").trim();
+  // 财务分权：调用方传入本人范围后，导出与工资记录一并收敛，避免越权看到他部工资
+  const financeScope = normalizeFinanceScope(options.financeScope);
   return ensurePayrollDetails(db).filter((detail) => {
     if (detail.month !== month) return false;
+    if (financeScope && payrollScopeOfTeacher(db, detail.teacherId) !== financeScope) return false;
     if (termId && payrollDetailTerm(db, detail)?.id !== termId) return false;
     if (status && detail.status !== status) return false;
     const teacher = findTeacher(db, detail.teacherId);

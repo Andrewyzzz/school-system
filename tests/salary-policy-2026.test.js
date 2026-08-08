@@ -102,9 +102,59 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   // 生活教师：×50 封顶 300
   assert.equal(seniorityAllowanceFor(4, scheme.seniorityRules.lifeTeacher).amount, 200);
   assert.equal(seniorityAllowanceFor(10, scheme.seniorityRules.lifeTeacher).amount, 300, "生活教师封顶 300");
-  // 司机/食堂：×20 封顶 500
+  // 校医：与专任教师同一公式（制度第二章·六·（四））
+  assert.equal(seniorityAllowanceFor(5, scheme.seniorityRules.medical).amount, 400);
+  // 司机：×20 封顶 500
   assert.equal(seniorityAllowanceFor(10, scheme.seniorityRules.driver).amount, 200);
-  assert.equal(seniorityAllowanceFor(30, scheme.seniorityRules.canteen).amount, 500);
+  assert.equal(seniorityAllowanceFor(30, scheme.seniorityRules.driver).amount, 500, "司机封顶 500");
+  // 食堂等后勤职工：制度未设校龄津贴（工资=基本+岗位+考核+加班+住房），不应有规则
+  assert.equal(scheme.seniorityRules.canteen, undefined, "后勤职工不应有校龄津贴规则");
+}
+
+// -------------------------------------------- 校龄公式参数可配置，且改了要生效
+{
+  const teacher = baseTeacher();
+  // 校龄 5 年落在第二段：基线 300+(5-3)×50=400
+  const baseline = runPayroll({ teacher, profile: { schoolYears: 5 } });
+  assert.equal(amountOf(baseline, "校龄工资"), 400);
+
+  const cases = [
+    { patch: { tier2Rate: 80 }, expect: 460, why: "第二段单价可调" },
+    { patch: { tier2Base: 500 }, expect: 500, why: "第二段基数可调（600 超 500 封顶）" },
+    { patch: { cap: 350 }, expect: 350, why: "封顶可调" },
+    { patch: { tier1Years: 6 }, expect: 500, why: "分段年限可调：5 年落回第一段 5×100" },
+    { patch: { tier1Years: 6, tier1Rate: 60 }, expect: 300, why: "第一段单价可调" },
+  ];
+  cases.forEach(({ patch, expect, why }) => {
+    // 整份规则深拷贝后只改校龄参数，模拟财务在薪资配置页调整
+    const payrollRules = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
+    Object.assign(payrollRules.teacherSalaryScheme.seniorityRules.teacher, patch);
+    const result = runPayroll({ teacher, profile: { schoolYears: 5 }, payrollRules });
+    assert.equal(amountOf(result, "校龄工资"), expect, why);
+  });
+}
+
+// ------------------------------------ 未配置规则的岗位类别不发校龄津贴（不得回退到教师标准）
+{
+  const teacher = baseTeacher();
+  const result = runPayroll({
+    teacher,
+    profile: { schoolYears: 10, seniorityCategory: "canteen" },
+  });
+  // 金额为 0 的项不进工资单，所以这里断言"要么没有这一行、要么为 0"。
+  // 关键是绝不能回退到专任教师的 100 元/年——那会给不该拿的人发钱。
+  assert.equal(
+    amountOf(result, "校龄工资") ?? 0,
+    0,
+    "制度未设校龄津贴的岗位类别不应发放，更不能回退到专任教师标准",
+  );
+
+  // 同样条件下专任教师是有的，确认上面的 0 不是因为整块逻辑没跑
+  const teacherResult = runPayroll({
+    teacher,
+    profile: { schoolYears: 10, seniorityCategory: "teacher" },
+  });
+  assert.equal(amountOf(teacherResult, "校龄工资"), 500, "专任教师同条件下应有校龄津贴");
 }
 
 // -------------------------------------------------------------- 考核工资浮动
@@ -349,6 +399,54 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   assert.equal(kept.assessmentSalary.high, 1600, "同版本下学校自定义标准应保留");
   assert.equal(kept.probationRule.minimumWage, 2800, "同版本下最低工资自定义值应保留");
   assert.equal(kept.assessmentSalary.middle, 3280, "未自定义项仍取制度默认值");
+}
+
+// ------------------------------------------------ 校龄由入职日期自动推算（比到月日）
+{
+  const teacher = baseTeacher();
+  const seniorityBasis = (hiredAt, month) => {
+    const result = calculateDedicatedTeacherPayroll({
+      teacher: { ...teacher, salaryProfile: { seniorityCategory: "teacher", roles: {} } },
+      lessons: [],
+      month,
+      payrollRules: DEFAULT_PAYROLL_RULES,
+      hrFacts: { hiredAt },
+    });
+    return result.components.find((item) => item.name === "校龄工资")?.amount ?? 0;
+  };
+
+  // 制度：满一年才算一年。2020-09-01 入职的人，2026-08 只满 5 年，9 月才满 6 年。
+  // 只做年份相减会在 1 月就按 6 年发，整整多发 8 个月。
+  assert.equal(seniorityBasis("2020-09-01", "2026-08"), 400, "入职纪念日未到应仍按 5 年");
+  assert.equal(seniorityBasis("2020-09-01", "2026-09"), 450, "过了入职纪念日才升到 6 年");
+
+  // 同月内任何一天算出的结果必须一致（参照点取月末）
+  assert.equal(seniorityBasis("2020-09-15", "2026-09"), 450, "同月入职按整月算，月内结果稳定");
+
+  // 不满一年不计校龄津贴
+  assert.equal(seniorityBasis("2026-03-01", "2026-08"), 0, "入职不满一年不发校龄津贴");
+  assert.equal(seniorityBasis("2025-12-31", "2026-08"), 0, "差几个月满一年也不发");
+  assert.equal(seniorityBasis("2025-08-01", "2026-08"), 100, "刚满一年发一年");
+
+  // 校龄随年份自然增长，不能写死某一年
+  assert.equal(seniorityBasis("2020-09-01", "2027-09"), 500, "跨年后校龄应继续增长");
+
+  // 长校龄不被截断（金额由 cap 封顶，但校龄本身要算准）
+  assert.equal(seniorityBasis("2010-09-01", "2026-09"), 500, "16 年校龄按封顶 500 发");
+
+  // 入职日期缺失或非法时，回退到档案里的值而不是崩掉
+  const fallback = calculateDedicatedTeacherPayroll({
+    teacher: { ...teacher, salaryProfile: { schoolYears: 4, seniorityCategory: "teacher", roles: {} } },
+    lessons: [],
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { hiredAt: "" },
+  });
+  assert.equal(
+    fallback.components.find((item) => item.name === "校龄工资")?.amount,
+    350,
+    "入职日期缺失时应沿用档案里的校龄",
+  );
 }
 
 console.log("salary policy 2026 checks passed");

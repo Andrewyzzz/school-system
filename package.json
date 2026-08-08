@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server/server.js",
     "seed": "node server/seed.js",
-    "check": "node --check app.js && node --check server/auth.js && node --check server/payroll.js && node --check server/importTeachers.js && node --check server/scheduling.js && node --check server/schedulingJobs.js && node --check server/schedulingJobWorker.js && node --check server/storage.js && node --check server/exportPostgresData.js && node --check server/seed.js && node --check server/server.js && node --check tests/phase1-production.test.js && node --check tests/postgres-export.test.js && node --check tests/scheduling-solver-benchmark.test.js && node --check tests/scheduling-jobs.test.js && node --check tests/cross-grade-scheduling.test.js && node --check tests/term-lifecycle.test.js && node --check scripts/load-test.js && node --check server/db/postgresStore.js && node --check server/security/pii.js && node --check tests/pii-encryption.test.js && node --check tests/postgres-store.test.js && node --check scripts/migrate-json-to-postgres.js && node --check server/hr.js && node --check tests/hr-m2.test.js && node --check tests/hr-flows.test.js && node --check tests/salary-policy-2026.test.js && node --check server/oa.js && node --check tests/oa-flows.test.js && node --check tests/multi-term-lifecycle.test.js",
+    "check": "node --check app.js && node --check server/auth.js && node --check server/payroll.js && node --check server/importTeachers.js && node --check server/scheduling.js && node --check server/schedulingJobs.js && node --check server/schedulingJobWorker.js && node --check server/storage.js && node --check server/exportPostgresData.js && node --check server/seed.js && node --check server/server.js && node --check tests/phase1-production.test.js && node --check tests/postgres-export.test.js && node --check tests/scheduling-solver-benchmark.test.js && node --check tests/scheduling-jobs.test.js && node --check tests/cross-grade-scheduling.test.js && node --check tests/term-lifecycle.test.js && node --check scripts/load-test.js && node --check server/db/postgresStore.js && node --check server/security/pii.js && node --check tests/pii-encryption.test.js && node --check tests/postgres-store.test.js && node --check scripts/migrate-json-to-postgres.js && node --check server/hr.js && node --check tests/hr-m2.test.js && node --check tests/hr-flows.test.js && node --check tests/salary-policy-2026.test.js && node --check server/oa.js && node --check tests/oa-flows.test.js && node --check tests/multi-term-lifecycle.test.js && node --check server/financeScope.js && node --check server/budget.js && node --check tests/finance-scope-budget.test.js && node --check tests/finance-isolation.test.js && node --check tests/no-raw-enum-labels.test.js",
     "test:phase1": "node tests/phase1-production.test.js",
     "test:cross-grade": "node tests/cross-grade-scheduling.test.js",
     "test:term-lifecycle": "node tests/term-lifecycle.test.js",
@@ -21,7 +21,10 @@
     "test:hr-flows": "node tests/hr-flows.test.js",
     "test:salary-policy": "node tests/salary-policy-2026.test.js",
     "test:oa": "node tests/oa-flows.test.js",
-    "test:multi-term": "node tests/multi-term-lifecycle.test.js"
+    "test:multi-term": "node tests/multi-term-lifecycle.test.js",
+    "test:finance-scope": "node tests/finance-scope-budget.test.js",
+    "test:finance-isolation": "node tests/finance-isolation.test.js",
+    "test:labels": "node tests/no-raw-enum-labels.test.js"
   },
   "dependencies": {
     "pg": "^8.22.0"

@@ -5,6 +5,17 @@ import { fileURLToPath } from "node:url";
 import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAttendance } from "./attendance.js";
 import { createToken, verifyPasswordAsync } from "./auth.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
+import { queryTermBudget } from "./budget.js";
+import {
+  canFinanceActOnTeacher,
+  filterOrgUnitsByFinanceScope,
+  filterPayrollRulesByFinanceScope,
+  filterStageRowsByFinanceScope,
+  filterTeachersByFinanceScope,
+  financeScopeFor,
+  financeScopeLabel,
+  payrollScopeOfTeacher,
+} from "./financeScope.js";
 import {
   cancelScheduleGenerationJob,
   getScheduleGenerationJob,
@@ -730,7 +741,7 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/payroll-rules") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, { payrollRules: db.payrollRules });
+      sendJson(res, 200, { payrollRules: filterPayrollRulesByFinanceScope(auth.account, db.payrollRules) });
       return;
     }
 
@@ -748,7 +759,10 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin", "classroom"]);
       if (!auth) return;
       const termId = url.searchParams.get("termId") || queryTerms(db).currentTerm.id;
-      sendJson(res, 200, { rooms: roomsForTerm(db, termId), termId });
+      sendJson(res, 200, {
+        rooms: filterStageRowsByFinanceScope(auth.account, roomsForTerm(db, termId)),
+        termId,
+      });
       return;
     }
 
@@ -1098,6 +1112,7 @@ async function handleApi(req, res, db, url) {
       if (!auth) return;
       sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams), {
         includeFinance: ["finance", "system_admin"].includes(auth.account.role),
+        financeScope: financeScopeFor(auth.account),
       }));
       return;
     }
@@ -1146,6 +1161,13 @@ async function handleApi(req, res, db, url) {
 
       if (!canReadTeacher(auth.account, teacherId)) {
         sendError(res, 403, "只能访问本人教师数据");
+        return;
+      }
+
+      // 财务分权：学部财务只能碰本学部任课老师，总校财务只能碰行政后勤人员。
+      // 放在教师子路由的唯一入口处，读和写一并拦住，避免逐个分支各写一遍。
+      if (!canFinanceActOnTeacher(db, auth.account, teacherId)) {
+        sendError(res, 403, `只能处理${financeScopeLabel(financeScopeFor(auth.account))}的薪资数据`);
         return;
       }
 
@@ -1385,14 +1407,29 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/payroll/export") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, exportPayrollDetails(db, Object.fromEntries(url.searchParams)));
+      sendJson(res, 200, exportPayrollDetails(db, {
+        ...Object.fromEntries(url.searchParams),
+        financeScope: financeScopeFor(auth.account),
+      }));
+      return;
+    }
+
+    // 学期薪酬预算：仅展示，不对发放做限制。财务只看本人口径，行政管理看全部四个。
+    if (req.method === "GET" && url.pathname === "/api/payroll/budget") {
+      const auth = requireAuth(req, res, db, ["finance", "system_admin", "admin", "hr"]);
+      if (!auth) return;
+      const termId = String(url.searchParams.get("termId") || queryTerms(db).currentTerm.id);
+      sendJson(res, 200, queryTermBudget(db, termId, financeScopeFor(auth.account) || ""));
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/history") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, queryPayrollHistory(db, Object.fromEntries(url.searchParams)));
+      sendJson(res, 200, queryPayrollHistory(db, {
+        ...Object.fromEntries(url.searchParams),
+        financeScope: financeScopeFor(auth.account),
+      }));
       return;
     }
 
@@ -1404,7 +1441,7 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/hr/org-units") {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
         if (!auth) return;
-        sendJson(res, 200, { units: queryOrgUnits(db) });
+        sendJson(res, 200, { units: filterOrgUnitsByFinanceScope(auth.account, queryOrgUnits(db)) });
         return;
       }
 
