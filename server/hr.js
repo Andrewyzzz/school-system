@@ -2290,7 +2290,6 @@ export function teacherEligibility(db, teacherId) {
       status: "active",
       canLogin: true,
       inTeachingPool: true,
-      canAttend: true,
       payroll: "normal",
       leftAt: "",
     };
@@ -2302,7 +2301,8 @@ export function teacherEligibility(db, teacherId) {
     canLogin: !["left", "suspended", "pending_onboard"].includes(status),
     // 离职中冻结新增排课；已离职/停用/待入职不进任课池
     inTeachingPool: !["left", "suspended", "pending_onboard", "offboarding"].includes(status),
-    canAttend: !["left", "suspended", "pending_onboard"].includes(status),
+    // canAttend（能否签到）随扫码签到一起去掉了：唯一的消费方是签到接口。
+    // 「这个人的课算不算钱」由下面的 payroll 回答，不需要两个字段说同一件事
     // normal 正常 / frozen 冻结需人工裁定 / until-left 截止离职日 / blocked 不计薪
     payroll:
       status === "suspended"

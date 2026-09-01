@@ -30,6 +30,14 @@ function resolveRequestTerm(db, termName) {
 
 // 整单通过后落地的业务数据。目前只有预算；后续新增按 templateKey 分支。
 function applyApprovedRequestEffects(db, request, account, actorName) {
+  if (request.templateKey === "payroll_approval") {
+    applyPayrollApprovalEffect(db, request, account, actorName);
+    return;
+  }
+  if (request.templateKey === "ledger_unlock") {
+    applyLedgerUnlockEffect(db, request, account, actorName);
+    return;
+  }
   if (request.templateKey !== "budget_confirm") return;
   const term = resolveRequestTerm(db, request.formData?.termName);
   if (!term) return;
@@ -50,6 +58,72 @@ function applyApprovedRequestEffects(db, request, account, actorName) {
     termName: term.name,
     scopes: written.map((row) => ({ scope: row.scope, scopeName: row.scopeName, amount: row.amount })),
   };
+}
+
+// 账套解锁审批通过 → 真的把账套解开（验收 8.10）
+//
+// 解锁只能走这条路：账套接口上**没有**直接解锁的动作，界面上也不画解锁按钮。
+// 谁锁的谁就能解开，锁定就形同虚设——而锁定的意义正是「这个月的账定案了」。
+const LEDGER_TYPE_BY_LABEL = {
+  人事账套: "hr",
+  排课课时账套: "scheduling",
+  薪资财务账套: "payroll",
+};
+
+function applyLedgerUnlockEffect(db, request, account, actorName) {
+  const handler = sideEffectHandlers.unlockApprovedLedger;
+  if (!handler) return;
+  const type = LEDGER_TYPE_BY_LABEL[request.formData?.ledgerType] || "";
+  if (!type) throw httpError(400, `账套类型无法识别：${request.formData?.ledgerType}`);
+  request.appliedResult = handler(db, {
+    type,
+    period: String(request.formData?.period || "").trim(),
+    reason: String(request.formData?.reason || ""),
+    requestId: request.id,
+    actorName,
+    account,
+  });
+}
+
+// 薪资审批通过 → 锁定该月工资并生成台账（验收 3.13 / 3.14）
+//
+// 锁定动作放在整单通过之后，而不是财务复核那一步：人事过了、校领导还没批就把
+// 工资锁死发出去，等于审批流形同虚设。
+function applyPayrollApprovalEffect(db, request, account, actorName) {
+  const handler = sideEffectHandlers.lockApprovedPayroll;
+  if (!handler) return;
+  const result = handler(db, {
+    month: String(request.formData?.month || "").trim(),
+    scope: String(request.formData?.scope || "").trim(),
+    requestId: request.id,
+    actorName,
+    account,
+  });
+  const locked = result?.lockedCount || 0;
+  const skipped = result?.skippedCount || 0;
+  request.appliedResult = {
+    type: "payroll_ledger",
+    month: result?.month || "",
+    scope: result?.scope || "",
+    lockedCount: locked,
+    skippedCount: skipped,
+    failureReasons: result?.failureReasons || [],
+    totalAmount: result?.totalAmount || 0,
+  };
+
+  // 审批通过 ≠ 工资已锁定。没锁上的必须单独告知发起人，否则财务看到
+  // 「已通过」就以为可以付款了，而实际上一分钱都没锁定。
+  if (skipped > 0) {
+    const reasons = (result?.failureReasons || []).join("；");
+    pushOaNotification(db, {
+      accountIds: [request.applicantAccountId],
+      title: locked ? "薪资审批通过，但部分未锁定" : "薪资审批通过，但工资尚未锁定",
+      text:
+        `${result?.month || ""} ${result?.scope || ""}：已锁定 ${locked} 人，${skipped} 人未锁定。` +
+        (reasons ? `原因：${reasons}` : "请检查这些人员的确认与复核状态。"),
+      level: "warning",
+    });
+  }
 }
 
 function nowIso() {
@@ -186,20 +260,6 @@ export const OA_TEMPLATES = [
     steps: [{ name: "部门负责人确认", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
   },
   {
-    key: "attendance_fix",
-    name: "补卡申请",
-    icon: "⏱️",
-    category: "考勤",
-    description: "漏打卡、设备异常等情况的考勤补记",
-    applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
-    formFields: [
-      { key: "fixDate", label: "补卡日期", type: "date", required: true },
-      { key: "fixType", label: "补卡类型", type: "select", required: true, options: ["上班卡", "下班卡", "全天"] },
-      { key: "reason", label: "补卡原因", type: "textarea", required: true, placeholder: "请说明未正常打卡的原因" },
-    ],
-    steps: [{ name: "部门负责人审批", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
-  },
-  {
     key: "lesson_swap",
     name: "调课申请",
     icon: "🔄",
@@ -272,6 +332,8 @@ export const OA_TEMPLATES = [
   {
     key: "budget_confirm",
     name: "薪酬总额预算确认",
+    // 含全校薪酬总额，与薪资审批同口径，不抄给普通教师
+    ccAllowedRoles: ["hr", "finance", "division_head", "principal", "system_admin"],
     icon: "📊",
     category: "学期事项",
     description: "学期初薪酬总额预算方案的审议与审批",
@@ -294,6 +356,64 @@ export const OA_TEMPLATES = [
     steps: [
       { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
       { name: "总校审批", approverRoles: ["system_admin"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "payroll_approval",
+    name: "月度薪资审批",
+    icon: "💰",
+    category: "薪酬",
+    description: "月度工资核算完成后的三级审批：人事复核、财务复核、校领导审批",
+    // 工资明细里有全校薪酬数字，不能抄给普通教师
+    ccAllowedRoles: ["hr", "finance", "division_head", "principal", "system_admin"],
+    applicantRoles: ["finance", "system_admin"],
+    formFields: [
+      { key: "month", label: "结算月份", type: "text", required: true, hint: "格式 2026-06" },
+      {
+        key: "scope",
+        label: "适用范围",
+        type: "select",
+        required: true,
+        options: ["小学部", "初中部", "高中部", "总校行政后勤"],
+        hint: "与发起人的财务管辖范围一致",
+      },
+      { key: "headcount", label: "涉及人数", type: "number", required: true },
+      { key: "totalAmount", label: "应发合计（元）", type: "number", required: true },
+      { key: "reason", label: "核算说明", type: "textarea", required: true, hint: "本月异动、补发扣款等需说明" },
+    ],
+    steps: [
+      { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
+      // 复核人必须与发起人不同：自己核自己等于没核
+      { name: "财务复核", approverRoles: ["finance", "system_admin"], approverMode: "any" },
+      { name: "校领导审批", approverRoles: ["principal"], approverMode: "any" },
+    ],
+  },
+  {
+    key: "ledger_unlock",
+    name: "账套解锁申请",
+    icon: "🔓",
+    category: "薪酬",
+    description: "已锁定的账套需要修改时的多级审批：财务复核、人事复核、校领导审批（验收 8.10）",
+    ccAllowedRoles: ["hr", "finance", "division_head", "principal", "system_admin"],
+    applicantRoles: ["finance", "admin", "system_admin"],
+    formFields: [
+      {
+        key: "ledgerType",
+        label: "账套类型",
+        type: "select",
+        required: true,
+        options: ["人事账套", "排课课时账套", "薪资财务账套"],
+      },
+      { key: "period", label: "账套期间", type: "text", required: true, hint: "薪资填 2026-06，排课填学期 ID，人事填年份" },
+      { key: "reason", label: "解锁原因", type: "textarea", required: true, hint: "写清要改什么、为什么必须改" },
+      { key: "impact", label: "影响范围", type: "textarea", required: true, hint: "涉及多少人、多少金额" },
+    ],
+    // 三级审批，且顺序与薪资审批相反：先财务说清要改什么，人事核对人员口径，
+    // 最后校领导拍板。已锁定的账套意味着钱已经发出去了，改它要比锁它更慎重。
+    steps: [
+      { name: "财务复核", approverRoles: ["finance", "system_admin"], approverMode: "any" },
+      { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
+      { name: "校领导审批", approverRoles: ["principal"], approverMode: "any" },
     ],
   },
   {
@@ -345,6 +465,7 @@ export const OA_APPROVER_ROLES = [
   { value: "admin", label: "教务" },
   { value: "hr", label: "人事专员" },
   { value: "finance", label: "财务" },
+  { value: "principal", label: "校领导" },
   { value: "system_admin", label: "行政管理" },
 ];
 
@@ -548,6 +669,18 @@ function validateBusinessRules(templateKey, formData) {
     }
     if (Number(formData.days) <= 0) throw httpError(400, "请假天数必须大于 0");
   }
+  if (templateKey === "ledger_unlock") {
+    const period = String(formData.period || "").trim();
+    const type = formData.ledgerType;
+    // 期间格式在发起时就校验。等三级审批全批完才发现「2026-6」不是合法月份，
+    // 三个人的时间就白花了，而且申请人还得重新走一遍。
+    if (type === "薪资财务账套" && !/^\d{4}-\d{2}$/.test(period)) {
+      throw httpError(400, `薪资账套的期间应为 YYYY-MM，例如 2026-06，当前填的是「${period}」`);
+    }
+    if (type === "人事账套" && !/^\d{4}$/.test(period)) {
+      throw httpError(400, `人事账套的期间应为年份，例如 2026，当前填的是「${period}」`);
+    }
+  }
   if (templateKey === "budget_confirm") {
     const total = Number(formData.payoutRatio) + Number(formData.reserveRatio);
     if (Math.abs(total - 100) > 0.01) {
@@ -573,8 +706,6 @@ function buildSummary(template, formData) {
       return `${formData.leaveType} ${formData.days} 天（${formData.startDate} 至 ${formData.endDate}）`;
     case "overtime":
       return `${formData.overtimeType} ${formData.overtimeDate} ${formData.hours} 小时`;
-    case "attendance_fix":
-      return `${formData.fixDate} ${formData.fixType}`;
     case "lesson_swap":
       return `${formData.lessonDate} ${formData.lessonInfo} · ${formData.swapType}`;
     case "class_size_confirm":
@@ -607,6 +738,156 @@ function pushOaNotification(db, { audience, accountIds = [], title, text, level 
     createdByName: "审批流程",
     readByAccountIds: [],
   });
+}
+
+// ---------------------------------------------------------------------------
+// 抄送（验收 1.15 / 2.13）
+//
+// 抄送只给「看」的权限，不给「批」的权限——被抄送人点通过必须被拒绝，
+// 否则等于绕过审批流增加了一条谁都能走的旁路。
+//
+// 另一个必须挡住的方向是泄密：抄送能让原本看不到这张单子的人看到它。
+// 薪资、预算类单据里有全校工资数字，不能被抄给普通教师。因此可抄送的
+// 角色由模板声明（ccAllowedRoles），而不是谁都能抄给谁。
+// ---------------------------------------------------------------------------
+
+// 默认放开到全部人员角色——验收 2.13 明确要求「抄送相关教师」，日常单据
+// （请假、调课、加班）抄给同事是常规操作。真正敏感的单据（薪资、预算里有
+// 全校工资数字）由模板自己声明 ccAllowedRoles 收紧，而不是反过来。
+// classroom 是教室屏账号，没有人在看，不作为抄送对象。
+const DEFAULT_CC_ALLOWED_ROLES = [
+  "teacher",
+  "admin",
+  "hr",
+  "finance",
+  "division_head",
+  "principal",
+  "system_admin",
+];
+
+function ccAllowedRolesOf(template) {
+  return Array.isArray(template?.ccAllowedRoles) && template.ccAllowedRoles.length
+    ? template.ccAllowedRoles
+    : DEFAULT_CC_ALLOWED_ROLES;
+}
+
+/** 能不能往这张单子上加抄送人：申请人、参与过的审批人、人事与行政管理 */
+function canAddCc(request, account) {
+  if (!account) return false;
+  if (request.applicantAccountId === account.id) return true;
+  if (["hr", "system_admin"].includes(account.role)) return true;
+  return request.steps.some(
+    (step) =>
+      step.approverRoles.includes(account.role) &&
+      (step.status === "pending" || step.approvals.some((v) => v.accountId === account.id)),
+  );
+}
+
+export function isCcRecipient(request, account) {
+  if (!account) return false;
+  return (request.ccRecipients || []).some((item) => item.accountId === account.id);
+}
+
+/**
+ * 把 accountIds 加进抄送名单。返回实际新增的条目。
+ * 已在名单上的、申请人本人的会被跳过——重复抄送只会让通知变噪音。
+ */
+function addCcRecipients(db, request, accountIds, account, template, source = "applicant") {
+  const ids = [...new Set((Array.isArray(accountIds) ? accountIds : []).map((id) => String(id).trim()).filter(Boolean))];
+  if (!ids.length) return [];
+  if (!canAddCc(request, account)) throw httpError(403, "无权为该审批单添加抄送人");
+
+  const allowed = ccAllowedRolesOf(template);
+  request.ccRecipients = request.ccRecipients || [];
+  const existing = new Set(request.ccRecipients.map((item) => item.accountId));
+  const added = [];
+
+  ids.forEach((accountId) => {
+    const target = db.accounts.find((item) => item.id === accountId);
+    if (!target) throw httpError(400, `抄送对象不存在：${accountId}`);
+    if (target.status === "disabled") throw httpError(400, `${target.name || target.username} 已停用，无法抄送`);
+    if (!allowed.includes(target.role)) {
+      throw httpError(403, `「${request.templateName}」不允许抄送给${roleLabelOf(target.role)}`);
+    }
+    // 申请人自己本来就看得到；重复抄送同一人只会重复推通知
+    if (target.id === request.applicantAccountId || existing.has(target.id)) return;
+
+    const entry = {
+      accountId: target.id,
+      name: target.name || target.username || "",
+      role: target.role,
+      source,
+      addedByAccountId: account.id,
+      addedByName: account.displayName || account.username || "",
+      at: nowIso(),
+    };
+    request.ccRecipients.push(entry);
+    existing.add(target.id);
+    added.push(entry);
+  });
+
+  if (added.length) {
+    pushOaNotification(db, {
+      accountIds: added.map((item) => item.accountId),
+      title: `抄送给您：${request.templateName}`,
+      text: `${request.applicantName} 的「${request.summary}」抄送给您知悉，无需审批。`,
+      level: "info",
+    });
+    request.timeline.push({
+      action: "cc",
+      actionLabel: "抄送",
+      actorAccountId: account.id,
+      actorName: account.displayName || account.username || "",
+      comment: `抄送给 ${added.map((item) => item.name).join("、")}`,
+      at: nowIso(),
+    });
+  }
+  return added;
+}
+
+function roleLabelOf(role) {
+  return (
+    {
+      teacher: "教师",
+      admin: "教务",
+      hr: "人事",
+      finance: "财务",
+      division_head: "学部负责人",
+      principal: "校领导",
+      system_admin: "行政管理",
+      classroom: "教室屏",
+    }[role] || role
+  );
+}
+
+/** 供外部（路由）调用：给已存在的单子补抄送人 */
+export function addOaCcRecipients(db, requestId, accountIds, account) {
+  ensureCollections(db);
+  const request = db.oaRequests.find((item) => item.id === requestId);
+  if (!request) throw httpError(404, "审批单不存在");
+  const template = findTemplate(db, request.templateKey);
+  const added = addCcRecipients(db, request, accountIds, account, template, "approver");
+  request.updatedAt = nowIso();
+  return { added, ccRecipients: request.ccRecipients || [] };
+}
+
+/** 可抄送的候选人清单，供前端选择器使用 */
+export function listCcCandidates(db, templateKey, keyword = "") {
+  ensureCollections(db);
+  const template = findTemplate(db, templateKey);
+  const allowed = ccAllowedRolesOf(template);
+  const needle = String(keyword || "").trim().toLowerCase();
+  return db.accounts
+    .filter((item) => allowed.includes(item.role) && item.status !== "disabled")
+    .filter((item) => !needle || `${item.name} ${item.username}`.toLowerCase().includes(needle))
+    .slice(0, 50)
+    .map((item) => ({
+      accountId: item.id,
+      name: item.name || item.username,
+      username: item.username,
+      role: item.role,
+      roleLabel: roleLabelOf(item.role),
+    }));
 }
 
 function notifyCurrentApprovers(db, request) {
@@ -674,11 +955,19 @@ export function createOaRequest(db, account, input = {}) {
         at: now,
       },
     ],
+    ccRecipients: [],
     createdAt: now,
     updatedAt: now,
     completedAt: "",
   };
   db.oaRequests.push(request);
+
+  // 模板声明的固定抄送角色（如薪资审批抄送人事），加在申请人自选之前
+  const templateCcIds = (template.ccRoles || []).flatMap((role) =>
+    db.accounts.filter((item) => item.role === role && item.status !== "disabled").map((item) => item.id),
+  );
+  addCcRecipients(db, request, [...templateCcIds, ...(input.ccAccountIds || [])], account, template, "applicant");
+
   notifyCurrentApprovers(db, request);
   return request;
 }
@@ -697,6 +986,16 @@ export function actOnOaRequest(db, requestId, action, account, input = {}) {
   const request = db.oaRequests.find((item) => item.id === requestId);
   if (!request) throw httpError(404, "审批单不存在");
   if (request.status !== "pending") throw httpError(400, `该审批单已${statusLabel(request.status)}，无法再处理`);
+
+  // 审批人可在处理的同时抄送相关人员（验收 2.13）。放在动作校验之前执行，
+  // 是为了让「被抄送人尝试审批」这种越权在抄送写入前就被 canActOnStep 拦掉——
+  // 否则会留下一条抄送记录却没有对应的审批动作。
+  if (Array.isArray(input.ccAccountIds) && input.ccAccountIds.length) {
+    if (!canActOnStep(request.steps[request.currentStepIndex], account)) {
+      throw httpError(403, "当前环节不由您审批，无法附带抄送");
+    }
+    addCcRecipients(db, request, input.ccAccountIds, account, findTemplate(db, request.templateKey), "approver");
+  }
 
   const step = request.steps[request.currentStepIndex];
   if (!canActOnStep(step, account)) {
@@ -928,6 +1227,8 @@ export function queryOaRequests(db, query = {}, account = null) {
     items = items.filter((item) => isPendingForAccount(item, account));
   } else if (scope === "mine") {
     items = items.filter((item) => item.applicantAccountId === account?.id);
+  } else if (scope === "cc") {
+    items = items.filter((item) => isCcRecipient(item, account));
   } else if (scope === "handled") {
     // 我处理过的（含已完成的）
     items = items.filter((item) =>
@@ -936,7 +1237,10 @@ export function queryOaRequests(db, query = {}, account = null) {
   } else if (!["hr", "system_admin", "division_head", "admin", "finance"].includes(account?.role || "")) {
     // 普通教师没有全局查看权限，退回到本人相关
     items = items.filter(
-      (item) => item.applicantAccountId === account?.id || isPendingForAccount(item, account),
+      (item) =>
+        item.applicantAccountId === account?.id ||
+        isPendingForAccount(item, account) ||
+        isCcRecipient(item, account),
     );
   }
 
@@ -973,6 +1277,8 @@ function summarizeRequest(request, account) {
     currentStepName: request.status === "pending" ? step?.name || "" : "",
     canAct: isPendingForAccount(request, account),
     canWithdraw: request.status === "pending" && request.applicantAccountId === account?.id,
+    isCc: isCcRecipient(request, account),
+    ccCount: (request.ccRecipients || []).length,
     createdAt: request.createdAt,
     updatedAt: request.updatedAt,
   };
@@ -985,6 +1291,8 @@ export function getOaRequestDetail(db, requestId, account) {
   const isRelated =
     request.applicantAccountId === account?.id ||
     request.steps.some((step) => step.approverRoles.includes(account?.role || "")) ||
+    // 抄送只给看的权限：能进详情，但下面的 canAct 仍然为假
+    isCcRecipient(request, account) ||
     ["hr", "system_admin"].includes(account?.role || "");
   if (!isRelated) throw httpError(403, "无权查看该审批单");
 
@@ -996,6 +1304,10 @@ export function getOaRequestDetail(db, requestId, account) {
     canAct: isPendingForAccount(request, account),
     canWithdraw: request.status === "pending" && request.applicantAccountId === account?.id,
     canUrge: request.status === "pending" && request.applicantAccountId === account?.id,
+    ccRecipients: request.ccRecipients || [],
+    isCc: isCcRecipient(request, account),
+    canAddCc: canAddCc(request, account),
+    ccAllowedRoles: ccAllowedRolesOf(template),
     formFields: template?.formFields || [],
     // 当前环节要求审批人填写的内容（如代课安排），供前端在审批弹层中渲染
     currentApproverFields: request.status === "pending" ? currentStep?.approverFields || [] : [],

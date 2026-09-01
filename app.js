@@ -286,10 +286,6 @@ const initialState = {
   scheduleVersions: [],
   teacherScheduleWeeks: {},
   selectedScheduleWeekStart: "2026-06-08",
-  scannerLessonId: "L002",
-  lastScanText: "",
-  lastSecurityChecks: [],
-  lastSecurityPassed: null,
   demoNow: "2026-06-09T10:05:00+08:00",
   notices: [
     {
@@ -297,7 +293,7 @@ const initialState = {
       audience: "teacher",
       source: "教务处",
       title: "今日课表已分发",
-      text: "请老师按课表到对应教室完成课前签入和课后签出，未完成项目暂不计薪。",
+      text: "请老师按课表到对应教室上课。排给你的课都计入课时费，请假请提前走审批。",
       time: "2026-06-09 07:40",
       level: "info",
     },
@@ -324,7 +320,7 @@ const initialState = {
       audience: "all",
       source: "系统",
       title: "教室动态码试运行",
-      text: "系统使用教室大屏动态二维码完成扫码考勤，由后端进行身份、设备、课表和时间窗口校验。",
+      text: "课时费按课表计算：排给教师的课直接计薪，代课由审批改派，请假未安排代课的课次取消。",
       time: "2026-06-09 10:00",
       level: "info",
     },
@@ -400,13 +396,6 @@ const initialState = {
       title: "行政管理",
       department: "系统管理",
     },
-    {
-      id: "classroom-screen",
-      role: "classroom",
-      name: "教室大屏",
-      title: "教室屏账号",
-      department: "教室终端",
-    },
   ],
   teachers: [
     {
@@ -477,8 +466,6 @@ const initialState = {
     selfStudyRate: 50,
     weekendRate: 120,
     overtimeRate: 60,
-    taxThreshold: 5000,
-    taxRate: 0.03,
   },
   schedulingConfig: buildSchedulingConfig("elementary", "elementary-g1"),
   schedulingDraft: {
@@ -505,7 +492,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "08:03",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L002",
@@ -519,7 +506,7 @@ const initialState = {
       units: 1,
       status: "pending",
       scanTime: "",
-      note: "等待老师课前签入",
+      note: "尚未到上课时间",
     },
     {
       id: "L003",
@@ -547,7 +534,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "08:02",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L005",
@@ -617,7 +604,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "08:01",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L010",
@@ -631,7 +618,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "10:12",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L011",
@@ -645,7 +632,7 @@ const initialState = {
       units: 2,
       status: "pending",
       scanTime: "",
-      note: "等待老师课前签入",
+      note: "尚未到上课时间",
     },
     {
       id: "L012",
@@ -673,7 +660,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "08:51",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L014",
@@ -687,7 +674,7 @@ const initialState = {
       units: 1,
       status: "completed",
       scanTime: "15:21",
-      note: "签入签出完成，计入本月薪资",
+      note: "计入本月薪资",
     },
     {
       id: "L015",
@@ -747,7 +734,6 @@ const loginUsers = [
   { username: "finance_high", password: "123456", accountId: "finance-high" },
   { username: "admin", password: "123456", accountId: "admin-zhou" },
   { username: "sysadmin", password: "123456", accountId: "system-admin" },
-  { username: "classroom", password: "123456", accountId: "classroom-screen" },
 ];
 
 let state = loadSavedState();
@@ -755,7 +741,6 @@ let sessionAccountId = loadSession();
 let backendSession = loadBackendSession();
 let eventStream = null; // SSE 连接（在 saveBackendSession 中使用，需先于其声明避免 TDZ）
 let backendAuthExpiredHandled = false;
-let qrScanner = null;
 let courseRulesEditMode = false;
 let notificationComposerState = {
   sending: false,
@@ -873,13 +858,6 @@ let termManagementState = {
   error: "",
 };
 let schedulingJobPollTimer = null;
-let classroomScreenState = {
-  rooms: [],
-  loading: false,
-  loaded: false,
-  error: "",
-  search: "",
-};
 let draggedScheduleAssignmentId = "";
 
 if (backendSession?.account) {
@@ -918,6 +896,16 @@ const views = {
     title: "课表总览",
     el: document.querySelector("#adminScheduleOverviewView"),
   },
+  reports: {
+    role: "admin,finance,hr,division_head,principal,system_admin",
+    title: "统计报表",
+    el: document.querySelector("#reportsView"),
+  },
+  dataPorting: {
+    role: "admin,system_admin,hr,division_head",
+    title: "基础数据",
+    el: document.querySelector("#dataPortingView"),
+  },
   personnel: {
     role: "system_admin",
     title: "人员列表",
@@ -944,7 +932,7 @@ const views = {
     el: document.querySelector("#hrFlowsView"),
   },
   approvals: {
-    role: "teacher,admin,finance,hr,division_head,system_admin",
+    role: "teacher,admin,finance,hr,division_head,principal,system_admin",
     title: "审批中心",
     el: document.querySelector("#approvalsView"),
   },
@@ -963,19 +951,24 @@ const views = {
     title: "我的账户",
     el: document.querySelector("#myHrProfileView"),
   },
+  ledgers: {
+    role: "finance,system_admin,admin,hr,division_head,principal",
+    title: "账套管理",
+    el: document.querySelector("#ledgersView"),
+  },
+  monitoring: {
+    role: "system_admin",
+    title: "系统监控",
+    el: document.querySelector("#monitoringView"),
+  },
   notifications: {
-    role: "teacher,finance,admin,system_admin,hr",
+    role: "teacher,finance,admin,system_admin,hr,principal",
     title: "通知中心",
     el: document.querySelector("#notificationsView"),
   },
-  scanner: {
-    role: "teacher",
-    title: "扫码签到",
-    el: document.querySelector("#scannerView"),
-  },
   records: {
     role: "teacher",
-    title: "我的考勤记录",
+    title: "我的课时",
     el: document.querySelector("#recordsView"),
   },
   confirm: {
@@ -990,7 +983,7 @@ const views = {
   },
   financeRecords: {
     role: "finance,system_admin",
-    title: "老师考勤记录",
+    title: "老师课时记录",
     el: document.querySelector("#financeRecordsView"),
   },
   settlement: {
@@ -1008,16 +1001,6 @@ const views = {
     title: "薪资配置",
     el: document.querySelector("#payrollConfigView"),
   },
-  warnings: {
-    role: "teacher,finance",
-    title: "异常提醒",
-    el: document.querySelector("#warningsView"),
-  },
-  classroomScreens: {
-    role: "classroom",
-    title: "教室二维码库",
-    el: document.querySelector("#classroomScreensView"),
-  },
 };
 
 const defaultViewByRole = {
@@ -1025,9 +1008,10 @@ const defaultViewByRole = {
   finance: "finance",
   admin: "adminScheduling",
   system_admin: "personnel",
-  classroom: "classroomScreens",
   hr: "hrEmployees",
   division_head: "hrFlows",
+  // 校领导只做审批签批，不参与日常维护，登录直接落在审批中心
+  principal: "approvals",
 };
 
 const lessonTypeLabel = {
@@ -1037,12 +1021,12 @@ const lessonTypeLabel = {
   weekend: "周末补课",
 };
 
+// 课次状态只剩两种：正常（排了就计薪）和已取消（请假未安排代课）。
+// pending / completed 这些是签到时代的中间态，历史数据里可能还有，
+// 统一按「计薪」显示——它们本来就都上过课
 const statusLabel = {
-  pending: "待签入",
-  checkedIn: "待签出",
-  completed: "已完成",
   scheduled: "未到时间",
-  exception: "异常",
+  cancelled: "已取消",
 };
 
 const confirmSteps = [
@@ -1071,9 +1055,6 @@ function isPublishedLessonSource(lesson) {
 
 function sanitizeProductionState(nextState) {
   nextState.lessons = (nextState.lessons || []).filter(isPublishedLessonSource);
-  if (!nextState.lessons.some((lesson) => lesson.id === nextState.scannerLessonId)) {
-    nextState.scannerLessonId = nextState.lessons[0]?.id || "";
-  }
   return nextState;
 }
 
@@ -1180,6 +1161,10 @@ function resetScopedCaches() {
   attendanceRecordState = initialAttendanceRecordState();
   teacherPayrollState = initialTeacherPayrollState();
   payrollRuleState = initialPayrollRuleState();
+  weeklyWorkloadState = initialWeeklyWorkloadState();
+  annualSalaryState = initialAnnualSalaryState();
+  dataPortingState = initialDataPortingState();
+  resourceLedgerState = initialResourceLedgerState();
   // 选中的老师也要清：上一个账号选中的老师往往不在本账号范围内
   state.selectedFinanceTeacherId = "";
 }
@@ -1413,9 +1398,9 @@ function roleTitle(role) {
   if (role === "finance") return "财务账号";
   if (role === "admin") return "教研所账号";
   if (role === "system_admin") return "行政管理";
-  if (role === "classroom") return "教室屏账号";
   if (role === "hr") return "人事账号";
   if (role === "division_head") return "学部负责人";
+  if (role === "principal") return "校领导";
   return "系统账号";
 }
 
@@ -1498,7 +1483,7 @@ function normalizeBackendLesson(lesson) {
     checkOutTime: lesson.checkOutAt ? lesson.checkOutAt.slice(11, 16) : "",
     note:
       lesson.attendanceNote ||
-      (lesson.status === "completed" ? "后端接口：签入签出完成" : "后端接口：等待后续签入签出"),
+      (lesson.status === "completed" ? "后端接口：已计薪" : "后端接口：尚未上课"),
     source: "backend-api",
   };
 }
@@ -2790,8 +2775,9 @@ function todayKey() {
   return "2026-06-09";
 }
 
+// 计薪课次：排给这位教师的课，除了取消的都算
 function payableLessons(teacherId) {
-  return teacherLessons(teacherId).filter((lesson) => lesson.status === "completed");
+  return teacherLessons(teacherId).filter((lesson) => lesson.status !== "cancelled");
 }
 
 function countUnits(teacherId, type) {
@@ -2822,11 +2808,8 @@ function calculateSalary(teacherId) {
     (profile.homeroomAllowance || 0) +
     (profile.famousTeacherReward || 0) +
     overtimeAllowance;
+  // 系统结算至应发为止：个税、社保由学校财务线下处理，不进系统
   const attendanceDeduction = profile.attendanceDeduction || 0;
-  const socialInsurance = profile.socialInsurance || 0;
-  const taxable = Math.max(0, gross - socialInsurance - attendanceDeduction - rules.taxThreshold);
-  const tax = Math.round(taxable * rules.taxRate);
-  const net = gross - attendanceDeduction - socialInsurance - tax;
 
   return {
     teacher,
@@ -2839,10 +2822,7 @@ function calculateSalary(teacherId) {
     weekendAllowance,
     overtimeAllowance,
     attendanceDeduction,
-    socialInsurance,
     gross,
-    tax,
-    net,
   };
 }
 
@@ -2861,8 +2841,6 @@ function salaryRows(teacherId) {
     ["名师奖励", "月度奖励项", profile.famousTeacherReward || 0],
     ["合规加班", `${profile.approvedOvertimeHours || 0} 小时 × ${rules.overtimeRate} 元`, salary.overtimeAllowance],
     ["考勤扣款", "当前扣款项", -salary.attendanceDeduction],
-    ["社保代扣", "固定代扣", -salary.socialInsurance],
-    ["个税代扣", `起征点 ${rules.taxThreshold} 元，试运行税率 3%`, -salary.tax],
   ];
 }
 
@@ -2877,19 +2855,11 @@ function normalizeSettlementRows(rows = []) {
 function settlementTotalsFromRows(rows = [], fallback = {}) {
   const normalizedRows = normalizeSettlementRows(rows);
   if (!normalizedRows.length) {
-    return {
-      gross: Number(fallback.gross || 0),
-      tax: Number(fallback.tax || 0),
-      net: Number(fallback.net || 0),
-    };
+    return { gross: Number(fallback.gross || 0) };
   }
-  const taxRows = normalizedRows.filter((row) => row.name === "个税代扣");
-  const gross = normalizedRows
-    .filter((row) => row.name !== "个税代扣")
-    .reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  const tax = Math.abs(taxRows.reduce((sum, row) => sum + Number(row.amount || 0), 0));
-  const net = normalizedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-  return { gross, tax, net };
+  // 系统结算至应发为止，明细行本身已不含个税与社保
+  const gross = normalizedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  return { gross };
 }
 
 function settlementSalaryRowsHtml(rows = [], fallback = {}) {
@@ -2909,20 +2879,10 @@ function settlementSalaryRowsHtml(rows = [], fallback = {}) {
     .join("");
   return `
     ${lineRows}
-    <tr class="settlement-summary-row">
-      <td class="row-title" data-label="薪资项目">应发合计</td>
-      <td class="muted" data-label="计算口径">明细中除个税代扣外的项目合计，包含特殊奖扣</td>
-      <td data-label="金额">${formatCurrency(totals.gross)}</td>
-    </tr>
-    <tr class="settlement-summary-row">
-      <td class="row-title" data-label="薪资项目">代扣个税</td>
-      <td class="muted" data-label="计算口径">按当前个税规则从应发合计中试算</td>
-      <td data-label="金额">-${formatCurrency(totals.tax)}</td>
-    </tr>
     <tr class="settlement-summary-row final-total">
-      <td class="row-title" data-label="薪资项目">实发合计</td>
-      <td class="muted" data-label="计算口径">应发合计 - 代扣个税</td>
-      <td data-label="金额">${formatCurrency(totals.net)}</td>
+      <td class="row-title" data-label="薪资项目">应发合计</td>
+      <td class="muted" data-label="计算口径">明细各项合计。个税、社保由学校财务线下处理</td>
+      <td data-label="金额">${formatCurrency(totals.gross)}</td>
     </tr>
   `;
 }
@@ -2963,7 +2923,7 @@ function teacherLessonStats(teacherId) {
   const lessons = teacherLessons(teacherId);
   return {
     completedUnits: payableLessons(teacherId).reduce((sum, lesson) => sum + lesson.units, 0),
-    pendingCount: lessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length,
+    pendingCount: lessons.filter((lesson) => lesson.status !== "cancelled" && lesson.date > todayKey()).length,
     exceptionCount: lessons.filter((lesson) => lesson.status === "exception").length,
   };
 }
@@ -2973,7 +2933,7 @@ function financeSalaryTotals() {
     (totals, teacher) => {
       const salary = calculateSalary(teacher.id);
       totals.gross += salary.gross;
-      totals.net += salary.net;
+      totals.net += salary.gross;
       return totals;
     },
     { gross: 0, net: 0 },
@@ -3009,7 +2969,7 @@ function financeGroupRows() {
     group.pendingCount += stats.pendingCount;
     group.exceptionCount += stats.exceptionCount;
     group.gross += salary.gross;
-    group.net += salary.net;
+    group.net += salary.gross;
   });
   return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key, "zh-CN"));
 }
@@ -3328,7 +3288,7 @@ function backendFinanceGroupRows() {
     group.pendingCount += teacher.summary?.pendingCount || 0;
     group.exceptionCount += teacher.summary?.exceptionCount || 0;
     group.gross += teacher.payroll?.grossPay || 0;
-    group.net += teacher.payroll?.netPay || 0;
+    group.net += teacher.payroll?.grossPay || 0;
   });
   return Array.from(groups.values()).sort((a, b) => a.key.localeCompare(b.key, "zh-CN"));
 }
@@ -3340,7 +3300,7 @@ function financePageTotals() {
       pending: summary.pendingCount || 0,
       exception: summary.exceptionCount || 0,
       gross: summary.grossPay || 0,
-      net: summary.netPay || 0,
+      net: summary.grossPay || 0,
       locked: summary.lockedCount || 0,
     };
   }
@@ -3349,7 +3309,7 @@ function financePageTotals() {
       totals.pending += teacher.summary?.pendingCount || 0;
       totals.exception += teacher.summary?.exceptionCount || 0;
       totals.gross += teacher.payroll?.grossPay || 0;
-      totals.net += teacher.payroll?.netPay || 0;
+      totals.net += teacher.payroll?.grossPay || 0;
       if (teacher.payrollDetail?.status === "locked" || teacher.payroll?.status === "locked") totals.locked += 1;
       return totals;
     },
@@ -3429,7 +3389,7 @@ async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), mont
   };
 
   try {
-    const data = await apiRequest(`/api/teachers/${teacherId}/attendance-records?month=${month}`);
+    const data = await apiRequest(`/api/teachers/${teacherId}/lesson-records?month=${month}`);
     attendanceRecordState = {
       teacherId,
       month,
@@ -3447,7 +3407,7 @@ async function loadBackendAttendanceRecords(teacherId = currentTeacherId(), mont
       month,
       loading: false,
       loaded: true,
-      error: error.message || "考勤记录加载失败",
+      error: error.message || "课时记录加载失败",
     };
   }
 
@@ -3562,8 +3522,7 @@ function payrollRulesFromInputs() {
     evening: Number(document.querySelector("#ruleEvening").value || 0),
     weekend: Number(document.querySelector("#ruleWeekend").value || 0),
     makeup: Number(document.querySelector("#ruleMakeup").value || 0),
-    taxThreshold: Number(document.querySelector("#ruleTaxThreshold").value || 0),
-    taxRate: Number(document.querySelector("#ruleTaxRate").value || 0),
+
     ...(teacherSalaryScheme ? { teacherSalaryScheme } : {}),
   };
 }
@@ -3890,6 +3849,868 @@ async function batchLockBackendPayroll() {
     const status = document.querySelector("#payrollExportStatus");
     if (status) status.textContent = error.message || "批量锁定工资失败";
   }
+}
+
+// ---- 课表导出与打印（验收 2.10 / 2.11）------------------------------------
+// Excel 走后端生成的 SpreadsheetML；PDF 复用浏览器打印（打印 → 另存为 PDF），
+// 一套实现同时覆盖「导出 PDF」与「打印」两项验收要求。
+
+// 通用文件下载：后端返回文本内容，这里包成 Blob 触发浏览器下载
+function downloadTextFile(content, filename, mimeType) {
+  // BOM 让 Excel 正确识别 UTF-8，否则中文会乱码
+  const blob = new Blob([`\uFEFF${content}`], { type: `${mimeType};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  window.setTimeout(() => {
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, 1000);
+}
+
+// 当前课表总览选中的维度与目标
+function currentScheduleScope() {
+  const classId = state.selectedScheduleOverviewClassId || "";
+  return { dimension: classId ? "class" : "grade", targetId: classId };
+}
+
+async function exportScheduleExcel() {
+  if (!backendMode()) {
+    showToast("导出课表需要连接后端");
+    return;
+  }
+  const { dimension, targetId } = currentScheduleScope();
+  if (!targetId) {
+    showToast("请先选择要导出的班级");
+    return;
+  }
+  try {
+    const params = new URLSearchParams({ dimension, targetId });
+    const result = await apiRequest(`/api/schedule/export?${params.toString()}`);
+    if (!result?.content || !result.total) {
+      showToast("当前课表没有可导出的课次");
+      return;
+    }
+    downloadTextFile(result.content, result.filename, result.mimeType || "application/vnd.ms-excel");
+    showToast(`已导出 ${result.total} 节课`);
+  } catch (error) {
+    showToast(error.message || "课表导出失败");
+  }
+}
+
+// 打印：先把课表渲染成一张独立的打印表格（屏幕上不可见，只在 @media print 显示），
+// 再调 window.print()。直接打印页面上的课表会带上筛选器、侧栏等无关内容。
+async function printSchedule() {
+  if (!backendMode()) {
+    showToast("打印课表需要连接后端");
+    return;
+  }
+  const { dimension, targetId } = currentScheduleScope();
+  if (!targetId) {
+    showToast("请先选择要打印的班级");
+    return;
+  }
+  try {
+    const params = new URLSearchParams({ dimension, targetId });
+    const { grid } = await apiRequest(`/api/schedule/grid?${params.toString()}`);
+    if (!grid || !grid.lessonCount) {
+      showToast("当前课表没有可打印的课次");
+      return;
+    }
+    renderSchedulePrintTable(grid);
+    // 不用 requestAnimationFrame 等布局：标签页不在前台时浏览器会暂停 rAF，
+    // 回调永远不执行，打印就静默失效了。window.print() 本身会强制同步布局，
+    // innerHTML 赋值后直接调用即可。
+    window.print();
+  } catch (error) {
+    showToast(error.message || "课表打印失败");
+  }
+}
+
+function renderSchedulePrintTable(grid) {
+  const host = document.querySelector("#schedulePrintHost");
+  if (!host) return;
+  const subtitle = [grid.termName, grid.weekStart ? `${grid.weekStart} 起当周` : "全学期"]
+    .filter(Boolean)
+    .join(" · ");
+  const head = grid.weekdays.map((w) => `<th>${escapeHtml(w)}</th>`).join("");
+  const body = grid.periods
+    .map((period, p) => {
+      const cols = grid.weekdays
+        .map((_, w) => {
+          const entries = grid.cells[p][w] || [];
+          if (!entries.length) return "<td></td>";
+          const text = entries
+            .map((e) => {
+              const mark = e.status === "cancelled" ? "【已取消】" : "";
+              // 按教师看课表关心「给哪个班上」，按班级看关心「谁来上」
+              const who = grid.dimension === "teacher" ? e.className : e.teacherName;
+              return [mark + e.subjectName, who, e.room].filter(Boolean).map(escapeHtml).join("<br>");
+            })
+            .join("<hr>");
+          return `<td>${text}</td>`;
+        })
+        .join("");
+      return `<tr><th>${escapeHtml(period)}</th>${cols}</tr>`;
+    })
+    .join("");
+  host.innerHTML = `
+    <div class="schedule-print-title">${escapeHtml(grid.title)}</div>
+    <div class="schedule-print-subtitle">${escapeHtml(subtitle)}</div>
+    <table class="schedule-print-table">
+      <thead><tr><th>时段</th>${head}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+}
+
+
+// ---------------------------------------------------------------------------
+// 统计报表：周教学工作量台账（验收 2.18）与年度薪资汇总（验收 3.19）
+//
+// 状态用工厂函数初始化，并挂进 resetScopedCaches()——切换账号时必须清空。
+// 学部财务之间切换如果留着上一个账号的报表数据，屏幕上就会显示他部的教师
+// 姓名和工资，这是越权展示，不是"刷新一下就好"的显示问题。
+// ---------------------------------------------------------------------------
+
+function initialWeeklyWorkloadState() {
+  return { loading: false, error: "", report: null, weekStart: "", stageId: "", includeIdle: false };
+}
+function initialAnnualSalaryState() {
+  return { loading: false, error: "", report: null, year: 0, stageId: "" };
+}
+
+let weeklyWorkloadState = initialWeeklyWorkloadState();
+let annualSalaryState = initialAnnualSalaryState();
+
+// 学部下拉：财务与学部负责人本身就只有一个学部，选项由后端范围决定，
+// 这里只提供"全部 + 三个学部"，越权的选择在服务端会被裁掉。
+const REPORT_STAGE_OPTIONS = [
+  { value: "", label: "全部（按账号权限）" },
+  { value: "primary", label: "小学部" },
+  { value: "middle", label: "初中部" },
+  { value: "high", label: "高中部" },
+];
+
+function defaultReportWeek() {
+  const term = termManagementState.currentTerm;
+  const today = new Date();
+  const iso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  // 今天若不在学期内（如假期、学期尚未开始），回落到学期首周，
+  // 否则打开报表就是一张空表，看的人会以为是系统没数据。
+  if (term?.startDate && term?.endDate && (iso < term.startDate || iso > term.endDate)) {
+    return term.startDate;
+  }
+  // 学期信息尚未加载时交给服务端定（它会回落到学期开始日），再用返回值回填
+  return term?.startDate ? iso : "";
+}
+
+function reportYearOptions() {
+  const current = new Date().getFullYear();
+  const years = new Set([current, current - 1, current + 1]);
+  (termManagementState.terms || []).forEach((t) => {
+    const y = Number(String(t.startDate || "").slice(0, 4));
+    if (y) years.add(y);
+  });
+  return [...years].sort((a, b) => b - a);
+}
+
+function fillSelect(selector, options, selected) {
+  const el = document.querySelector(selector);
+  if (!el) return;
+  const next = options
+    .map((o) => `<option value="${escapeHtml(String(o.value))}">${escapeHtml(o.label)}</option>`)
+    .join("");
+  if (el.innerHTML !== next) el.innerHTML = next;
+  el.value = String(selected ?? "");
+}
+
+async function loadWeeklyWorkload() {
+  if (!backendMode()) {
+    weeklyWorkloadState = { ...initialWeeklyWorkloadState(), error: "统计报表需要连接后端" };
+    renderWeeklyWorkload();
+    return;
+  }
+  const weekStart = weeklyWorkloadState.weekStart || defaultReportWeek();
+  weeklyWorkloadState = { ...weeklyWorkloadState, loading: true, error: "" };
+  renderWeeklyWorkload();
+  try {
+    const params = new URLSearchParams({
+      weekStart,
+      stageId: weeklyWorkloadState.stageId || "",
+      includeIdle: weeklyWorkloadState.includeIdle ? "true" : "false",
+    });
+    const report = await apiRequest(`/api/reports/weekly-workload?${params.toString()}`);
+    // 用服务端归一化后的周一回填：用户可能选的是周三，服务端会退到周一
+    weeklyWorkloadState = { ...weeklyWorkloadState, loading: false, report, weekStart: report.weekStart };
+  } catch (error) {
+    weeklyWorkloadState = {
+      ...weeklyWorkloadState,
+      loading: false,
+      report: null,
+      error: error.message || "工作量台账加载失败",
+    };
+  }
+  renderWeeklyWorkload();
+}
+
+async function loadAnnualSalary() {
+  if (!backendMode()) {
+    annualSalaryState = { ...initialAnnualSalaryState(), error: "统计报表需要连接后端" };
+    renderAnnualSalary();
+    return;
+  }
+  const year = annualSalaryState.year || new Date().getFullYear();
+  annualSalaryState = { ...annualSalaryState, loading: true, error: "", year };
+  renderAnnualSalary();
+  try {
+    const params = new URLSearchParams({ year: String(year), stageId: annualSalaryState.stageId || "" });
+    const report = await apiRequest(`/api/reports/annual-salary?${params.toString()}`);
+    annualSalaryState = { ...annualSalaryState, loading: false, report };
+  } catch (error) {
+    annualSalaryState = {
+      ...annualSalaryState,
+      loading: false,
+      report: null,
+      error: error.message || "年度薪资汇总加载失败",
+    };
+  }
+  renderAnnualSalary();
+}
+
+function renderReportsView() {
+  fillSelect("#weeklyWorkloadStage", REPORT_STAGE_OPTIONS, weeklyWorkloadState.stageId);
+  fillSelect(
+    "#annualSalaryYear",
+    reportYearOptions().map((y) => ({ value: y, label: `${y} 年` })),
+    annualSalaryState.year || new Date().getFullYear(),
+  );
+  fillSelect("#annualSalaryStage", REPORT_STAGE_OPTIONS, annualSalaryState.stageId);
+
+  const week = document.querySelector("#weeklyWorkloadWeek");
+  if (week) week.value = weeklyWorkloadState.weekStart || defaultReportWeek();
+  const idle = document.querySelector("#weeklyWorkloadIdle");
+  if (idle) idle.checked = Boolean(weeklyWorkloadState.includeIdle);
+
+  renderWeeklyWorkload();
+  renderAnnualSalary();
+}
+
+function setReportStatus(selector, text) {
+  const el = document.querySelector(selector);
+  if (el) el.textContent = text;
+}
+
+function renderWeeklyWorkload() {
+  const wrap = document.querySelector("#weeklyWorkloadTable");
+  const summary = document.querySelector("#weeklyWorkloadSummary");
+  if (!wrap || !summary) return;
+  const { loading, error, report } = weeklyWorkloadState;
+
+  if (loading) {
+    setReportStatus("#weeklyWorkloadStatus", "读取中");
+    wrap.innerHTML = '<p class="empty-hint">正在统计本周工作量…</p>';
+    summary.innerHTML = "";
+    return;
+  }
+  if (error) {
+    setReportStatus("#weeklyWorkloadStatus", "加载失败");
+    wrap.innerHTML = `<p class="empty-hint">${escapeHtml(error)}</p>`;
+    summary.innerHTML = "";
+    return;
+  }
+  if (!report) {
+    setReportStatus("#weeklyWorkloadStatus", "待加载");
+    wrap.innerHTML = '<p class="empty-hint">选择周次后点击刷新。</p>';
+    summary.innerHTML = "";
+    return;
+  }
+
+  const t = report.totals;
+  setReportStatus("#weeklyWorkloadStatus", `${report.weekStart} 至 ${report.weekEnd}`);
+  summary.innerHTML = [
+    { label: "教师", value: `${report.rows.length} 人` },
+    { label: "课次合计", value: t.lessonCount },
+    { label: "课时合计", value: t.units },
+    { label: "已完成", value: t.completed },
+    { label: "已取消", value: t.cancelled },
+    { label: "已取消", value: t.cancelled },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  if (!report.rows.length) {
+    wrap.innerHTML = `<p class="empty-hint">${escapeHtml(report.scopeNote)}：本周没有可统计的教师。</p>`;
+    return;
+  }
+
+  const head = ["工号", "姓名", "学部", "科目", ...report.weekdays, "课次", "课时", "异常"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`)
+    .join("");
+  const body = report.rows
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.employeeNo)}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.stageName)}</td>
+        <td>${escapeHtml(r.subject)}</td>
+        ${r.daily.map((v) => `<td>${v || ""}</td>`).join("")}
+        <td>${r.lessonCount || ""}</td>
+        <td>${r.units || ""}</td>
+        <td class="${r.exception ? "report-warn" : ""}">${r.exception || ""}</td>
+      </tr>`,
+    )
+    .join("");
+  const foot = `<tr class="report-total">
+      <th colspan="4">合计（${escapeHtml(report.scopeNote)}）</th>
+      ${t.daily.map((v) => `<td>${v || ""}</td>`).join("")}
+      <td>${t.lessonCount || ""}</td><td>${t.units || ""}</td><td>${t.exception || ""}</td>
+    </tr>`;
+
+  wrap.innerHTML = `<table class="report-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`;
+}
+
+function renderAnnualSalary() {
+  const wrap = document.querySelector("#annualSalaryTable");
+  const summary = document.querySelector("#annualSalarySummary");
+  if (!wrap || !summary) return;
+  const { loading, error, report } = annualSalaryState;
+
+  if (loading) {
+    setReportStatus("#annualSalaryStatus", "读取中");
+    wrap.innerHTML = '<p class="empty-hint">正在汇总年度薪资…</p>';
+    summary.innerHTML = "";
+    return;
+  }
+  if (error) {
+    setReportStatus("#annualSalaryStatus", "加载失败");
+    wrap.innerHTML = `<p class="empty-hint">${escapeHtml(error)}</p>`;
+    summary.innerHTML = "";
+    return;
+  }
+  if (!report) {
+    setReportStatus("#annualSalaryStatus", "待加载");
+    wrap.innerHTML = '<p class="empty-hint">选择年度后点击刷新。</p>';
+    summary.innerHTML = "";
+    return;
+  }
+
+  const t = report.totals;
+  // 一张工资单都没有时不能说"全部已结算"——那会被读成"工资都发完了"
+  const hasPayroll = t.settled > 0 || t.inProgress > 0;
+  setReportStatus(
+    "#annualSalaryStatus",
+    report.unsettledMonths.length
+      ? `${report.unsettledMonths.length} 个月结算中`
+      : hasPayroll
+        ? "全部已结算"
+        : "暂无工资单",
+  );
+  summary.innerHTML = [
+    { label: "教师", value: `${report.rows.length} 人` },
+    { label: "已结算合计", value: formatCurrency(t.settled) },
+    { label: "结算中合计", value: formatCurrency(t.inProgress) },
+    { label: "结算中月份", value: report.unsettledMonths.join("、") || "无" },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  if (!report.rows.length || !hasPayroll) {
+    wrap.innerHTML = `<p class="empty-hint">${escapeHtml(report.scopeNote)}：${report.year} 年还没有已生成的工资单，请先在「薪资结算」中生成。</p>`;
+    return;
+  }
+
+  const money = (v) => (v === null || v === undefined || v === "" ? "" : formatCurrency(v));
+  const head = ["工号", "姓名", "学部", ...report.months, "已结算合计", "结算中"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`)
+    .join("");
+  const body = report.rows
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.employeeNo)}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.stageName)}</td>
+        ${r.monthly
+          .map((v, i) => {
+            // 结算中的月份标注出来，避免被当成已发放金额引用
+            const pending = r.monthStatus[i] && r.monthStatus[i] !== "已结算";
+            return `<td class="${pending ? "report-warn" : ""}" title="${escapeHtml(r.monthStatus[i] || "")}">${money(v)}</td>`;
+          })
+          .join("")}
+        <td>${money(r.settled)}</td>
+        <td class="${r.inProgress ? "report-warn" : ""}">${money(r.inProgress || "")}</td>
+      </tr>`,
+    )
+    .join("");
+  const foot = `<tr class="report-total">
+      <th colspan="3">合计（${escapeHtml(report.scopeNote)}）</th>
+      ${t.monthly.map((v) => `<td>${money(v || "")}</td>`).join("")}
+      <td>${money(t.settled)}</td><td>${money(t.inProgress || "")}</td>
+    </tr>`;
+
+  wrap.innerHTML = `<table class="report-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`;
+}
+
+// --- 导出与打印 ---------------------------------------------------------------
+
+async function exportReport(kind) {
+  if (!backendMode()) {
+    showToast("导出报表需要连接后端");
+    return;
+  }
+  const isWeekly = kind === "weekly";
+  const params = isWeekly
+    ? new URLSearchParams({
+        weekStart: weeklyWorkloadState.weekStart || defaultReportWeek(),
+        stageId: weeklyWorkloadState.stageId || "",
+        includeIdle: weeklyWorkloadState.includeIdle ? "true" : "false",
+        format: "excel",
+      })
+    : new URLSearchParams({
+        year: String(annualSalaryState.year || new Date().getFullYear()),
+        stageId: annualSalaryState.stageId || "",
+        format: "excel",
+      });
+  const path = isWeekly ? "weekly-workload" : "annual-salary";
+  try {
+    const result = await apiRequest(`/api/reports/${path}?${params.toString()}`);
+    if (!result?.content || !result.total) {
+      showToast("当前筛选没有可导出的数据");
+      return;
+    }
+    downloadTextFile(result.content, result.filename, result.mimeType || "application/vnd.ms-excel");
+    showToast(`已导出 ${result.total} 条`);
+  } catch (error) {
+    showToast(error.message || "报表导出失败");
+  }
+}
+
+// 打印：与课表一致，先渲染一张独立的打印表格再调 window.print()。
+// 不用 requestAnimationFrame——标签页不在前台时 rAF 会被暂停，回调不执行，
+// 打印会静默失效。innerHTML 赋值后 window.print() 自身会强制同步布局。
+function printReport(kind) {
+  const host = document.querySelector("#reportPrintHost");
+  if (!host) return;
+  const source = kind === "weekly" ? weeklyWorkloadState.report : annualSalaryState.report;
+  if (!source || !source.rows?.length) {
+    showToast("当前没有可打印的内容");
+    return;
+  }
+  const table = document.querySelector(kind === "weekly" ? "#weeklyWorkloadTable table" : "#annualSalaryTable table");
+  if (!table) {
+    showToast("当前没有可打印的内容");
+    return;
+  }
+  const title = kind === "weekly" ? "周教学工作量台账" : `${source.year} 年度薪资汇总表`;
+  const subtitle =
+    kind === "weekly"
+      ? `${source.termName} · ${source.weekStart} 至 ${source.weekEnd} · ${source.scopeNote}`
+      : `${source.year} 年度 · ${source.scopeNote}${
+          source.unsettledMonths.length
+            ? `｜${source.unsettledMonths.join("、")} 尚未结算，未计入已结算合计`
+            : ""
+        }`;
+  host.innerHTML = `
+    <div class="schedule-print-title">${escapeHtml(title)}</div>
+    <div class="schedule-print-subtitle">${escapeHtml(subtitle)}</div>
+    ${table.outerHTML}`;
+  window.print();
+}
+
+
+// ---------------------------------------------------------------------------
+// 基础数据批量导入导出（验收 2.1 / 2.2）与教学资源台账（验收 2.4）
+//
+// 导入是两段式：先预检、看清"新建几条改几条改了哪些字段"，确认后才提交。
+// 直接导入不给看差异，等于让教务闭着眼睛改全校班级表。
+// ---------------------------------------------------------------------------
+
+function initialDataPortingState() {
+  return {
+    entity: "classes",
+    stageId: "",
+    csvText: "",
+    fileName: "",
+    preview: null,
+    loading: false,
+    error: "",
+  };
+}
+function initialResourceLedgerState() {
+  return { loading: false, error: "", ledger: null, stageId: "", roomType: "", keyword: "", onlyIdle: false };
+}
+
+// ---------------------------------------------------------------------------
+// 账套管理与系统监控的模块级状态
+//
+// 声明必须放在 renderStep(...) 注册之前。这两块的渲染函数写在文件末尾，
+// 状态原本也跟着写在末尾——但 let 不提升，首次渲染跑到时变量还在暂时性死区，
+// 直接抛 "Cannot access 'ledgerState' before initialization"，
+// 整个视图渲染不出来。函数声明会提升，所以函数留在末尾没问题，状态不行。
+// ---------------------------------------------------------------------------
+const LEDGER_TYPE_LABELS = { hr: "人事账套", scheduling: "排课课时账套", payroll: "薪资财务账套" };
+const LEDGER_STATUS_LABELS = { initializing: "初始化中", active: "使用中", locked: "已锁定", archived: "已归档" };
+// 按钮上写的是「要做什么」，不是「做完会变成什么状态」。
+// 状态名当按钮文案，用户看到「已锁定」会以为那是个标签而不是一个动作。
+const LEDGER_ACTION_LABELS = { active: "启用", locked: "锁定", archived: "归档" };
+// 状态流转规则要与后端 TRANSITIONS 一致：界面上不该出现一个点了必然报错的按钮
+const LEDGER_NEXT_STATUS = { initializing: ["active"], active: ["locked", "archived"], locked: ["archived"], archived: [] };
+
+let ledgerState = {
+  loaded: false,
+  loading: false,
+  error: "",
+  type: "",
+  status: "",
+  ledgers: [],
+};
+
+let ledgerReconcileState = { month: "", loading: false, error: "", report: null };
+
+const MONITOR_LEVEL_LABELS = { critical: "严重", warning: "警告", info: "提示" };
+
+let monitoringState = { loaded: false, loading: false, error: "", data: null };
+
+let dataPortingState = initialDataPortingState();
+let resourceLedgerState = initialResourceLedgerState();
+
+const PORTING_ENTITY_LABELS = { classes: "班级", rooms: "教室", subjects: "课程科目" };
+const LEDGER_ROOM_TYPES = [
+  { value: "", label: "全部类型" },
+  { value: "homeroom", label: "普通教室" },
+  { value: "lab", label: "实验室" },
+  { value: "computer", label: "计算机房" },
+  { value: "playground", label: "操场" },
+  { value: "art", label: "美术室" },
+  { value: "music", label: "音乐室" },
+];
+
+async function downloadPortingFile(kind) {
+  if (!backendMode()) {
+    showToast("导出需要连接后端");
+    return;
+  }
+  const entity = dataPortingState.entity;
+  const path = kind === "template" ? "template" : "export";
+  const params = new URLSearchParams();
+  if (kind !== "template" && dataPortingState.stageId) params.set("stageId", dataPortingState.stageId);
+  try {
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const result = await apiRequest(`/api/data-porting/${entity}/${path}${suffix}`);
+    downloadTextFile(result.content, result.filename, result.mimeType || "text/csv");
+    showToast(kind === "template" ? "已下载导入模板" : `已导出 ${result.total} 条`);
+  } catch (error) {
+    showToast(error.message || "导出失败");
+  }
+}
+
+async function previewPortingImport() {
+  if (!backendMode()) {
+    showToast("导入需要连接后端");
+    return;
+  }
+  const csvText = dataPortingState.csvText.trim();
+  if (!csvText) {
+    showToast("请先选择或粘贴 CSV 内容");
+    return;
+  }
+  dataPortingState = { ...dataPortingState, loading: true, error: "", preview: null };
+  renderDataPorting();
+  try {
+    const preview = await apiRequest(`/api/data-porting/${dataPortingState.entity}/preview`, {
+      method: "POST",
+      body: { csvText },
+    });
+    dataPortingState = { ...dataPortingState, loading: false, preview };
+  } catch (error) {
+    // 校验不通过时后端把逐行错误放在 details 里，这才是使用者要看的东西
+    dataPortingState = {
+      ...dataPortingState,
+      loading: false,
+      preview: error.details || null,
+      error: error.details ? "" : error.message || "预检失败",
+    };
+  }
+  renderDataPorting();
+}
+
+async function commitPortingImport() {
+  const preview = dataPortingState.preview;
+  if (!preview?.canImport) {
+    showToast("请先通过预检");
+    return;
+  }
+  const label = PORTING_ENTITY_LABELS[dataPortingState.entity] || "数据";
+  const confirmed = await confirmDialog({
+    title: `确认导入${label}`,
+    message: `将新建 ${preview.createCount} 条、更新 ${preview.updateCount} 条（${preview.unchangedCount} 条无变化）。导入不会删除任何数据。`,
+    confirmText: "确认导入",
+  });
+  if (!confirmed) return;
+
+  dataPortingState = { ...dataPortingState, loading: true };
+  renderDataPorting();
+  try {
+    const result = await apiRequest(`/api/data-porting/${dataPortingState.entity}/commit`, {
+      method: "POST",
+      body: { csvText: dataPortingState.csvText.trim() },
+    });
+    showToast(`已导入：新建 ${result.createdCount} 条，更新 ${result.updatedCount} 条`);
+    // 导入后清空，避免同一份文件被重复提交
+    dataPortingState = { ...initialDataPortingState(), entity: dataPortingState.entity, stageId: dataPortingState.stageId };
+    // 台账就在同一页上，导入后立刻重算；排课等其他视图各自加载时会拿到新数据。
+    await loadResourceLedger();
+  } catch (error) {
+    dataPortingState = {
+      ...dataPortingState,
+      loading: false,
+      preview: error.details || dataPortingState.preview,
+      error: error.details ? "" : error.message || "导入失败",
+    };
+    showToast(error.message || "导入失败");
+  }
+  renderDataPorting();
+}
+
+function renderDataPorting() {
+  const entitySelect = document.querySelector("#dataPortingEntity");
+  if (entitySelect && entitySelect.value !== dataPortingState.entity) entitySelect.value = dataPortingState.entity;
+  fillSelect("#dataPortingStage", REPORT_STAGE_OPTIONS, dataPortingState.stageId);
+
+  const textarea = document.querySelector("#dataPortingCsv");
+  if (textarea && textarea.value !== dataPortingState.csvText) textarea.value = dataPortingState.csvText;
+
+  const commit = document.querySelector("#commitPortingImport");
+  const preview = dataPortingState.preview;
+  if (commit) commit.disabled = !preview?.canImport || dataPortingState.loading;
+
+  const summary = document.querySelector("#dataPortingSummary");
+  const result = document.querySelector("#dataPortingResult");
+  if (!summary || !result) return;
+
+  setReportStatus("#dataPortingStatus", dataPortingState.loading ? "处理中" : preview ? (preview.canImport ? "预检通过" : "预检未通过") : "就绪");
+
+  if (dataPortingState.error) {
+    summary.innerHTML = "";
+    result.innerHTML = `<p class="empty-hint">${escapeHtml(dataPortingState.error)}</p>`;
+    return;
+  }
+  if (!preview) {
+    summary.innerHTML = "";
+    result.innerHTML = '<p class="empty-hint">选择文件后点「预检」，确认变更内容再导入。</p>';
+    return;
+  }
+
+  summary.innerHTML = [
+    { label: "总行数", value: preview.totalRows },
+    { label: "新建", value: preview.createCount },
+    { label: "更新", value: preview.updateCount },
+    { label: "无变化", value: preview.unchangedCount },
+    { label: "错误行", value: preview.errorRows },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  const blocks = [];
+
+  if (preview.errors?.length) {
+    blocks.push(`
+      <div class="porting-messages porting-errors">
+        <h4>必须先修正以下 ${preview.errors.length} 处错误</h4>
+        <ul>${preview.errors
+          .slice(0, 30)
+          .map((e) => `<li>第 ${escapeHtml(String(e.rowNumber))} 行 · ${escapeHtml(e.field)}：${escapeHtml(e.message)}</li>`)
+          .join("")}</ul>
+        ${preview.errors.length > 30 ? `<p>另有 ${preview.errors.length - 30} 处未列出。</p>` : ""}
+      </div>`);
+  }
+  if (preview.warnings?.length) {
+    blocks.push(`
+      <div class="porting-messages porting-warnings">
+        <h4>提示（不影响导入，请确认是否符合预期）</h4>
+        <ul>${preview.warnings
+          .slice(0, 20)
+          .map((w) => `<li>第 ${escapeHtml(String(w.rowNumber))} 行：${escapeHtml(w.message)}</li>`)
+          .join("")}</ul>
+      </div>`);
+  }
+
+  const changed = (preview.rows || []).filter((r) => r.action !== "unchanged");
+  if (changed.length) {
+    blocks.push(`
+      <table class="report-table porting-diff">
+        <thead><tr><th>行号</th><th>操作</th><th>名称</th><th>变更内容</th></tr></thead>
+        <tbody>${changed
+          .map(
+            (r) => `<tr>
+              <td>${escapeHtml(String(r.rowNumber))}</td>
+              <td class="${r.action === "create" ? "porting-create" : "porting-update"}">${r.action === "create" ? "新建" : "更新"}</td>
+              <td>${escapeHtml(r.name || "")}</td>
+              <td class="porting-changes">${
+                r.action === "create"
+                  ? "—"
+                  : (r.changes || [])
+                      .map((c) => `${escapeHtml(c.field)}：${escapeHtml(c.from || "空")} → <strong>${escapeHtml(c.to)}</strong>`)
+                      .join("<br>")
+              }</td>
+            </tr>`,
+          )
+          .join("")}</tbody>
+      </table>`);
+    const changedTotal = preview.createCount + preview.updateCount;
+    if (changedTotal > changed.length) {
+      blocks.push(
+        `<p class="empty-hint">变更共 ${changedTotal} 条，此处展示前 ${changed.length} 条；导入将处理全部变更。</p>`,
+      );
+    }
+  } else if (!preview.errors?.length) {
+    blocks.push('<p class="empty-hint">与系统现有数据完全一致，无需导入。</p>');
+  }
+
+  result.innerHTML = blocks.join("");
+}
+
+// --- 教学资源台账 -------------------------------------------------------------
+
+async function loadResourceLedger() {
+  if (!backendMode()) {
+    resourceLedgerState = { ...initialResourceLedgerState(), error: "教学资源台账需要连接后端" };
+    renderResourceLedger();
+    return;
+  }
+  resourceLedgerState = { ...resourceLedgerState, loading: true, error: "" };
+  renderResourceLedger();
+  try {
+    const params = new URLSearchParams({
+      stageId: resourceLedgerState.stageId || "",
+      roomType: resourceLedgerState.roomType || "",
+      keyword: resourceLedgerState.keyword || "",
+      onlyIdle: resourceLedgerState.onlyIdle ? "true" : "false",
+    });
+    const ledger = await apiRequest(`/api/resource-ledger?${params.toString()}`);
+    resourceLedgerState = { ...resourceLedgerState, loading: false, ledger };
+  } catch (error) {
+    resourceLedgerState = {
+      ...resourceLedgerState,
+      loading: false,
+      ledger: null,
+      error: error.message || "教学资源台账加载失败",
+    };
+  }
+  renderResourceLedger();
+}
+
+async function exportResourceLedgerFile() {
+  if (!backendMode()) {
+    showToast("导出需要连接后端");
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      stageId: resourceLedgerState.stageId || "",
+      roomType: resourceLedgerState.roomType || "",
+      keyword: resourceLedgerState.keyword || "",
+      onlyIdle: resourceLedgerState.onlyIdle ? "true" : "false",
+      format: "excel",
+    });
+    const result = await apiRequest(`/api/resource-ledger?${params.toString()}`);
+    if (!result?.content || !result.total) {
+      showToast("当前筛选没有可导出的教室");
+      return;
+    }
+    downloadTextFile(result.content, result.filename, result.mimeType);
+    showToast(`已导出 ${result.total} 间教室`);
+  } catch (error) {
+    showToast(error.message || "台账导出失败");
+  }
+}
+
+function renderResourceLedger() {
+  fillSelect("#ledgerStage", REPORT_STAGE_OPTIONS, resourceLedgerState.stageId);
+  fillSelect("#ledgerRoomType", LEDGER_ROOM_TYPES, resourceLedgerState.roomType);
+  const kw = document.querySelector("#ledgerKeyword");
+  if (kw && kw.value !== resourceLedgerState.keyword) kw.value = resourceLedgerState.keyword;
+  const idle = document.querySelector("#ledgerOnlyIdle");
+  if (idle) idle.checked = Boolean(resourceLedgerState.onlyIdle);
+
+  const summary = document.querySelector("#resourceLedgerSummary");
+  const wrap = document.querySelector("#resourceLedgerTable");
+  if (!summary || !wrap) return;
+  const { loading, error, ledger } = resourceLedgerState;
+
+  if (loading) {
+    setReportStatus("#resourceLedgerStatus", "读取中");
+    wrap.innerHTML = '<p class="empty-hint">正在统计教室占用…</p>';
+    summary.innerHTML = "";
+    return;
+  }
+  if (error) {
+    setReportStatus("#resourceLedgerStatus", "加载失败");
+    wrap.innerHTML = `<p class="empty-hint">${escapeHtml(error)}</p>`;
+    summary.innerHTML = "";
+    return;
+  }
+  if (!ledger) {
+    setReportStatus("#resourceLedgerStatus", "待加载");
+    wrap.innerHTML = '<p class="empty-hint">点击刷新查看台账。</p>';
+    summary.innerHTML = "";
+    return;
+  }
+
+  const t = ledger.totals;
+  setReportStatus("#resourceLedgerStatus", `${t.roomCount} 间`);
+  summary.innerHTML = [
+    { label: "教室总数", value: `${t.roomCount} 间` },
+    { label: "本学期课次", value: t.lessonCount },
+    { label: "闲置", value: `${t.idleCount} 间` },
+    { label: "停用", value: `${t.disabledCount} 间` },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  if (!ledger.rows.length) {
+    wrap.innerHTML = '<p class="empty-hint">当前筛选没有匹配的教室。</p>';
+    return;
+  }
+
+  const head = ["教室ID", "学部", "教室名称", "类型", "容量", "使用班级", "本学期课次", "状态"]
+    .map((h) => `<th>${escapeHtml(h)}</th>`)
+    .join("");
+  const body = ledger.rows
+    .map(
+      (r) => `<tr>
+        <td>${escapeHtml(r.id)}</td>
+        <td>${escapeHtml(r.stageName)}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${escapeHtml(r.roomTypeLabel)}</td>
+        <td>${escapeHtml(String(r.capacity ?? ""))}</td>
+        <td>${escapeHtml(r.holderNames || "—")}</td>
+        <td class="${r.idle ? "report-warn" : ""}">${r.lessonCount}</td>
+        <td class="${r.active ? "" : "report-warn"}">${r.active ? "启用" : "停用"}</td>
+      </tr>`,
+    )
+    .join("");
+  wrap.innerHTML = `<table class="report-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderDataPortingView() {
+  renderDataPorting();
+  renderResourceLedger();
 }
 
 function downloadCsvResult(result, fallbackFilename, options = {}) {
@@ -4220,11 +5041,10 @@ function applyFinanceScopeLabels() {
   const scopeName = currentFinanceScopeName();
   const prefix = scopeName || "全校";
   const grossLabel = document.querySelector("#financeGrossLabel");
-  const netLabel = document.querySelector("#financeNetLabel");
   const grossHint = document.querySelector("#financeGrossHint");
   if (grossLabel) grossLabel.textContent = `${prefix}应发`;
-  if (netLabel) netLabel.textContent = `${prefix}实发`;
-  if (grossHint) grossHint.textContent = scopeName ? `${scopeName}工资总额` : "全校工资总额";
+  // 口径说明常驻：系统只结算到应发，避免老师拿这个数字对实际到账
+  if (grossHint) grossHint.textContent = `${scopeName || "全校"}工资总额 · 个税社保线下处理`;
 }
 
 function budgetBarClass(ratio) {
@@ -6946,7 +7766,7 @@ function buildWarnings(teacherId = null) {
     });
 
   const pendingByTeacher = lessons
-    .filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn")
+    .filter((lesson) => lesson.status !== "cancelled" && lesson.date > todayKey())
     .reduce((map, lesson) => {
       map.set(lesson.teacherId, (map.get(lesson.teacherId) || 0) + 1);
       return map;
@@ -6956,8 +7776,8 @@ function buildWarnings(teacherId = null) {
     warnings.push({
       level: "中",
       teacherId: pendingTeacherId,
-      title: `${teacherName(pendingTeacherId)} 有 ${count} 节课未完成考勤`,
-      text: "未完成签入和签出的项目当前不会计入月度工作量，财务结算时会自动剔除。",
+      title: `${teacherName(pendingTeacherId)} 有 ${count} 节课尚未上课`,
+      text: "这些课尚未到上课时间，但已按课表计入月度工作量。",
     });
   });
 
@@ -7034,8 +7854,7 @@ function render() {
   renderStep("审批流程设置", renderApprovalSettingsView);
   renderStep("人事审计", renderHrAudit);
   renderStep("我的档案", renderMyHrProfile);
-  renderStep("签入签出", renderScanner);
-  renderStep("考勤记录", renderRecords);
+  renderStep("我的课时", renderRecords);
   renderStep("月度确认", renderConfirmation);
   renderStep("老师总薪资", renderTeacherPayroll);
   renderStep("财务首页", renderFinanceDashboard);
@@ -7043,8 +7862,10 @@ function render() {
   renderStep("薪资结算", renderSettlement);
   renderStep("工资记录", renderPayrollHistory);
   renderStep("薪资配置", renderPayrollConfig);
-  renderStep("异常提醒", renderWarnings);
-  renderStep("教室二维码库", renderClassroomScreens);
+  renderStep("统计报表", renderReportsView);
+  renderStep("基础数据", renderDataPortingView);
+  renderStep("账套管理", renderLedgersView);
+  renderStep("系统监控", renderMonitoringView);
   saveState();
 }
 
@@ -7091,8 +7912,6 @@ function renderShell() {
         ? `${account.department} · 薪资结算`
         : role === "system_admin"
           ? `${account.department} · 账号管理`
-        : role === "classroom"
-          ? `${account.department} · 动态二维码`
           : role === "hr"
             ? `${account.department} · 档案管理`
             : role === "division_head"
@@ -7102,8 +7921,6 @@ function renderShell() {
   document.querySelector("#accountSummaryMeta").textContent =
     role === "teacher"
       ? `${account.name} · ${teacher.department} · ${teacher.subject}`
-      : role === "classroom"
-        ? `${account.name} · 教室二维码库`
         : `${account.name} · ${account.department}`;
 
   document.querySelectorAll(".view").forEach((view) => {
@@ -7246,7 +8063,7 @@ function renderDashboard() {
   const plannedUnits = lessons
     .filter((lesson) => lesson.status !== "exception")
     .reduce((sum, lesson) => sum + lesson.units, 0);
-  const pendingLessons = lessons.filter((lesson) => ["scheduled", "pending", "checkedIn"].includes(lesson.status));
+  const pendingLessons = lessons.filter((lesson) => lesson.status !== "cancelled" && lesson.date > todayKey());
   const warnings = buildWarnings(teacherId);
   const nextLesson = pendingLessons[0];
 
@@ -7255,8 +8072,8 @@ function renderDashboard() {
   document.querySelector("#pendingLessons").textContent = pendingLessons.length;
   document.querySelector("#warningCount").textContent = warnings.length;
   document.querySelector("#netPreview").textContent = backendPayroll
-    ? formatCurrency(backendPayroll.netPay || 0)
-    : formatCurrency(salary.net);
+    ? formatCurrency(backendPayroll.grossPay || 0)
+    : formatCurrency(salary.gross);
   const dashboardPayrollStatus = document.querySelector("#dashboardPayrollStatus");
   if (dashboardPayrollStatus) {
     dashboardPayrollStatus.textContent = backendPayrollStatus
@@ -7273,40 +8090,33 @@ function renderDashboard() {
 
   const nextStatus = document.querySelector("#nextLessonStatus");
   const detail = document.querySelector("#nextLessonDetail");
-  const scanButton = document.querySelector("#scanNextLesson");
 
   if (!lessons.length) {
     nextStatus.textContent = "未发布";
     nextStatus.className = "status-pill warning";
     detail.innerHTML = `
       <strong>暂无课程任务</strong>
-      <p class="muted">教务或行政发布课表后，这里才会显示需要签入/签出的课程。</p>
+      <p class="muted">教务或行政发布课表后，这里才会显示你的课程。</p>
     `;
-    scanButton.disabled = true;
-    scanButton.innerHTML = `<span aria-hidden="true">✓</span>签入`;
   } else if (!nextLesson) {
     nextStatus.textContent = "今日完成";
     nextStatus.className = "status-pill done";
     detail.innerHTML = `
       <strong>暂无待处理课时</strong>
-      <p class="muted">当前已完成课时已同步到薪资试算，月末可进入确认流程。</p>
+      <p class="muted">本月课时已同步到薪资试算，月末可进入确认流程。</p>
     `;
-    scanButton.disabled = true;
   } else {
     nextStatus.textContent = statusLabel[nextLesson.status];
-    nextStatus.className = nextLesson.status === "checkedIn" ? "status-pill locked" : "status-pill";
+    nextStatus.className = "status-pill";
     detail.innerHTML = `
       <strong>${nextLesson.className} · ${nextLesson.course}</strong>
       <div class="detail-grid">
         <div class="detail-cell"><span>上课时间</span>${formatDate(nextLesson.date)} ${nextLesson.time}</div>
         <div class="detail-cell"><span>教室</span>${nextLesson.room}</div>
         <div class="detail-cell"><span>课时类型</span>${lessonTypeLabel[nextLesson.type]}</div>
-        <div class="detail-cell"><span>签到要求</span>课前签入 · 课后签出</div>
+        <div class="detail-cell"><span>计薪</span>排给你的课自动计入课时费</div>
       </div>
     `;
-    scanButton.disabled = false;
-    scanButton.dataset.id = nextLesson.id;
-    scanButton.innerHTML = `<span aria-hidden="true">⌖</span>去${actionLabel(actionForLesson(nextLesson))}`;
   }
 
   const todayLessons = lessons.filter((lesson) => lesson.date === todayKey());
@@ -7318,6 +8128,9 @@ function renderDashboard() {
 function renderTasks() {
   const lessons = teacherLessons(currentTeacherId()).filter((lesson) => {
     if (state.taskFilter === "all") return true;
+    // pending 不是一个课次状态，是「日期在今天之后」——排了就计薪，
+    // 未到时间只是还没上，不是另一种状态
+    if (state.taskFilter === "pending") return lesson.status !== "cancelled" && lesson.date > todayKey();
     return lesson.status === state.taskFilter;
   });
 
@@ -7418,7 +8231,7 @@ function scheduleCalendarEventHtml(lesson, bounds) {
   const totalMinutes = (bounds.endHour - bounds.startHour) * 60;
   const top = ((range.startMinutes - bounds.startHour * 60) / totalMinutes) * 100;
   const height = ((range.endMinutes - range.startMinutes) / totalMinutes) * 100;
-  const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
+  const action = lesson.status !== "cancelled" ? statusTag(lesson.status) : statusTag(lesson.status);
 
   return `
     <article class="weekly-calendar-event ${lesson.status}" style="top: ${top}%; height: ${height}%">
@@ -7504,7 +8317,7 @@ function scheduleTimelineHtml(dayLessons, selectedDate) {
   const events = dayLessons
     .map((lesson) => {
       const range = lessonTimeRange(lesson);
-      const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
+      const action = lesson.status !== "cancelled" ? statusTag(lesson.status) : statusTag(lesson.status);
       return `
         <article class="schedule-timeline-event ${lesson.status}">
           <div class="schedule-timeline-time">
@@ -7556,10 +8369,9 @@ function renderSchedule() {
     state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   }
   const weekLessons = lessons.filter((lesson) => weekDates.includes(lesson.date));
-  const pendingCount = weekLessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
-  const completedCount = weekLessons.filter((lesson) => lesson.status === "completed").length;
-  const scheduledCount = weekLessons.filter((lesson) => lesson.status === "scheduled").length;
-  const exceptionCount = weekLessons.filter((lesson) => lesson.status === "exception").length;
+  const payableCount = weekLessons.filter((lesson) => lesson.status !== "cancelled").length;
+  const pendingCount = weekLessons.filter((lesson) => lesson.status !== "cancelled" && lesson.date > todayKey()).length;
+  const cancelledCount = weekLessons.filter((lesson) => lesson.status === "cancelled").length;
 
   select.innerHTML = weeks
     .map((week) => {
@@ -7581,10 +8393,9 @@ function renderSchedule() {
 
   summary.innerHTML = [
     ["本周课程", `${weekLessons.length} 节`, "当前自然周"],
-    ["已完成", `${completedCount} 节`, "签入签出完成"],
-    ["待处理", `${pendingCount} 节`, "需签入或签出"],
-    ["未到时间", `${scheduledCount} 节`, "之后排班"],
-    ["异常", `${exceptionCount} 条`, "待复核"],
+    ["计薪课时", `${payableCount} 节`, "排给你的课都计薪"],
+    ["未到时间", `${pendingCount} 节`, "本周还没上的课"],
+    ["已取消", `${cancelledCount} 节`, "请假未安排代课"],
   ]
     .map(
       ([label, value, desc]) => `
@@ -9931,73 +10742,6 @@ function adminScheduleItem(assignment, options = {}) {
   `;
 }
 
-function renderScanner() {
-  const select = document.querySelector("#qrLessonSelect");
-  if (!select) return;
-
-  const teacherId = currentRole() === "teacher" ? currentTeacherId() : state.selectedFinanceTeacherId;
-  const lessons = teacherLessons(teacherId);
-  const actionableLesson = lessons.find(
-    (lesson) =>
-      lesson.status === "pending" ||
-      lesson.status === "checkedIn" ||
-      lesson.status === "scheduled",
-  );
-  const selectedLesson = lessons.find((lesson) => lesson.id === state.scannerLessonId);
-  if (!selectedLesson || !["pending", "checkedIn", "scheduled"].includes(selectedLesson.status)) {
-    state.scannerLessonId = actionableLesson?.id || lessons[0]?.id || "";
-  }
-
-  select.disabled = !lessons.length;
-  select.innerHTML = lessons.length
-    ? lessons
-        .map(
-          (lesson) => `
-        <option value="${lesson.id}" ${lesson.id === state.scannerLessonId ? "selected" : ""}>
-          ${formatDate(lesson.date)} ${lesson.time} · ${lesson.room} · ${lesson.className} · ${statusLabel[lesson.status]}
-        </option>
-      `,
-        )
-        .join("")
-    : `<option value="">暂无课程任务</option>`;
-
-  const lesson = lessons.find((item) => item.id === state.scannerLessonId);
-  const lessonCard = document.querySelector("#scannerLessonCard");
-  const startButton = document.querySelector("#startScanner");
-
-  const scanIconSvg =
-    '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/></svg>';
-  if (!lesson) {
-    lessonCard.innerHTML = `<div class="empty-state">暂无可扫码处理的课时</div>`;
-    if (startButton) {
-      startButton.disabled = true;
-      startButton.innerHTML = `${scanIconSvg}扫码签入`;
-    }
-  } else {
-    const action = actionForLesson(lesson);
-    if (startButton) {
-      startButton.disabled = Boolean(qrScanner);
-      startButton.innerHTML = `${scanIconSvg}扫码${escapeHtml(actionLabel(action))}`;
-    }
-    lessonCard.innerHTML = `
-      <strong>${escapeHtml(actionLabel(action))} · ${escapeHtml(lesson.className)} · ${escapeHtml(lesson.course)}</strong>
-      <div class="detail-grid">
-        <div class="detail-cell"><span>上课时间</span>${escapeHtml(formatDate(lesson.date))} ${escapeHtml(lesson.time)}</div>
-        <div class="detail-cell"><span>教室</span>${escapeHtml(lesson.room)}</div>
-        <div class="detail-cell"><span>当前状态</span>${escapeHtml(statusLabel[lesson.status] || lesson.status)}</div>
-        <div class="detail-cell"><span>扫码要求</span>扫描教室电脑实时二维码</div>
-      </div>
-    `;
-  }
-
-  document.querySelector("#scannerStatus").textContent = qrScanner ? "扫码中" : "待扫码";
-  document.querySelector("#scannerStatus").className = qrScanner ? "status-pill done" : "status-pill";
-  if (startButton && lesson) startButton.disabled = Boolean(qrScanner);
-  // 停止按钮只在扫码进行中出现，避免闲置状态多余控件
-  document.querySelector("#stopScanner").classList.toggle("is-hidden", !qrScanner);
-  renderSecurityChecks();
-}
-
 function renderRecords() {
   if (backendMode() && currentRole() === "teacher") {
     renderBackendTeacherRecords();
@@ -10005,22 +10749,18 @@ function renderRecords() {
   }
 
   const teacherId = currentTeacherId();
-  const records = teacherLessons(teacherId).filter(
-    (lesson) => lesson.status === "checkedIn" || lesson.status === "completed" || lesson.status === "exception",
-  );
+  const records = teacherLessons(teacherId);
   document.querySelector("#teacherRecordTable").innerHTML = records.length
     ? records.map(recordRow).join("")
-    : `<tr><td colspan="7"><div class="empty-state">暂无考勤记录</div></td></tr>`;
+    : `<tr><td colspan="8"><div class="empty-state">本月暂无课程</div></td></tr>`;
 }
 
-function attendanceRecordTag(record) {
-  if (record.status === "accepted") {
-    return `<span class="tag completed">${record.actionLabel || "通过"}</span>`;
-  }
-  if (record.status === "exception") {
-    return `<span class="tag exception">异常</span>`;
-  }
-  return `<span class="tag exception">已拦截</span>`;
+// 计薪与否只有两种，用颜色区分开：教师扫这张表是在找「我这个月哪些课被算了」，
+// 取消的那几行要一眼能挑出来
+function lessonPayableTag(record) {
+  return record.payable
+    ? `<span class="tag completed">计薪</span>`
+    : `<span class="tag exception">已取消</span>`;
 }
 
 function backendTeacherRecordRow(record) {
@@ -10031,20 +10771,27 @@ function backendTeacherRecordRow(record) {
       <td class="row-title" data-label="班级">${record.className || "-"}</td>
       <td data-label="课程">${record.subjectName || "-"}</td>
       <td data-label="教室">${record.room || "-"}</td>
-      <td data-label="考勤状态">${attendanceRecordTag(record)}</td>
-      <td class="muted" data-label="记录说明">${record.resultText || "-"}</td>
+      <td data-label="课时">${record.units ?? "-"}</td>
+      <td data-label="计薪">${lessonPayableTag(record)}</td>
+      <td class="muted" data-label="说明">${record.resultText || "-"}</td>
     </tr>
   `;
 }
 
 function renderBackendTeacherRecords() {
+  // 月份选择器：默认落在当前结算月，但教师核对上个月工资时要能往回翻。
+  // 没有这个选择器，当月还没排课时页面只会说「本月暂无课程」，
+  // 看的人分不清是没排课还是系统坏了。
+  const monthInput = document.querySelector("#recordsMonth");
+  if (monthInput && !monthInput.value) monthInput.value = attendanceRecordState.month || currentSettlementMonth();
+
   const teacherId = currentTeacherId();
-  ensureBackendAttendanceRecords(teacherId);
+  ensureBackendAttendanceRecords(teacherId, monthInput?.value || attendanceRecordState.month || currentSettlementMonth());
   const table = document.querySelector("#teacherRecordTable");
   const isCurrent = attendanceRecordState.teacherId === teacherId;
 
   if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
-    table.innerHTML = `<tr><td colspan="7"><div class="empty-state">正在加载后端考勤记录...</div></td></tr>`;
+    table.innerHTML = `<tr><td colspan="7"><div class="empty-state">正在加载课时记录...</div></td></tr>`;
     return;
   }
 
@@ -10054,9 +10801,16 @@ function renderBackendTeacherRecords() {
   }
 
   const records = isCurrent ? attendanceRecordState.records : [];
+  const summary = attendanceRecordState.summary;
+  setReportStatus(
+    "#recordsSummary",
+    summary
+      ? `计薪 ${summary.payableCount} 节 / ${summary.payableUnits} 课时　已取消 ${summary.cancelledCount} 节`
+      : "—",
+  );
   table.innerHTML = records.length
     ? records.map(backendTeacherRecordRow).join("")
-    : `<tr><td colspan="7"><div class="empty-state">暂无后端考勤记录</div></td></tr>`;
+    : `<tr><td colspan="7"><div class="empty-state">本月暂无课程</div></td></tr>`;
 }
 
 function renderConfirmation() {
@@ -10083,16 +10837,16 @@ function renderConfirmation() {
   const salary = calculateSalary(teacherId);
   const exceptionCount = teacherLessons(teacherId).filter((lesson) => lesson.status === "exception").length;
   const pendingCount = teacherLessons(teacherId).filter(
-    (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
+    (lesson) => lesson.status !== "cancelled" && lesson.date > todayKey(),
   ).length;
 
   const localSalaryRows = salaryRows(teacherId);
   document.querySelector("#workloadList").innerHTML = [
-    ["正常课时", `${salary.regularUnits} 节`, "签入签出完成后计入月度工作量"],
-    ["早晚自习", `${salary.selfStudyUnits} 节`, "签入签出完成后计入月度工作量"],
-    ["周末补课", `${salary.weekendUnits} 节`, "签入签出完成后计入月度工作量"],
+    ["正常课时", `${salary.regularUnits} 节`, "已计入月度工作量"],
+    ["早晚自习", `${salary.selfStudyUnits} 节`, "已计入月度工作量"],
+    ["周末补课", `${salary.weekendUnits} 节`, "已计入月度工作量"],
     ["审批加班", `${salary.profile.approvedOvertimeHours || 0} 小时`, "由主管发起并审批通过"],
-    ["待处理考勤", `${pendingCount} 节`, "未完成签入和签出，暂不计入工资"],
+    ["未到时间", `${pendingCount} 节`, "尚未上课，已计入工资"],
     ["异常记录", `${exceptionCount} 条`, "待教务复核后处理"],
   ]
     .map(
@@ -10158,7 +10912,7 @@ function renderBackendConfirmation() {
   const actionHint = document.querySelector("#teacherConfirmActionHint");
 
   if (payroll?.generated) {
-    if (confirmNet) confirmNet.textContent = formatCurrency(payroll.netPay || 0);
+    if (confirmNet) confirmNet.textContent = formatCurrency(payroll.grossPay || 0);
     if (confirmStatus) {
       confirmStatus.textContent = payrollStatusLabel(payrollStatus);
       confirmStatus.className = isLockedPayroll ? "status-pill locked" : "status-pill done";
@@ -10211,18 +10965,18 @@ function renderBackendConfirmation() {
     list.innerHTML =
       stateNote +
       [
-      ...categories.map((category) => [category.label, `${category.units} 节`, "签入签出完成后计入月度工作量"]),
+      ...categories.map((category) => [category.label, `${category.units} 节`, "已计入月度工作量"]),
       [
-        "待处理考勤",
+        "未到时间",
         `${summary.pendingCount || 0} 节`,
-        isLockedPayroll ? "已作为未计薪记录归档，不影响已锁定工资" : "未完成签入和签出，暂不计入工资",
+        isLockedPayroll ? "已作为未计薪记录归档，不影响已锁定工资" : "尚未上课，已计入工资",
       ],
       [
         "异常记录",
         `${summary.exceptionCount || 0} 条`,
         isLockedPayroll ? "已按锁定前处理结果归档留痕" : "异常课次不会进入本次工资，需财务处理后重算",
       ],
-      ["可计薪课时", `${summary.payableUnits || 0} 节`, "已完成签入签出的课时数量"],
+      ["可计薪课时", `${summary.payableUnits || 0} 节`, "排给你的课都计薪"],
     ]
       .map(
         ([label, value, desc]) => `
@@ -10284,7 +11038,7 @@ function setTeacherPayrollSupport(teacherId, payroll = null) {
   const payableUnits = lessons
     .filter((lesson) => lesson.status === "completed")
     .reduce((sum, lesson) => sum + (lesson.units || 0), 0);
-  const pendingCount = lessons.filter((lesson) => lesson.status === "pending" || lesson.status === "checkedIn").length;
+  const pendingCount = lessons.filter((lesson) => lesson.status !== "cancelled" && lesson.date > todayKey()).length;
   const payrollStatus = payroll?.generated?.status || "";
   const stage = payrollStatus ? payrollFlowStage(payrollStatus) : state.confirmationStages[teacherId] || 0;
   const supportPayableUnits = payroll?.workloadSummary?.payableUnits ?? payableUnits;
@@ -10367,7 +11121,7 @@ function renderTeacherPayroll() {
 	    const payrollStatus = payroll?.generated ? payrollStatusLabel(backendPayrollStatus) : "后端试算";
 	    setTeacherPayrollSupport(teacherId, payroll);
 	    setTeacherPayrollWidgets({
-	      amountText: formatCurrency(payroll?.netPay || 0),
+	      amountText: formatCurrency(payroll?.grossPay || 0),
 	      statusText: payrollStatus,
 	      statusClass: backendPayrollStatus === "locked" ? "status-pill locked" : "status-pill done",
 	      noteText:
@@ -10384,7 +11138,7 @@ function renderTeacherPayroll() {
 
   const salary = calculateSalary(teacherId);
 	  setTeacherPayrollWidgets({
-	    amountText: formatCurrency(salary.net),
+	    amountText: formatCurrency(salary.gross),
 	    statusText: settlementText(teacherId),
 	    statusClass: "status-pill",
 	    noteText: "结算期到月度确认查看明细",
@@ -10403,7 +11157,7 @@ function renderFinanceDashboard() {
 
   if (!state.financeGroupBy) state.financeGroupBy = "department";
   const allPending = state.lessons.filter(
-    (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
+    (lesson) => lesson.status !== "cancelled" && lesson.date > todayKey(),
   ).length;
   const allWarnings = buildWarnings().length;
   const settledCount = state.teachers.filter((teacher) => state.settlements[teacher.id]?.status === "settled").length;
@@ -10416,7 +11170,6 @@ function renderFinanceDashboard() {
   document.querySelector("#financeWarningCount").textContent = allWarnings;
   document.querySelector("#financeSettledCount").textContent = settledCount;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
-  document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
   const financeApiStatus = document.querySelector("#financeApiStatus");
   const financePageInfo = document.querySelector("#financeTeacherPageInfo");
   if (financeApiStatus) {
@@ -10443,7 +11196,7 @@ function renderFinanceDashboard() {
           <td data-label="待处理">${group.pendingCount} 节</td>
           <td data-label="异常">${group.exceptionCount} 条</td>
           <td data-label="应发合计">${formatCurrency(group.gross)}</td>
-          <td data-label="实发合计">${formatCurrency(group.net)}</td>
+          <td data-label="应发合计">${formatCurrency(group.net)}</td>
         </tr>
       `,
     )
@@ -10460,7 +11213,7 @@ function renderFinanceDashboard() {
           <td data-label="已完成课时">${stats.completedUnits} 节</td>
           <td data-label="待处理">${stats.pendingCount} 节</td>
           <td data-label="异常">${stats.exceptionCount} 条</td>
-          <td data-label="预计实发">${formatCurrency(salary.net)}</td>
+          <td data-label="预计应发">${formatCurrency(salary.gross)}</td>
           <td data-label="结算状态">${settlementTag(teacher.id)}</td>
           <td data-label="操作">
             <button class="mini-button" data-finance-records="${teacher.id}" type="button">看记录</button>
@@ -10486,7 +11239,6 @@ function renderBackendFinanceDashboard() {
   document.querySelector("#financeWarningCount").textContent = totals.exception;
   document.querySelector("#financeSettledCount").textContent = totals.locked || 0;
   document.querySelector("#financeGrossTotal").textContent = formatCurrency(totals.gross);
-  document.querySelector("#financeNetTotal").textContent = formatCurrency(totals.net);
   renderBudgetPanel("financeBudgetPanel", "financeBudgetGrid", "financeBudgetSource");
 
   renderFinanceTeacherFilters("overview");
@@ -10518,7 +11270,7 @@ function renderBackendFinanceDashboard() {
           <td data-label="待处理">${group.pendingCount} 节</td>
           <td data-label="异常">${group.exceptionCount} 条</td>
           <td data-label="应发合计">${formatCurrency(group.gross)}</td>
-          <td data-label="实发合计">${formatCurrency(group.net)}</td>
+          <td data-label="应发合计">${formatCurrency(group.net)}</td>
         </tr>
       `,
     )
@@ -10537,7 +11289,7 @@ function renderBackendFinanceDashboard() {
                 <td data-label="已完成课时">${teacher.summary?.completedUnits || 0} 节</td>
                 <td data-label="待处理">${teacher.summary?.pendingCount || 0} 节</td>
                 <td data-label="异常">${teacher.summary?.exceptionCount || 0} 条</td>
-                <td data-label="预计实发">${formatCurrency(teacher.payroll?.netPay || 0)}</td>
+                <td data-label="预计应发">${formatCurrency(teacher.payroll?.grossPay || 0)}</td>
                 <td data-label="结算状态">${payrollStatusTag(teacher.payrollDetail?.status || teacher.payroll?.status || "preview")}</td>
                 <td data-label="操作">
                   <button class="mini-button" data-finance-records="${teacher.id}" type="button">看记录</button>
@@ -10566,21 +11318,22 @@ function renderFinanceRecords() {
 
 function backendFinanceWorkloadRows(workload) {
   if (!workload) return [];
+  // 未到时间的课次已经计薪了，只是还没上。它同时出现在 payableLines 和
+  // pendingLines 里，所以这里按 lessonId 去重，否则财务会看到同一节课两行、
+  // 以为课时被算了两遍。
+  const pendingIds = new Set((workload.pendingLines || []).map((line) => line.lessonId));
   return [
     ...(workload.payableLines || []).map((line) => ({
       ...line,
-      status: "completed",
-      note: `可计薪 ${line.units} 节 · 金额 ${formatCurrency(line.amount || 0)}`,
+      payable: true,
+      note: pendingIds.has(line.lessonId)
+        ? `尚未上课，已计薪 ${line.units} 节 · ${formatCurrency(line.amount || 0)}`
+        : `计薪 ${line.units} 节 · ${formatCurrency(line.amount || 0)}`,
     })),
-    ...(workload.pendingLines || []).map((line) => ({
+    ...(workload.cancelledLines || []).map((line) => ({
       ...line,
-      status: line.status || "scheduled",
-      note: "未完成签入和签出，暂不计入工资",
-    })),
-    ...(workload.exceptionLines || []).map((line) => ({
-      ...line,
-      status: "exception",
-      note: line.note || "待教务复核",
+      payable: false,
+      note: line.note || "已取消，不计薪",
     })),
   ].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 }
@@ -10594,7 +11347,7 @@ function backendFinanceRecordRow(row, teacher) {
       <td data-label="班级">${row.className}</td>
       <td data-label="课程">${row.subjectName || row.course}</td>
       <td data-label="教室">${row.room}</td>
-      <td data-label="考勤状态">${attendanceRecordTag(row)}</td>
+      <td data-label="计薪状态">${lessonPayableTag(row)}</td>
       <td class="muted" data-label="说明">${row.note}</td>
     </tr>
   `;
@@ -10616,7 +11369,7 @@ function renderBackendFinanceRecords() {
   const isCurrent = attendanceRecordState.teacherId === teacherId;
 
   if (attendanceRecordState.loading && (!isCurrent || !attendanceRecordState.loaded)) {
-    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">正在加载该老师后端扫码记录...</div></td></tr>`;
+    table.innerHTML = `<tr><td colspan="8"><div class="empty-state">正在加载该老师课时记录...</div></td></tr>`;
     return;
   }
 
@@ -10639,7 +11392,7 @@ function renderBackendFinanceRecords() {
           ),
         )
         .join("")
-    : `<tr><td colspan="8"><div class="empty-state">该老师暂无后端扫码记录</div></td></tr>`;
+    : `<tr><td colspan="8"><div class="empty-state">该老师本月暂无课程</div></td></tr>`;
 }
 
 function selectedFinanceTeacherRecord(teacherId = state.selectedFinanceTeacherId) {
@@ -10822,7 +11575,7 @@ function renderSettlementWorkspaceState({
       blocked: payrollStatus !== "reviewed" || loading || Boolean(error),
     });
 		    workflow.innerHTML = [
-		      settlementStepHtml(1, "保存草稿", payrollStatus === "saved" ? "该老师工资已保存，待本月统一发布" : hasPayrollSnapshot ? "该老师工资快照已保存" : "核对工作量、津贴、奖扣和个税", savedState),
+		      settlementStepHtml(1, "保存草稿", payrollStatus === "saved" ? "该老师工资已保存，待本月统一发布" : hasPayrollSnapshot ? "该老师工资快照已保存" : "核对工作量、津贴与奖扣", savedState),
 		      settlementStepHtml(2, "发布确认", ["teacher_confirmed", "reviewed", "locked"].includes(payrollStatus) ? "老师已确认工资明细" : payrollStatus === "disputed" ? "老师已提出异议" : payrollStatus === "generated" ? "已发布，等待老师确认" : "发布后老师端才可确认", publishState),
 		      settlementStepHtml(3, "财务处理", ["reviewed", "locked"].includes(payrollStatus) ? "财务已处理完成" : "处理老师异议或确认无误", reviewState),
 	      settlementStepHtml(4, "锁定发放", payrollStatus === "locked" ? "工资已锁定并可发放" : "锁定后老师端只看总薪资", lockState),
@@ -11203,14 +11956,12 @@ function renderSettlement() {
 		  const teacherId = state.selectedFinanceTeacherId;
   const salary = calculateSalary(teacherId);
   const localRows = salaryRows(teacherId);
-  const totals = settlementTotalsFromRows(localRows, { gross: salary.gross, tax: salary.tax, net: salary.net });
+  const totals = settlementTotalsFromRows(localRows, { gross: salary.gross });
   const settlement = state.settlements[teacherId];
   const settled = settlement?.status === "settled";
   const status = document.querySelector("#settlementStatus");
 
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(totals.gross);
-  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(totals.tax);
-  document.querySelector("#settlementNetSalary").textContent = formatCurrency(totals.net);
 	  status.textContent = settled ? `已结算 ${settlement.settledAt}` : "未结算";
 	  status.className = settled ? "status-pill locked" : "status-pill";
 	  document.querySelector("#saveTeacherPayrollDraft").disabled = true;
@@ -11248,8 +11999,6 @@ function renderBackendSettlement() {
 		  const teacherId = state.selectedFinanceTeacherId;
   if (!teacherId) {
     document.querySelector("#settlementGrossSalary").textContent = "¥0";
-    document.querySelector("#settlementTaxSalary").textContent = "¥0";
-    document.querySelector("#settlementNetSalary").textContent = "¥0";
 	    document.querySelector("#settlementStatus").textContent = "当前筛选无老师";
 	    document.querySelector("#settlementStatus").className = "status-pill warning";
 	    document.querySelector("#saveTeacherPayrollDraft").disabled = true;
@@ -11285,8 +12034,6 @@ function renderBackendSettlement() {
 
   if (financeTeacherDetailState.loading && !payroll) {
     document.querySelector("#settlementGrossSalary").textContent = "读取中";
-    document.querySelector("#settlementTaxSalary").textContent = "读取中";
-    document.querySelector("#settlementNetSalary").textContent = "读取中";
 	    status.textContent = "正在读取薪资明细";
 	    status.className = "status-pill";
 	    saveButton.disabled = true;
@@ -11311,8 +12058,6 @@ function renderBackendSettlement() {
   if (financeTeacherDetailState.error) {
     const blockerRows = payrollLockBlockersTableRows(financeTeacherDetailState.lockBlockers || []);
     document.querySelector("#settlementGrossSalary").textContent = "¥0";
-    document.querySelector("#settlementTaxSalary").textContent = "¥0";
-    document.querySelector("#settlementNetSalary").textContent = "¥0";
 	    status.textContent = financeTeacherDetailState.error;
 	    status.className = "status-pill warning";
 	    saveButton.disabled = !isFinanceRole();
@@ -11336,8 +12081,6 @@ function renderBackendSettlement() {
 
   if (!payroll) {
     document.querySelector("#settlementGrossSalary").textContent = "¥0";
-    document.querySelector("#settlementTaxSalary").textContent = "¥0";
-    document.querySelector("#settlementNetSalary").textContent = "¥0";
 	    status.textContent = "暂无薪资明细";
 	    status.className = "status-pill";
 	    saveButton.disabled = !isFinanceRole();
@@ -11361,12 +12104,9 @@ function renderBackendSettlement() {
 
   const totals = settlementTotalsFromRows(payroll.rows || [], {
     gross: payroll.grossPay || 0,
-    tax: payroll.tax || 0,
-    net: payroll.netPay || 0,
+
   });
   document.querySelector("#settlementGrossSalary").textContent = formatCurrency(totals.gross);
-  document.querySelector("#settlementTaxSalary").textContent = formatCurrency(totals.tax);
-  document.querySelector("#settlementNetSalary").textContent = formatCurrency(totals.net);
 	  const payrollStatus = payroll.generated?.status || "preview";
   const lockBlockers = payroll.lockBlockers || financeTeacherDetailState.lockBlockers || [];
   const hasLockBlockers = payrollStatus === "reviewed" && lockBlockers.length > 0;
@@ -11442,9 +12182,7 @@ function renderPayrollHistoryControls() {
 
 function renderPayrollHistorySummary(data = null) {
   const summary = data?.summary || {};
-  document.querySelector("#payrollHistoryPaidNet").textContent = formatCurrency(summary.paidNetPay || 0);
   document.querySelector("#payrollHistoryPaidGross").textContent = formatCurrency(summary.paidGrossPay || 0);
-  document.querySelector("#payrollHistoryPaidTax").textContent = formatCurrency(summary.paidTax || 0);
   document.querySelector("#payrollHistoryCount").textContent = `${summary.lockedCount || 0} / ${summary.totalCount || 0}`;
   const note = document.querySelector("#payrollHistoryNote");
   if (payrollHistoryState.loading) {
@@ -11489,8 +12227,7 @@ function renderPayrollHistoryTable(data = null) {
           <td data-label="科目">${escapeHtml(item.subjectName || "-")}</td>
           <td data-label="状态">${payrollStatusTag(item.status)}</td>
           <td data-label="应发">${formatCurrency(item.grossPay || 0)}</td>
-          <td data-label="个税">${formatCurrency(item.tax || 0)}</td>
-          <td data-label="实发"><strong>${formatCurrency(item.netPay || 0)}</strong></td>
+          <td data-label="应发"><strong>${formatCurrency(item.grossPay || 0)}</strong></td>
           <td data-label="锁定时间">${escapeHtml(item.lockedAt ? item.lockedAt.slice(0, 10) : "未锁定")}</td>
         </tr>
       `,
@@ -11554,8 +12291,7 @@ function renderPayrollRulesPanel() {
     evening: state.rules.selfStudyRate,
     weekend: state.rules.weekendRate,
     makeup: 100,
-    taxThreshold: state.rules.taxThreshold,
-    taxRate: state.rules.taxRate,
+
   };
   const fields = [
     ["#ruleBaseSalary", rules.baseSalary],
@@ -11565,8 +12301,7 @@ function renderPayrollRulesPanel() {
     ["#ruleEvening", rules.evening],
     ["#ruleWeekend", rules.weekend],
     ["#ruleMakeup", rules.makeup],
-    ["#ruleTaxThreshold", rules.taxThreshold],
-    ["#ruleTaxRate", rules.taxRate],
+
   ];
   fields.forEach(([selector, value]) => {
     const input = document.querySelector(selector);
@@ -11923,32 +12658,6 @@ function removeSalaryManualItem(index) {
   setSalaryManualItems(items);
 }
 
-function renderWarnings() {
-  if (backendMode()) {
-    renderBackendWarnings();
-    return;
-  }
-
-  const role = currentRole();
-  const teacherId = role === "teacher" ? currentTeacherId() : null;
-  const warnings = buildWarnings(teacherId);
-  document.querySelector("#warningsTitle").textContent = role === "teacher" ? "我的异常提醒" : "全校异常提醒";
-  document.querySelector("#warningList").innerHTML = warnings.length
-    ? warnings
-        .map(
-          (warning) => `
-            <article class="warning-item">
-              <header>
-                <strong>${warning.title}</strong>
-                <span class="tag ${warning.level === "高" ? "exception" : "pending"}">${warning.level}风险</span>
-              </header>
-              <p>${warning.text}</p>
-            </article>
-          `,
-        )
-        .join("")
-    : `<div class="empty-state">暂无异常提醒</div>`;
-}
 
 function backendWarningItems({ records = [], workload = null, payroll = null } = {}) {
   const items = [];
@@ -11960,15 +12669,16 @@ function backendWarningItems({ records = [], workload = null, payroll = null } =
     items.push(item);
   };
 
+  // 取消的课次要提醒：教师核对工资时会问「我这周怎么少了两节」
   records
-    .filter((record) => record.status !== "accepted")
+    .filter((record) => record.payable === false)
     .forEach((record) => {
       addItem({
-        key: `record-${record.id || record.lessonId || `${record.date}-${record.time}-${record.actionLabel}`}`,
-        type: record.status === "exception" ? "exception" : "rejected",
-        title: `${record.actionLabel || "扫码"} · ${record.className || "未匹配课次"}`,
-        tag: record.status === "exception" ? "异常" : "拦截",
-        detail: `${formatDate(record.date)} ${record.time || ""} · ${record.room || "未知教室"} · ${record.resultText || "需要复核"}`,
+        key: `record-${record.lessonId || `${record.date}-${record.time}`}`,
+        type: "cancelled",
+        title: `${record.className || "未匹配课次"} · ${record.subjectName || ""}`,
+        tag: "已取消",
+        detail: `${formatDate(record.date)} ${record.time || ""} · ${record.room || "未知教室"} · ${record.resultText || "不计薪"}`,
       });
     });
 
@@ -11979,7 +12689,7 @@ function backendWarningItems({ records = [], workload = null, payroll = null } =
       lessonId: line.lessonId,
       title: `${line.className || "未设置班级"} · ${line.subjectName || "未设置课程"}`,
       tag: "待处理",
-      detail: `${formatDate(line.date)} ${line.time || ""} · ${line.room || "未设置教室"} · 未完成签入/签出，暂不计入工资`,
+      detail: `${formatDate(line.date)} ${line.time || ""} · ${line.room || "未设置教室"} · 尚未上课，已计入工资`,
     });
   });
 
@@ -12116,7 +12826,7 @@ function backendFinanceTeacherOptions(selectedId) {
 }
 
 function scheduleLessonItem(lesson) {
-  const action = lesson.status === "pending" || lesson.status === "checkedIn" ? actionCell(lesson) : statusTag(lesson.status);
+  const action = lesson.status !== "cancelled" ? statusTag(lesson.status) : statusTag(lesson.status);
   return `
     <div class="schedule-item">
       <div class="schedule-time">
@@ -12162,6 +12872,7 @@ function fullTaskRow(lesson) {
 }
 
 function recordRow(lesson) {
+  const cancelled = lesson.status === "cancelled";
   return `
     <tr>
       <td data-label="日期">${formatDate(lesson.date)}</td>
@@ -12169,8 +12880,9 @@ function recordRow(lesson) {
       <td class="row-title" data-label="班级">${lesson.className}</td>
       <td data-label="课程">${lesson.course}</td>
       <td data-label="教室">${lesson.room}</td>
-      <td data-label="考勤状态">${statusTag(lesson.status)}</td>
-      <td class="muted" data-label="记录说明">${attendanceNote(lesson)}</td>
+      <td data-label="课时">${lesson.units ?? 1}</td>
+      <td data-label="计薪">${lessonPayableTag({ payable: !cancelled })}</td>
+      <td class="muted" data-label="说明">${cancelled ? lesson.cancelReason || "已取消，不计薪" : "计入课时费"}</td>
     </tr>
   `;
 }
@@ -12195,13 +12907,8 @@ function statusTag(status) {
 }
 
 function attendanceNote(lesson) {
-  const checkIn = lesson.checkInTime || "";
-  const checkOut = lesson.checkOutTime || "";
-  const parts = [lesson.note];
-  if (checkIn) parts.push(`签入 ${checkIn}`);
-  if (checkOut) parts.push(`签出 ${checkOut}`);
-  if (!checkIn && !checkOut && lesson.scanTime) parts.push(`历史记录 ${lesson.scanTime}`);
-  return parts.filter(Boolean).join(" · ");
+  if (lesson.status === "cancelled") return lesson.cancelReason || "已取消，不计薪";
+  return lesson.note || "计入课时费";
 }
 
 function allowanceText(lesson) {
@@ -12210,639 +12917,13 @@ function allowanceText(lesson) {
   return `${lesson.units} 节 × ${state.rules.weekendRate} 元`;
 }
 
+// 课次不再有需要教师操作的动作：排了就计薪，请假走审批。
+// 这一列改成显示计薪结果——留一个点不动的按钮比没有按钮更让人困惑。
 function actionCell(lesson) {
-  if (currentRole() !== "teacher") {
-    return `<span class="muted">财务只读</span>`;
+  if (lesson.status === "cancelled") {
+    return `<span class="muted">${escapeHtml(lesson.cancelReason || "已取消，不计薪")}</span>`;
   }
-  if (lesson.teacherId !== currentTeacherId()) {
-    return `<span class="muted">非本人任务</span>`;
-  }
-  if (lesson.status === "pending" || lesson.status === "scheduled") {
-    return `<button class="mini-button primary" data-open-scanner="${lesson.id}" type="button">去签入</button>`;
-  }
-  if (lesson.status === "checkedIn") {
-    return `<button class="mini-button primary" data-open-scanner="${lesson.id}" type="button">去签出</button>`;
-  }
-  if (lesson.status === "completed") {
-    return `<span class="muted">已完成</span>`;
-  }
-  return `<button class="mini-button" data-review="${lesson.id}" type="button">查看原因</button>`;
-}
-
-function signingBase(payload) {
-  return [
-    payload.app,
-    payload.action,
-    payload.room,
-    payload.roomCode,
-    SECURITY_SECRET,
-  ].join("|");
-}
-
-function signPayload(payload) {
-  const text = signingBase(payload);
-  let hash = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    hash = (hash << 5) - hash + text.charCodeAt(index);
-    hash |= 0;
-  }
-  return Math.abs(hash).toString(36).padStart(7, "0");
-}
-
-function buildQrPayload(lesson, options = {}) {
-  const room = options.room || lesson.room;
-  const payload = {
-    app: "school-teacher-pay-demo",
-    action: "classroom-checkin",
-    room,
-    roomCode: options.roomCode || `ROOM-${room}`,
-  };
-  return JSON.stringify({
-    ...payload,
-    signature: options.signature || signPayload(payload),
-  });
-}
-
-function roomDisplayKeyForDevelopment(roomId) {
-  return `screen-${String(roomId || "").toLowerCase()}`;
-}
-
-function lessonWindow(lesson) {
-  const [startTime, endTime] = lesson.time.split("-");
-  const start = new Date(`${lesson.date}T${startTime}:00+08:00`);
-  const end = new Date(`${lesson.date}T${endTime}:00+08:00`);
-  return {
-    start,
-    end,
-    startsAt: new Date(start.getTime() - 15 * 60 * 1000),
-    checkInEndsAt: start,
-    checkOutStartsAt: end,
-    endsAt: new Date(end.getTime() + 15 * 60 * 1000),
-  };
-}
-
-function formatClock(date) {
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: "Asia/Shanghai",
-  });
-}
-
-function actionForLesson(lesson) {
-  return lesson.status === "checkedIn" ? "checkOut" : "checkIn";
-}
-
-function actionLabel(action) {
-  return action === "checkOut" ? "签出" : "签入";
-}
-
-function lessonMatchesQrRoom(lesson, payload) {
-  return (
-    (payload.roomId && lesson.roomId === payload.roomId) ||
-    (payload.roomName && lesson.room === payload.roomName) ||
-    (payload.room && lesson.room === payload.room)
-  );
-}
-
-function qrRoomLabel(payload) {
-  return payload.roomName || payload.room || payload.roomId || "未知教室";
-}
-
-function findCurrentLessonForPayload(payload, action, targetLessonId, nowText = state.demoNow) {
-  const teacherId = currentTeacherId();
-  const now = new Date(nowText);
-  return teacherLessons(teacherId).find((lesson) => {
-    if (targetLessonId && lesson.id !== targetLessonId) return false;
-    if (!lessonMatchesQrRoom(lesson, payload)) return false;
-    const window = lessonWindow(lesson);
-    if (action === "checkOut") {
-      return now >= window.checkOutStartsAt && now <= window.endsAt;
-    }
-    return now >= window.startsAt && now <= window.checkInEndsAt;
-  });
-}
-
-function pushCheck(checks, label, passed, detail) {
-  checks.push({ label, passed, detail });
-}
-
-function validateQrPayload(decodedText, options = {}) {
-  const checks = [];
-  let payload;
-  let lesson;
-  const action = options.action || "checkIn";
-  const nowText = options.nowText || state.demoNow;
-
-  try {
-    payload = JSON.parse(decodedText);
-    pushCheck(checks, "二维码格式", true, "二维码内容可被系统解析");
-  } catch (error) {
-    pushCheck(checks, "二维码格式", false, "二维码内容不是合法 JSON");
-    return { ok: false, checks };
-  }
-
-  const dynamicPayload = payload.app === "school-system" && payload.type === "classroom-dynamic-qr";
-  const staticPayload = payload.app === "school-teacher-pay-demo" && payload.action === "classroom-checkin";
-  const typePassed = backendMode() ? dynamicPayload : dynamicPayload || staticPayload;
-  pushCheck(
-    checks,
-    "业务类型",
-    typePassed,
-    dynamicPayload
-      ? "属于教室电脑实时二维码"
-      : staticPayload
-        ? "属于授权教室码"
-        : "不是本系统教室二维码",
-  );
-
-  let signaturePassed = false;
-  if (dynamicPayload) {
-    signaturePassed = Boolean(payload.signature);
-  } else {
-    const expectedSignature = signPayload(payload);
-    signaturePassed = Boolean(payload.signature) && payload.signature === expectedSignature;
-  }
-  pushCheck(
-    checks,
-    "教室码防伪",
-    signaturePassed,
-    dynamicPayload
-      ? "动态码签名将由后端验签"
-      : signaturePassed
-        ? "教室码签名匹配"
-        : "签名不匹配，疑似伪造或篡改",
-  );
-
-  if (dynamicPayload) {
-    const expiresAt = new Date(payload.expiresAt);
-    const freshnessPassed = !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() >= Date.now();
-    pushCheck(checks, "动态码有效期", freshnessPassed, freshnessPassed ? "二维码未过期" : "二维码已过期，请扫教室屏幕新码");
-  }
-
-  const rolePassed = currentRole() === "teacher";
-  pushCheck(checks, "账号角色", rolePassed, rolePassed ? "当前为老师账号" : "财务账号不能代替老师考勤");
-
-  const teacher = teacherById(currentTeacherId());
-  const devicePassed = currentAccount().deviceId && teacher?.boundDeviceId === currentAccount().deviceId;
-  pushCheck(checks, "绑定设备", devicePassed, devicePassed ? "当前设备与老师账号绑定信息一致" : "非绑定设备，需重新认证");
-
-  const roomExists = state.lessons.some((item) => lessonMatchesQrRoom(item, payload));
-  pushCheck(checks, "教室存在", roomExists, roomExists ? `识别到教室 ${qrRoomLabel(payload)}` : "系统没有这个教室码");
-
-  lesson = findCurrentLessonForPayload(payload, action, options.lessonId, nowText);
-  pushCheck(
-    checks,
-    `${actionLabel(action)}时间匹配课表`,
-    Boolean(lesson),
-    lesson
-      ? `当前时间可为 ${lesson.className} ${lesson.course}${actionLabel(action)}`
-      : `当前老师此时间不能在该教室${actionLabel(action)}`,
-  );
-
-  const statusPassed =
-    Boolean(lesson) &&
-    ((action === "checkIn" && (lesson.status === "pending" || lesson.status === "scheduled")) ||
-      (action === "checkOut" && lesson.status === "checkedIn"));
-  pushCheck(
-    checks,
-    "课时状态",
-    statusPassed,
-    statusPassed
-      ? `该课时可${actionLabel(action)}`
-      : action === "checkIn"
-        ? lesson?.status === "scheduled"
-          ? "该课时为之后排班，未到开放签入时间"
-          : "该课时已签入、已完成或异常，不能重复签入"
-        : "该课时尚未签入、已完成或异常，不能签出",
-  );
-
-  const ok = checks.every((check) => check.passed);
-  return { ok, checks, payload, lesson, action, nowText };
-}
-
-function renderSecurityChecks() {
-  const summary = document.querySelector("#securitySummary");
-  const list = document.querySelector("#securityCheckList");
-  if (!summary || !list) return;
-
-  if (!state.lastSecurityChecks.length) {
-    summary.textContent = "等待扫码";
-    summary.className = "status-pill";
-    list.innerHTML = `<div class="empty-state">完成扫码后，这里会显示每一项校验结果</div>`;
-    return;
-  }
-
-  const passed = state.lastSecurityPassed;
-  summary.textContent = passed ? "全部通过" : "已拦截";
-  summary.className = passed ? "status-pill done" : "status-pill warning";
-  list.innerHTML = state.lastSecurityChecks
-    .map(
-      (check) => `
-        <div class="security-check ${check.passed ? "pass" : "fail"}">
-          <div>
-            <strong>${check.label}</strong>
-            <span>${check.detail}</span>
-          </div>
-          <span class="tag ${check.passed ? "completed" : "exception"}">${check.passed ? "通过" : "拦截"}</span>
-        </div>
-      `,
-    )
-    .join("");
-}
-
-function classroomDisplayKey(room) {
-  return room.displayKey || roomDisplayKeyForDevelopment(room.id);
-}
-
-function classroomScreenUrl(room) {
-  return `/classroom.html?roomId=${encodeURIComponent(room.id)}&displayKey=${encodeURIComponent(classroomDisplayKey(room))}`;
-}
-
-function localClassroomRooms() {
-  return (state.schedulingConfig.rooms || []).map((room) => ({
-    ...room,
-    stageId: state.schedulingConfig.stageId || state.schedulingConfig.divisionId || "",
-    displayKey: classroomDisplayKey(room),
-  }));
-}
-
-async function loadClassroomRooms() {
-  if (!backendMode() || currentRole() !== "classroom") return;
-  classroomScreenState = { ...classroomScreenState, loading: true, error: "" };
-  renderClassroomScreens();
-  try {
-    const result = await apiRequest("/api/classrooms");
-    classroomScreenState = {
-      ...classroomScreenState,
-      rooms: result.rooms || [],
-      loading: false,
-      loaded: true,
-      error: "",
-    };
-  } catch (error) {
-    classroomScreenState = {
-      ...classroomScreenState,
-      loading: false,
-      loaded: true,
-      error: error.message || "教室列表读取失败",
-    };
-    showToast(classroomScreenState.error);
-  }
-  renderClassroomScreens();
-}
-
-function classroomScreenCard(room) {
-  const url = classroomScreenUrl(room);
-  return `
-    <article class="classroom-screen-card">
-      <header>
-        <div>
-          <strong>${escapeHtml(room.name || room.id)}</strong>
-          <span class="muted">${escapeHtml(room.stageId || "教室")} · ${escapeHtml(room.id)}</span>
-        </div>
-        <span class="tag ${room.active === false ? "exception" : "completed"}">${room.active === false ? "停用" : "可用"}</span>
-      </header>
-      <code>${escapeHtml(url)}</code>
-      <div class="classroom-screen-actions">
-        <a class="mini-button primary" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开大屏</a>
-        <button class="mini-button" data-copy-classroom-url="${escapeHtml(url)}" type="button">复制地址</button>
-      </div>
-    </article>
-  `;
-}
-
-function renderClassroomScreens() {
-  const grid = document.querySelector("#classroomScreenGrid");
-  if (!grid || currentRole() !== "classroom") return;
-
-  if (backendMode() && !classroomScreenState.loaded && !classroomScreenState.loading) {
-    loadClassroomRooms();
-  }
-
-  const rooms = backendMode() ? classroomScreenState.rooms : localClassroomRooms();
-  const search = classroomScreenState.search.trim().toLowerCase();
-  const filteredRooms = rooms.filter((room) => {
-    if (!search) return true;
-    return [room.id, room.name, room.stageId, room.displayKey]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(search));
-  });
-
-  const status = document.querySelector("#classroomScreenStatus");
-  if (status) {
-    if (classroomScreenState.loading) {
-      status.textContent = "读取中";
-      status.className = "status-pill warning";
-    } else if (classroomScreenState.error) {
-      status.textContent = "读取失败";
-      status.className = "status-pill warning";
-    } else {
-      status.textContent = `${filteredRooms.length}/${rooms.length} 间教室`;
-      status.className = "status-pill done";
-    }
-  }
-
-  const searchInput = document.querySelector("#classroomRoomSearch");
-  if (searchInput && searchInput.value !== classroomScreenState.search) {
-    searchInput.value = classroomScreenState.search;
-  }
-
-  if (classroomScreenState.loading) {
-    grid.innerHTML = `<div class="empty-state">正在读取教室二维码库...</div>`;
-    return;
-  }
-  if (classroomScreenState.error) {
-    grid.innerHTML = `<div class="empty-state">${escapeHtml(classroomScreenState.error)}</div>`;
-    return;
-  }
-  grid.innerHTML = filteredRooms.length
-    ? filteredRooms.map(classroomScreenCard).join("")
-    : `<div class="empty-state">没有匹配的教室</div>`;
-}
-
-async function handleDecodedScan(decodedText, options = {}) {
-  state.lastScanText = decodedText;
-  const backendLesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (backendMode() && currentRole() === "teacher" && backendLesson?.source === "backend-api") {
-    await recordAttendance(
-      backendLesson.id,
-      options.action || actionForLesson(backendLesson),
-      options.nowText || new Date().toISOString(),
-      decodedText,
-    );
-    return;
-  }
-
-  const validation = validateQrPayload(decodedText, options);
-  state.lastSecurityChecks = validation.checks;
-  state.lastSecurityPassed = validation.ok;
-
-  if (!validation.ok) {
-    showToast("课程考勤被防作弊规则拦截");
-    renderScanner();
-    return;
-  }
-
-  state.scannerLessonId = validation.lesson.id;
-  await recordAttendance(validation.lesson.id, validation.action, validation.nowText, decodedText);
-}
-
-function selectedScannerActionContext() {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) {
-    return { action: "checkIn", lessonId: "", nowText: new Date().toISOString() };
-  }
-  const action = actionForLesson(lesson);
-  return {
-    action,
-    lessonId: lesson.id,
-    nowText: new Date().toISOString(),
-  };
-}
-
-function openScannerForLesson(id) {
-  const lesson = state.lessons.find((item) => item.id === id);
-  if (!lesson) return;
-  state.scannerLessonId = lesson.id;
-  switchView("scanner");
-}
-
-async function recordBackendAttendance(lesson, action, nowText, qrPayload) {
-  try {
-    const result = await apiRequest(`/api/teachers/${currentTeacherId()}/attendance`, {
-      method: "POST",
-      body: {
-        lessonId: lesson.backendId || lesson.id,
-        action,
-        qrPayload,
-        occurredAt: nowText,
-      },
-    });
-    state.lastSecurityChecks = result.checks || state.lastSecurityChecks;
-    state.lastSecurityPassed = true;
-    const normalized = normalizeBackendLesson(result.lesson);
-    const index = state.lessons.findIndex((item) => item.id === lesson.id);
-    if (index >= 0) {
-      state.lessons[index] = normalized;
-    } else {
-      state.lessons.push(normalized);
-    }
-    teacherWorkloadState.loaded = false;
-    teacherWorkloadState.data = null;
-    resetTeacherPayrollState();
-    resetAttendanceRecordState();
-    const label = action === "checkIn" ? "签入" : "签出";
-    showToast(`${normalized.className} ${normalized.course} 后端${label}成功`);
-    render();
-  } catch (error) {
-    state.lastSecurityChecks = error.details?.checks || state.lastSecurityChecks;
-    state.lastSecurityPassed = false;
-    resetTeacherPayrollState();
-    resetAttendanceRecordState();
-    showToast(error.message || "后端考勤提交失败");
-    render();
-  }
-}
-
-async function recordAttendance(id, action, nowText, qrPayload = "") {
-  if (currentRole() !== "teacher") {
-    showToast("只有老师账号可以提交考勤");
-    return;
-  }
-
-  const lesson = state.lessons.find((item) => item.id === id);
-  if (!lesson) return;
-  if (lesson.teacherId !== currentTeacherId()) {
-    showToast("只能处理本人课时任务");
-    render();
-    return;
-  }
-
-  if (backendMode() && lesson.source === "backend-api") {
-    await recordBackendAttendance(lesson, action, nowText, qrPayload || buildQrPayload(lesson));
-    return;
-  }
-
-  if (action === "checkIn" && lesson.status !== "pending" && lesson.status !== "scheduled") {
-    showToast(`${lesson.className} ${lesson.course} 不能重复签入`);
-    render();
-    return;
-  }
-  if (action === "checkOut" && lesson.status !== "checkedIn") {
-    showToast(`${lesson.className} ${lesson.course} 尚未签入或已完成`);
-    render();
-    return;
-  }
-
-  const clock = formatClock(new Date(nowText));
-  if (action === "checkIn") {
-    lesson.status = "checkedIn";
-    lesson.checkInTime = clock;
-    lesson.note = "已完成课前签入，待下课后签出";
-    showToast(`${lesson.className} ${lesson.course} 已签入，下课后签出才计薪`);
-  } else {
-    lesson.status = "completed";
-    lesson.checkOutTime = clock;
-    lesson.note = "签入签出完成，计入本月薪资";
-    showToast(`${lesson.className} ${lesson.course} 已签出，薪资试算已刷新`);
-  }
-  render();
-}
-
-async function generateAdminSchedule() {
-  if (backendMode() && currentRole() === "admin") {
-    await generateBackendSchedule();
-    return;
-  }
-
-  const config = state.schedulingConfig;
-  const assignments = generateScheduleAssignments();
-  const conflicts = validateScheduleConflicts(assignments);
-  state.schedulingDraft = {
-    ...state.schedulingDraft,
-    status: "draft",
-    divisionId: config.divisionId,
-    gradeId: config.gradeId,
-    divisionName: config.divisionName,
-    gradeName: config.gradeName,
-    generatedAt: formatDateTimeMinute(),
-    confirmedAt: "",
-    publishedAt: "",
-    assignments,
-    conflicts,
-    lockedCount: 0,
-    publishedLessonIds: [],
-  };
-  showToast(
-    conflicts.length
-      ? `已生成${config.gradeName}草稿，发现 ${conflicts.length} 个冲突`
-      : `已生成${config.gradeName}无冲突排课草稿`,
-  );
-  render();
-}
-
-async function confirmAndPublishSchedule() {
-  if (backendMode() && currentRole() === "admin") {
-    await publishBackendSchedule();
-    return;
-  }
-
-  const config = state.schedulingConfig;
-  const draft = state.schedulingDraft;
-  if (!schedulingDraftMatchesCurrent()) {
-    showToast("请先为当前学部和年级生成排课草稿");
-    return;
-  }
-  const assignments = draft.assignments || [];
-  if (!assignments.length) {
-    showToast("请先一键生成排课草稿");
-    return;
-  }
-
-  const conflicts = validateScheduleConflicts(assignments);
-  if (conflicts.length) {
-    state.schedulingDraft.conflicts = conflicts;
-    showToast("存在老师、班级或教室冲突，不能发布");
-    render();
-    return;
-  }
-
-  const publishedLessons = assignments.map((assignment) => ({
-    id: `PUB-${assignment.id}`,
-    teacherId: assignment.teacherId,
-    date: assignment.date,
-    time: assignment.time,
-    className: assignment.className,
-    course: assignment.subjectName,
-    durationMinutes: assignment.durationMinutes || 40,
-    room: assignment.room,
-    roomId: assignment.roomId,
-    type: "regular",
-    units: 1,
-    status: "scheduled",
-    scanTime: "",
-    note: "行政排课已确认发布，暂未到签入时间",
-    source: "admin-scheduling",
-    schedulingDivisionId: config.divisionId,
-    schedulingGradeId: config.gradeId,
-    scheduleAssignmentId: assignment.id,
-  }));
-
-  const now = formatDateTimeMinute();
-  state.lessons = state.lessons
-    .filter(
-      (lesson) =>
-        !(
-          lesson.source === "admin-scheduling" &&
-          lesson.schedulingDivisionId === config.divisionId &&
-          lesson.schedulingGradeId === config.gradeId
-        ),
-    )
-    .concat(publishedLessons);
-  state.schedulingDraft = {
-    ...draft,
-    status: "published",
-    confirmedAt: now,
-    publishedAt: now,
-    conflicts: [],
-    publishedLessonIds: publishedLessons.map((lesson) => lesson.id),
-  };
-  state.selectedScheduleWeekStart = config.weekStart;
-  showToast(`${config.divisionName}${config.gradeName}排课已确认，并发布到老师端课表`);
-  render();
-}
-
-function startCameraScanner() {
-  const lesson = state.lessons.find((item) => item.id === state.scannerLessonId);
-  if (!lesson) {
-    showToast("暂无可签入或签出的课程任务");
-    return;
-  }
-  if (typeof Html5QrcodeScanner !== "function") {
-    showToast("扫码库未加载，无法启动摄像头");
-    return;
-  }
-  if (!window.isSecureContext && window.location.hostname !== "127.0.0.1" && window.location.hostname !== "localhost") {
-    showToast("摄像头需要 HTTPS 安全环境，请联系管理员检查系统访问地址");
-    document.querySelector("#scannerStatus").textContent = "需要 HTTPS";
-    document.querySelector("#scannerStatus").className = "status-pill warning";
-    return;
-  }
-
-  const scannerConfig = {
-    fps: 10,
-    qrbox: { width: 240, height: 240 },
-    rememberLastUsedCamera: true,
-  };
-
-  if (typeof Html5QrcodeScanType === "object") {
-    // 只允许实时摄像头扫码：图片上传识别和手动输入一样可以用照片代打卡，一并关闭
-    scannerConfig.supportedScanTypes = [Html5QrcodeScanType.SCAN_TYPE_CAMERA];
-  }
-
-  qrScanner = new Html5QrcodeScanner("reader", scannerConfig, false);
-  qrScanner.render(
-    async (decodedText) => {
-      await handleDecodedScan(decodedText, selectedScannerActionContext());
-    },
-    () => {},
-  );
-  showToast("扫码器已启动，请按浏览器提示授权摄像头");
-  renderScanner();
-}
-
-function stopCameraScanner() {
-  if (!qrScanner) return;
-  qrScanner
-    .clear()
-    .catch(() => {})
-    .finally(() => {
-      qrScanner = null;
-      showToast("扫码器已停止");
-      renderScanner();
-    });
+  return `<span class="muted">计入课时费</span>`;
 }
 
 function switchView(viewName) {
@@ -12857,6 +12938,14 @@ function switchView(viewName) {
   if (viewName === "approvalSettings" && backendMode() && !oaAdminState.templates.length) {
     loadOaAdminTemplates();
   }
+  if (viewName === "dataPorting" && backendMode()) {
+    if (!resourceLedgerState.ledger && !resourceLedgerState.loading) loadResourceLedger();
+  }
+  // 统计报表首次进入时按需加载，避免每次 render 都打接口
+  if (viewName === "reports" && backendMode()) {
+    if (!weeklyWorkloadState.report && !weeklyWorkloadState.loading) loadWeeklyWorkload();
+    if (!annualSalaryState.report && !annualSalaryState.loading) loadAnnualSalary();
+  }
   if (viewName === "approvals" && backendMode()) {
     loadOaTemplates().then(() => {
       renderApprovalsView();
@@ -12868,7 +12957,6 @@ function switchView(viewName) {
 function loginAccount(accountId) {
   const account = state.accounts.find((item) => item.id === accountId);
   if (!account) return;
-  if (qrScanner) stopCameraScanner();
   // 切换账号时强制收起弹层与命令面板，避免残留到新账号界面
   if (activeDialogClose) activeDialogClose();
   if (commandState.open) closeCommandPalette();
@@ -12882,17 +12970,6 @@ function loginAccount(accountId) {
   state.currentAccountId = accountId;
   state.activeView = defaultViewByRole[account.role];
   state.taskFilter = "all";
-  state.lastScanText = "";
-  state.lastSecurityChecks = [];
-  state.lastSecurityPassed = null;
-  if (account.role === "teacher") {
-    state.scannerLessonId =
-      teacherLessons(account.teacherId).find(
-        (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
-      )?.id ||
-      teacherLessons(account.teacherId)[0]?.id ||
-      "";
-  }
   saveSession(accountId);
   showToast(`已登录：${account.title}`);
   render();
@@ -12971,10 +13048,6 @@ async function authenticate(username, password) {
         resetPersonnelPage();
         await loadPersonnelPage({ page: 1 });
       }
-      if (payload.account.role === "classroom") {
-        classroomScreenState = { rooms: [], loading: false, loaded: false, error: "", search: "" };
-        await loadClassroomRooms();
-      }
       await loadBackendNotifications();
       render();
       loginButton.disabled = false;
@@ -12994,7 +13067,6 @@ async function authenticate(username, password) {
 }
 
 function logout() {
-  if (qrScanner) stopCameraScanner();
   sessionAccountId = "";
   clearSession();
   resetPersonnelPage();
@@ -13046,6 +13118,17 @@ function openDialog(config = {}) {
         let control;
         if (field.type === "textarea") {
           control = `<textarea id="${id}" data-dialog-field="${escapeHtml(field.name)}" rows="${field.rows || 3}" placeholder="${escapeHtml(field.placeholder || "")}">${escapeHtml(field.value || "")}</textarea>`;
+        } else if (field.type === "multiselect") {
+          // 多选用勾选列表而非 <select multiple>：后者要按住 Ctrl 才能多选，
+          // 教务不会知道这一点，最后只抄送出去一个人。
+          control = `<div class="dialog-checklist" data-dialog-field="${escapeHtml(field.name)}" data-multi="1">${(field.options || [])
+            .map(
+              (opt, i) =>
+                `<label class="dialog-check"><input type="checkbox" value="${escapeHtml(opt.value)}" ${
+                  i === 0 && field.autoFirst ? "checked" : ""
+                } /><span>${escapeHtml(opt.label)}</span></label>`,
+            )
+            .join("")}</div>`;
         } else if (field.type === "select") {
           control = `<select id="${id}" data-dialog-field="${escapeHtml(field.name)}">${(field.options || [])
             .map((opt) => `<option value="${escapeHtml(opt.value)}" ${opt.value === field.value ? "selected" : ""}>${escapeHtml(opt.label)}</option>`)
@@ -13104,6 +13187,10 @@ function openDialog(config = {}) {
     const collect = () => {
       const values = {};
       root.querySelectorAll("[data-dialog-field]").forEach((el) => {
+        if (el.dataset.multi) {
+          values[el.dataset.dialogField] = [...el.querySelectorAll("input:checked")].map((box) => box.value);
+          return;
+        }
         values[el.dataset.dialogField] = el.value.trim();
       });
       return values;
@@ -13111,7 +13198,12 @@ function openDialog(config = {}) {
 
     const submit = async () => {
       const values = collect();
-      const missing = fields.find((field) => field.required && !values[field.name]);
+      const missing = fields.find((field) => {
+        if (!field.required) return false;
+        const value = values[field.name];
+        // 多选返回数组，[] 是假值判断不出来的
+        return Array.isArray(value) ? value.length === 0 : !value;
+      });
       if (missing) {
         errorEl.textContent = `请填写「${missing.label}」`;
         root.querySelector(`[data-dialog-field="${missing.name}"]`)?.focus();
@@ -13349,10 +13441,6 @@ document.addEventListener("input", (event) => {
   if (minDayInput) {
     syncCourseRuleCoverageInput(minDayInput.dataset.courseRuleMinDay);
   }
-  if (event.target.closest("#classroomRoomSearch")) {
-    classroomScreenState.search = event.target.value;
-    renderClassroomScreens();
-  }
 });
 
 document.addEventListener("click", async (event) => {
@@ -13475,24 +13563,6 @@ document.addEventListener("click", async (event) => {
   const deleteTermButton = event.target.closest("[data-delete-term]");
   if (deleteTermButton) {
     await deleteBackendTerm(deleteTermButton.dataset.deleteTerm);
-    return;
-  }
-
-  const scannerButton = event.target.closest("[data-open-scanner]");
-  if (scannerButton) {
-    openScannerForLesson(scannerButton.dataset.openScanner);
-    return;
-  }
-
-  const copyClassroomUrlButton = event.target.closest("[data-copy-classroom-url]");
-  if (copyClassroomUrlButton) {
-    const url = `${window.location.origin}${copyClassroomUrlButton.dataset.copyClassroomUrl}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      showToast("教室大屏地址已复制");
-    } catch (error) {
-      showToast(url);
-    }
     return;
   }
 
@@ -13678,7 +13748,6 @@ const NAV_ICON_PATHS = {
   personnel: '<circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16.5 4.9a3.5 3.5 0 0 1 0 6.2M17.8 14.3c2 .8 3.2 2.6 3.2 5.7"/>',
   teacherImport: '<path d="M12 15V4m0 0 4 4m-4-4L8 8"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
   notifications: '<path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 20a2 2 0 0 0 4 0"/>',
-  scanner: '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M4 12h16"/>',
   records: '<path d="M5 4h14a1 1 0 0 1 1 1v15l-3-2-3 2-3-2-3 2-3-2V5a1 1 0 0 1 1-1z"/><path d="M9 9h6M9 13h4"/>',
   confirm: '<circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5.5"/>',
   teacherPayroll: '<rect x="3" y="6" width="18" height="13" rx="3"/><path d="M3 10h18M7 15h4"/>',
@@ -13693,7 +13762,8 @@ const NAV_ICON_PATHS = {
   hrAudit: '<path d="M6 3h9l4 4v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5"/><circle cx="11" cy="14" r="2.5"/><path d="m13 16 2.5 2.5"/>',
   myHrProfile: '<rect x="4" y="4" width="16" height="17" rx="3"/><circle cx="12" cy="10" r="2.5"/><path d="M7.5 17.5c.8-2 2.5-3 4.5-3s3.7 1 4.5 3"/>',
   hrFlows: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="m3 5.5 1.2 1.2L6.5 4.4M3 11.5l1.2 1.2 2.3-2.3M3 17.5l1.2 1.2 2.3-2.3"/>',
-  classroomScreens: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+  ledgers: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 9v11M15 9v11"/>',
+  monitoring: '<path d="M3 12h4l3 8 4-16 3 8h4"/>',
 };
 
 function applyNavIcons() {
@@ -14792,7 +14862,7 @@ function renderApprovalsView() {
 }
 
 // 发起申请：按模板字段动态生成表单
-async function openOaCreateDialog(templateKey) {
+async function openOaCreateDialog(templateKey, prefill = {}) {
   const template = oaState.templates.find((item) => item.key === templateKey);
   if (!template) return;
   const fields = template.formFields.map((field) => ({
@@ -14803,7 +14873,14 @@ async function openOaCreateDialog(templateKey) {
     placeholder: field.placeholder || "",
     hint: field.hint || "",
     options: (field.options || []).map((option) => ({ value: option, label: option })),
-    value: field.type === "select" || field.type === "radio" ? field.options?.[0] || "" : "",
+    // 从账套页带过来的类型与期间直接填好：让人再手抄一遍「2026-06」，
+    // 抄错了要等三级审批全走完才发现解错了账套
+    value:
+      prefill[field.key] !== undefined && prefill[field.key] !== ""
+        ? prefill[field.key]
+        : field.type === "select" || field.type === "radio"
+          ? field.options?.[0] || ""
+          : "",
   }));
   await openDialog({
     title: `发起${template.name}`,
@@ -14987,6 +15064,80 @@ async function openLessonArrangementDialog(detail, approverFields) {
   });
 }
 
+// 抄送名单：谁抄的、什么时候抄的都要写出来，事后追责要靠这个
+function renderCcSection(detail) {
+  const list = detail.ccRecipients || [];
+  if (!list.length && !detail.canAddCc) return "";
+  const items = list.length
+    ? list
+        .map(
+          (item) =>
+            `<li><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(oaRoleLabel(item.role))}</span>` +
+            `<small>由 ${escapeHtml(item.addedByName || "系统")} 抄送</small></li>`,
+        )
+        .join("")
+    : '<li class="empty-state compact">暂无抄送</li>';
+  return `<div class="approval-cc-section">
+      <h4>抄送（仅知悉，不参与审批）</h4>
+      <ul class="approval-cc-list">${items}</ul>
+    </div>`;
+}
+
+function oaRoleLabel(role) {
+  return (
+    {
+      teacher: "教师",
+      admin: "教务",
+      hr: "人事",
+      finance: "财务",
+      division_head: "学部负责人",
+      principal: "校领导",
+      system_admin: "行政管理",
+    }[role] || role
+  );
+}
+
+// 抄送选择器：候选范围由服务端按模板给出——薪资类单据里没有教师，
+// 前端不能自己拼一份全量名单，否则界面上选得到、提交却被拒。
+async function openCcPicker(detail) {
+  let candidates = [];
+  try {
+    const result = await apiRequest(
+      `/api/oa/cc-candidates?templateKey=${encodeURIComponent(detail.templateKey)}`,
+    );
+    candidates = result.candidates || [];
+  } catch (error) {
+    showToast(error.message || "加载抄送候选人失败");
+    return null;
+  }
+  const already = new Set((detail.ccRecipients || []).map((item) => item.accountId));
+  const options = candidates
+    .filter((item) => !already.has(item.accountId) && item.accountId !== detail.applicantAccountId)
+    .map((item) => ({ value: item.accountId, label: `${item.name}（${item.roleLabel}）` }));
+
+  if (!options.length) {
+    showToast("没有可添加的抄送对象");
+    return null;
+  }
+  const values = await openDialog({
+    title: "添加抄送",
+    description: "被抄送人可以查看这张单子，但不能审批。",
+    confirmText: "抄送",
+    fields: [
+      {
+        name: "accountIds",
+        label: "抄送给",
+        type: "multiselect",
+        options,
+        required: true,
+      },
+    ],
+  });
+  if (!values) return null;
+  const picked = values.accountIds;
+  return Array.isArray(picked) ? picked : [picked].filter(Boolean);
+}
+
 // 详情：表单内容 + 流程进度时间线 + 操作
 async function openOaDetail(requestId) {
   let detail;
@@ -15058,11 +15209,13 @@ async function openOaDetail(requestId) {
         </div>
         <div class="approval-detail-body">
           <div class="approval-detail-fields">${fieldRows || '<p class="empty-state compact">无表单内容</p>'}</div>
+          ${renderCcSection(detail)}
           <ol class="approval-steps">${stepRows}</ol>
         </div>
         <p class="dialog-error" data-dialog-error></p>
         <div class="dialog-actions">
           <button class="ghost-button" data-dialog-cancel type="button">关闭</button>
+          ${detail.canAddCc ? `<button class="ghost-button" data-oa-cc="${escapeHtml(detail.id)}" type="button">抄送</button>` : ""}
           ${detail.canUrge ? `<button class="ghost-button" data-oa-urge="${escapeHtml(detail.id)}" type="button">催办</button>` : ""}
           ${detail.canWithdraw ? `<button class="ghost-button" data-oa-withdraw="${escapeHtml(detail.id)}" type="button">撤回</button>` : ""}
           ${detail.canAct ? `<button class="danger-button" data-oa-reject="${escapeHtml(detail.id)}" type="button">拒绝</button>` : ""}
@@ -15146,6 +15299,22 @@ async function openOaDetail(requestId) {
       await act("withdraw", "");
     } catch (error) {
       showToast(error.message || "操作失败");
+    }
+  });
+  root.querySelector("[data-oa-cc]")?.addEventListener("click", async () => {
+    const picked = await openCcPicker(detail);
+    if (!picked?.length) return;
+    try {
+      const result = await apiRequest(`/api/oa/requests/${detail.id}/cc`, {
+        method: "POST",
+        body: { accountIds: picked },
+      });
+      // 已在名单上的人会被服务端跳过，这里如实报数，避免"选了 3 个却只加了 1 个"没人发现
+      showToast(result.added.length ? `已抄送 ${result.added.length} 人` : "所选人员均已在抄送名单中");
+      close();
+      openOaDetail(detail.id);
+    } catch (error) {
+      showToast(error.message || "抄送失败");
     }
   });
   root.querySelector("[data-oa-urge]")?.addEventListener("click", async () => {
@@ -15648,11 +15817,146 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("#oaRefresh")) {
     loadOaRequests();
   }
+  if (event.target.closest("#downloadPortingTemplate")) {
+    downloadPortingFile("template");
+    return;
+  }
+  if (event.target.closest("#exportPortingCsv")) {
+    downloadPortingFile("export");
+    return;
+  }
+  if (event.target.closest("#previewPortingImport")) {
+    previewPortingImport();
+    return;
+  }
+  if (event.target.closest("#commitPortingImport")) {
+    commitPortingImport();
+    return;
+  }
+  if (event.target.closest("#clearPortingCsv")) {
+    dataPortingState = { ...initialDataPortingState(), entity: dataPortingState.entity, stageId: dataPortingState.stageId };
+    const fileInput = document.querySelector("#dataPortingFile");
+    if (fileInput) fileInput.value = "";
+    renderDataPorting();
+    return;
+  }
+  if (event.target.closest("#refreshResourceLedger")) {
+    loadResourceLedger();
+    return;
+  }
+  if (event.target.closest("#exportResourceLedger")) {
+    exportResourceLedgerFile();
+    return;
+  }
+  if (event.target.closest("#refreshWeeklyWorkload")) {
+    loadWeeklyWorkload();
+    return;
+  }
+  if (event.target.closest("#exportWeeklyWorkload")) {
+    exportReport("weekly");
+    return;
+  }
+  if (event.target.closest("#printWeeklyWorkload")) {
+    printReport("weekly");
+    return;
+  }
+  if (event.target.closest("#refreshAnnualSalary")) {
+    loadAnnualSalary();
+    return;
+  }
+  if (event.target.closest("#exportAnnualSalary")) {
+    exportReport("annual");
+    return;
+  }
+  if (event.target.closest("#printAnnualSalary")) {
+    printReport("annual");
+    return;
+  }
+  if (event.target.closest("#exportScheduleExcel")) {
+    exportScheduleExcel();
+  }
+  if (event.target.closest("#printSchedule")) {
+    printSchedule();
+  }
 });
 
 document.addEventListener("change", (event) => {
   if (event.target.id === "oaStatusFilter") {
     loadOaRequests({ status: event.target.value, page: 1 });
+    return;
+  }
+  if (event.target.id === "dataPortingEntity") {
+    // 换数据类型必须丢掉上一份预检结果，否则会拿班级的预检去导教室
+    dataPortingState = { ...initialDataPortingState(), entity: event.target.value, stageId: dataPortingState.stageId };
+    const f = document.querySelector("#dataPortingFile");
+    if (f) f.value = "";
+    renderDataPorting();
+    return;
+  }
+  if (event.target.id === "dataPortingStage") {
+    dataPortingState = { ...dataPortingState, stageId: event.target.value };
+    return;
+  }
+  if (event.target.id === "dataPortingCsv") {
+    // 内容改了，之前的预检结果就作废了，不能还允许点「确认导入」
+    dataPortingState = { ...dataPortingState, csvText: event.target.value, preview: null, error: "" };
+    renderDataPorting();
+    return;
+  }
+  if (event.target.id === "dataPortingFile") {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    file.text().then((textContent) => {
+      dataPortingState = { ...dataPortingState, csvText: textContent, fileName: file.name, preview: null, error: "" };
+      renderDataPorting();
+      showToast(`已读取 ${file.name}`);
+    });
+    return;
+  }
+  if (event.target.id === "ledgerStage") {
+    resourceLedgerState = { ...resourceLedgerState, stageId: event.target.value };
+    loadResourceLedger();
+    return;
+  }
+  if (event.target.id === "ledgerRoomType") {
+    resourceLedgerState = { ...resourceLedgerState, roomType: event.target.value };
+    loadResourceLedger();
+    return;
+  }
+  if (event.target.id === "ledgerKeyword") {
+    resourceLedgerState = { ...resourceLedgerState, keyword: event.target.value };
+    loadResourceLedger();
+    return;
+  }
+  if (event.target.id === "ledgerOnlyIdle") {
+    resourceLedgerState = { ...resourceLedgerState, onlyIdle: event.target.checked };
+    loadResourceLedger();
+    return;
+  }
+  // 统计报表的筛选器：改动即重查，不用再点刷新
+  if (event.target.id === "weeklyWorkloadWeek") {
+    weeklyWorkloadState = { ...weeklyWorkloadState, weekStart: event.target.value };
+    loadWeeklyWorkload();
+    return;
+  }
+  if (event.target.id === "weeklyWorkloadStage") {
+    weeklyWorkloadState = { ...weeklyWorkloadState, stageId: event.target.value };
+    loadWeeklyWorkload();
+    return;
+  }
+  if (event.target.id === "weeklyWorkloadIdle") {
+    weeklyWorkloadState = { ...weeklyWorkloadState, includeIdle: event.target.checked };
+    loadWeeklyWorkload();
+    return;
+  }
+  if (event.target.id === "annualSalaryYear") {
+    annualSalaryState = { ...annualSalaryState, year: Number(event.target.value) };
+    loadAnnualSalary();
+    return;
+  }
+  if (event.target.id === "annualSalaryStage") {
+    annualSalaryState = { ...annualSalaryState, stageId: event.target.value };
+    loadAnnualSalary();
   }
 });
 
@@ -16275,10 +16579,6 @@ buildSectionNav("#adminSchedulingView");
 document.querySelector("#logoutButton").addEventListener("click", logout);
 document.querySelector("#topLogoutButton").addEventListener("click", logout);
 
-document.querySelector("#scanNextLesson").addEventListener("click", async (event) => {
-  openScannerForLesson(event.currentTarget.dataset.id);
-});
-
 document.querySelector("#generateSchedule").addEventListener("click", generateAdminSchedule);
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
 document.querySelector("#refreshSchedulePrecheck").addEventListener("click", refreshBackendSchedulePrecheck);
@@ -16337,7 +16637,6 @@ document.querySelector("#resetDemo").addEventListener("click", async () => {
     confirmText: "重置",
     danger: true,
   }))) return;
-  if (qrScanner) stopCameraScanner();
   const activeAccountId = state.currentAccountId;
   state = clone(initialState);
   state.currentAccountId = activeAccountId;
@@ -16358,7 +16657,7 @@ document.querySelector("#confirmWorkload").addEventListener("click", async () =>
 
   const teacherId = currentTeacherId();
   const pendingCount = teacherLessons(teacherId).filter(
-    (lesson) => lesson.status === "pending" || lesson.status === "checkedIn",
+    (lesson) => lesson.status !== "cancelled" && lesson.date > todayKey(),
   ).length;
   state.confirmationStages[teacherId] = 1;
   showToast(pendingCount > 0 ? "已确认，未完成考勤项目暂不计入工资" : "本月工作量已确认");
@@ -16532,11 +16831,6 @@ document.querySelector("#personnelNextPage").addEventListener("click", () => {
   }
 });
 
-document.querySelector("#qrLessonSelect").addEventListener("change", (event) => {
-  state.scannerLessonId = event.target.value;
-  renderScanner();
-});
-
 document.querySelector("#scheduleWeekSelect").addEventListener("change", async (event) => {
   state.selectedScheduleWeekStart = event.target.value;
   const weekDates = weekDateKeys(state.selectedScheduleWeekStart);
@@ -16700,16 +16994,6 @@ document.addEventListener("drop", async (event) => {
   await moveScheduleAssignmentToSlot(assignmentId, zone.dataset.scheduleDropDate, zone.dataset.scheduleDropPeriod);
 });
 
-document.querySelector("#startScanner").addEventListener("click", startCameraScanner);
-document.querySelector("#stopScanner").addEventListener("click", stopCameraScanner);
-document.querySelector("#refreshClassroomRooms").addEventListener("click", () => {
-  if (backendMode() && currentRole() === "classroom") {
-    loadClassroomRooms();
-  } else {
-    renderClassroomScreens();
-  }
-});
-
 document.querySelector("#financeTeacherSelect").addEventListener("change", async (event) => {
   state.selectedFinanceTeacherId = event.target.value;
   resetAttendanceRecordState();
@@ -16818,7 +17102,554 @@ if (backendMode()) {
   if (currentRole() === "system_admin") {
     loadPersonnelPage({ page: personnelPage.page });
   }
-  if (currentRole() === "classroom") {
-    loadClassroomRooms();
+}
+
+// ---------------------------------------------------------------------------
+// 账套管理（验收 8.1 - 8.18）
+//
+// 第八章 18 项里有 12 项的验收方式是「现场执行」——现场新建学年账套、现场走
+// 解锁审批、现场导出恢复。这些动作必须由校方的人自己点得出来，只有后端接口
+// 是过不了的。
+// ---------------------------------------------------------------------------
+
+function canManageLedger(role = currentRole()) {
+  return ["system_admin", "admin", "finance"].includes(role);
+}
+function canRestoreLedger(role = currentRole()) {
+  return role === "system_admin";
+}
+function canExportAudit(role = currentRole()) {
+  return ["hr", "system_admin", "division_head", "principal"].includes(role);
+}
+
+async function loadLedgers(overrides = {}) {
+  if (!backendMode()) return;
+  ledgerState = { ...ledgerState, ...overrides, loading: true, error: "" };
+  renderLedgers();
+  try {
+    const params = new URLSearchParams();
+    if (ledgerState.type) params.set("type", ledgerState.type);
+    if (ledgerState.status) params.set("status", ledgerState.status);
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const result = await apiRequest(`/api/ledgers${suffix}`);
+    ledgerState = { ...ledgerState, ledgers: result.ledgers || [], loaded: true, loading: false };
+  } catch (error) {
+    ledgerState = { ...ledgerState, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  renderLedgers();
+}
+
+async function createLedger() {
+  const type = document.querySelector("#ledgerNewType")?.value || "";
+  const period = String(document.querySelector("#ledgerNewPeriod")?.value || "").trim();
+  const carryOver = Boolean(document.querySelector("#ledgerNewCarryOver")?.checked);
+  const hint = document.querySelector("#ledgerCreateHint");
+  if (!period) {
+    if (hint) hint.textContent = "请填写期间";
+    showToast("请填写期间");
+    return;
+  }
+  try {
+    const result = await apiRequest(`/api/ledgers/${encodeURIComponent(type)}/${encodeURIComponent(period)}`, {
+      method: "POST",
+      body: { carryOver },
+    });
+    const carried = Number(result.ledger?.carriedOver || 0);
+    const message = result.created
+      ? `已建立${LEDGER_TYPE_LABELS[type] || type} ${period}${carried ? `，结转 ${carried} 名教职工` : ""}`
+      : `${LEDGER_TYPE_LABELS[type] || type} ${period} 已存在，未重复建立`;
+    if (hint) hint.textContent = message;
+    showToast(message);
+    await loadLedgers();
+  } catch (error) {
+    if (hint) hint.textContent = error.message || "建立失败";
+    showToast(error.message || "建立失败");
   }
 }
+
+async function transitionLedgerState(type, period, to) {
+  const label = LEDGER_STATUS_LABELS[to] || to;
+  // 锁定与归档都不能靠一次误点就生效：锁了要走审批才能解，归档会把数据卸出内存
+  const reason = window.prompt(`将「${LEDGER_TYPE_LABELS[type] || type} ${period}」置为${label}，请填写原因：`, "");
+  if (reason === null) return;
+  if (!String(reason).trim()) {
+    showToast("必须填写原因——这条会写进操作日志");
+    return;
+  }
+  try {
+    await apiRequest(`/api/ledgers/${encodeURIComponent(type)}/${encodeURIComponent(period)}/transition`, {
+      method: "POST",
+      body: { to, reason: String(reason).trim() },
+    });
+    showToast(`已${label}`);
+    await loadLedgers();
+  } catch (error) {
+    showToast(error.message || "操作失败");
+  }
+}
+
+async function carryOverLedger(type, period) {
+  try {
+    const result = await apiRequest(`/api/ledgers/${encodeURIComponent(type)}/${encodeURIComponent(period)}/carry-over`, {
+      method: "POST",
+    });
+    const roster = result.roster || {};
+    showToast(`已结转：在职 ${roster.inServiceCount ?? 0} 人、离职 ${roster.leftCount ?? 0} 人`);
+    await loadLedgers();
+  } catch (error) {
+    showToast(error.message || "结转失败");
+  }
+}
+
+async function downloadLedgerBackup(type, period) {
+  try {
+    const result = await apiRequest(
+      `/api/ledgers/${encodeURIComponent(type)}/${encodeURIComponent(period)}/backup`,
+    );
+    downloadTextFile(result.content, result.filename, result.mimeType || "application/json");
+    showToast(`已导出 ${result.total} 条记录`);
+  } catch (error) {
+    showToast(error.message || "导出失败");
+  }
+}
+
+async function restoreLedgerBackup() {
+  const input = document.querySelector("#ledgerRestoreFile");
+  const hint = document.querySelector("#ledgerRestoreHint");
+  const file = input?.files?.[0];
+  if (!file) {
+    if (hint) hint.textContent = "请先选择备份文件";
+    showToast("请先选择备份文件");
+    return;
+  }
+  let backup = null;
+  try {
+    backup = JSON.parse(await file.text());
+  } catch (error) {
+    if (hint) hint.textContent = "文件不是有效的 JSON 备份";
+    showToast("文件不是有效的 JSON 备份");
+    return;
+  }
+  const force = Boolean(document.querySelector("#ledgerRestoreForce")?.checked);
+  if (force && !window.confirm("覆盖会用备份内容替换现有账套数据，且不可撤销。确定继续？")) return;
+  try {
+    const result = await apiRequest("/api/ledgers/import", { method: "POST", body: { backup, force } });
+    // 字段名是 total（imported + replaced），不是 restored——写错了会一直显示「已恢复 0 条」，
+    // 而恢复其实成功了，操作的人会以为失败又跑一遍
+    const message = `已恢复 ${result.total ?? 0} 条记录（新增 ${result.imported ?? 0}、覆盖 ${result.replaced ?? 0}）`;
+    if (hint) hint.textContent = message;
+    showToast(message);
+    if (input) input.value = "";
+    await loadLedgers();
+  } catch (error) {
+    if (hint) hint.textContent = error.message || "恢复失败";
+    showToast(error.message || "恢复失败");
+  }
+}
+
+/**
+ * 导出审计报表（验收 8.16「现场导出并离线打开」）。
+ *
+ * 空报表也照样下载，只是提示里写清楚是 0 条：「导出后发现是空的」和
+ * 「导出失败了」是两件事，不给文件的话操作的人分不清是哪一种。
+ */
+async function exportAuditReport() {
+  const hint = document.querySelector("#auditReportHint");
+  const params = new URLSearchParams();
+  const from = document.querySelector("#auditReportFrom")?.value || "";
+  const to = document.querySelector("#auditReportTo")?.value || "";
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (from && to && from > to) {
+    if (hint) hint.textContent = "起始日期不能晚于截止日期";
+    showToast("起始日期不能晚于截止日期");
+    return;
+  }
+  try {
+    const suffix = params.toString() ? `?${params.toString()}` : "";
+    const result = await apiRequest(`/api/audit-report${suffix}`);
+    downloadTextFile(result.content, result.filename, result.mimeType || "application/vnd.ms-excel");
+    const c = result.counts || {};
+    const message = `已导出 ${result.total} 条：人事审计 ${c.hr ?? 0}、系统审计 ${c.system ?? 0}、账套操作 ${c.ledgers ?? 0}`;
+    if (hint) hint.textContent = message;
+    showToast(message);
+  } catch (error) {
+    if (hint) hint.textContent = error.message || "导出失败";
+    showToast(error.message || "导出失败");
+  }
+}
+
+async function loadReconciliation(run = false) {
+  if (!backendMode()) return;
+  const month = document.querySelector("#ledgerReconcileMonth")?.value || ledgerReconcileState.month;
+  if (!month) {
+    showToast("请选择核算月份");
+    return;
+  }
+  ledgerReconcileState = { ...ledgerReconcileState, month, loading: true, error: "" };
+  renderLedgerReconcile();
+  try {
+    const result = await apiRequest(`/api/reconciliation?month=${encodeURIComponent(month)}`, {
+      method: run ? "POST" : "GET",
+    });
+    ledgerReconcileState = { ...ledgerReconcileState, report: result.report || null, loading: false };
+  } catch (error) {
+    ledgerReconcileState = { ...ledgerReconcileState, loading: false, error: error.message || "对账失败" };
+  }
+  renderLedgerReconcile();
+}
+
+function renderLedgers() {
+  if (state.activeView !== "ledgers") return;
+  const table = document.querySelector("#ledgerTable");
+  const summary = document.querySelector("#ledgerSummary");
+  if (!table || !summary) return;
+
+  // 只有能操作的角色才看得到建立/恢复面板——看得到点不动比看不到更让人困惑
+  const createPanel = document.querySelector("#ledgerCreatePanel");
+  if (createPanel) createPanel.hidden = !canManageLedger();
+  const restorePanel = document.querySelector("#ledgerRestorePanel");
+  if (restorePanel) restorePanel.hidden = !canRestoreLedger();
+  // 审计导出的可见范围比账套操作宽：校领导和学部负责人不能建账套，
+  // 但要能导出审计报表——那正是他们要看的东西
+  const auditPanel = document.querySelector("#ledgerAuditExportPanel");
+  if (auditPanel) auditPanel.hidden = !canExportAudit();
+
+  if (!ledgerState.loaded && !ledgerState.loading) {
+    loadLedgers();
+    return;
+  }
+  setReportStatus("#ledgerStatus", ledgerState.loading ? "加载中" : ledgerState.error ? "加载失败" : "就绪");
+
+  if (ledgerState.error) {
+    summary.innerHTML = "";
+    table.innerHTML = `<p class="empty-hint">${escapeHtml(ledgerState.error)}</p>`;
+    return;
+  }
+
+  const list = ledgerState.ledgers;
+  summary.innerHTML = [
+    { label: "账套总数", value: list.length },
+    { label: "使用中", value: list.filter((l) => l.status === "active").length },
+    { label: "已锁定", value: list.filter((l) => l.status === "locked").length },
+    { label: "已归档（不占内存）", value: list.filter((l) => l.status === "archived").length },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  if (!list.length) {
+    table.innerHTML = '<p class="empty-hint">还没有账套。新建学年或新核算月份时在下方建立。</p>';
+    return;
+  }
+
+  const manage = canManageLedger();
+  table.innerHTML = `
+    <table class="report-table">
+      <thead>
+        <tr>
+          <th>类型</th><th>期间</th><th>状态</th><th>本期明细</th>
+          <th>结转在职</th><th>结转离职</th><th>可写</th><th>已加载</th><th>解锁次数</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${list
+          .map((l) => {
+            const actions = [];
+            if (manage) {
+              // 已锁定的账套没有「解锁」按钮，只有「申请解锁」——解锁必须走三级审批（8.10）。
+              // 但也不能什么入口都不给：那样账套一锁就是永久锁死，操作的人
+              // 只会以为系统坏了，而不是「这里要走审批」。
+              if (l.status === "locked") {
+                actions.push(
+                  `<button class="ghost-button compact-button" data-ledger-unlock="1" data-ledger-type="${escapeHtml(l.type)}" data-ledger-period="${escapeHtml(l.period)}" type="button">申请解锁</button>`,
+                );
+              }
+              (LEDGER_NEXT_STATUS[l.status] || []).forEach((to) => {
+                actions.push(
+                  `<button class="ghost-button compact-button" data-ledger-to="${escapeHtml(to)}" data-ledger-type="${escapeHtml(l.type)}" data-ledger-period="${escapeHtml(l.period)}" type="button">${escapeHtml(LEDGER_ACTION_LABELS[to] || to)}</button>`,
+                );
+              });
+              if (l.writable) {
+                actions.push(
+                  `<button class="ghost-button compact-button" data-ledger-carry="1" data-ledger-type="${escapeHtml(l.type)}" data-ledger-period="${escapeHtml(l.period)}" type="button">结转名册</button>`,
+                );
+              }
+              actions.push(
+                `<button class="ghost-button compact-button" data-ledger-backup="1" data-ledger-type="${escapeHtml(l.type)}" data-ledger-period="${escapeHtml(l.period)}" type="button">导出备份</button>`,
+              );
+            }
+            return `<tr>
+              <td>${escapeHtml(l.typeLabel || LEDGER_TYPE_LABELS[l.type] || l.type)}</td>
+              <td>${escapeHtml(l.periodLabel || l.period)}</td>
+              <td><span class="status-pill">${escapeHtml(l.statusLabel || LEDGER_STATUS_LABELS[l.status] || l.status)}</span></td>
+              <td>${escapeHtml(String(l.records ?? 0))}</td>
+              <td>${escapeHtml(String(l.roster?.inServiceCount ?? "—"))}</td>
+              <td>${escapeHtml(String(l.roster?.leftInPeriodCount ?? l.roster?.leftCount ?? "—"))}</td>
+              <td>${l.writable ? "是" : "否"}</td>
+              <td>${l.loaded ? "是" : "否（归档）"}</td>
+              <td>${escapeHtml(String(l.unlockCount ?? 0))}</td>
+              <td class="ledger-actions">${actions.join(" ") || "—"}</td>
+            </tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>`;
+}
+
+function renderLedgerReconcile() {
+  if (state.activeView !== "ledgers") return;
+  const monthInput = document.querySelector("#ledgerReconcileMonth");
+  if (monthInput && !monthInput.value) {
+    monthInput.value = ledgerReconcileState.month || currentSettlementMonth();
+  }
+  const summary = document.querySelector("#ledgerReconcileSummary");
+  const table = document.querySelector("#ledgerReconcileTable");
+  if (!summary || !table) return;
+
+  const { loading, error, report } = ledgerReconcileState;
+  setReportStatus("#ledgerReconcileStatus", loading ? "对账中" : error ? "对账失败" : report ? (report.balanced ? "已对平" : `${report.differences?.length || 0} 处差异`) : "未运行");
+
+  if (error) {
+    summary.innerHTML = "";
+    table.innerHTML = `<p class="empty-hint">${escapeHtml(error)}</p>`;
+    return;
+  }
+  if (!report) {
+    summary.innerHTML = "";
+    table.innerHTML = '<p class="empty-hint">选择月份后点「运行对账」。</p>';
+    return;
+  }
+
+  summary.innerHTML = [
+    { label: "人事在岗", value: report.headcount?.hrInService ?? 0 },
+    { label: "本月工资单", value: report.headcount?.payrollCount ?? 0 },
+    { label: "排课课时", value: report.workload?.totalScheduledUnits ?? 0 },
+    { label: "计薪课时", value: report.workload?.totalPaidUnits ?? 0 },
+    { label: "差异", value: report.differences?.length ?? 0 },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  const diffs = report.differences || [];
+  if (!diffs.length) {
+    table.innerHTML = `<p class="empty-hint">${escapeHtml(report.month)} 三方已对平，无差异。</p>`;
+    return;
+  }
+  // 还没生成工资单的月份会一口气报出全校一千多条同样的差异。全渲染进 DOM 页面会卡，
+  // 而且一千条一模一样的「在岗但无工资单」对人没有任何可操作性。
+  // 截断，但必须写清楚截断了多少——不说的话看起来就像「只有 200 处差异」。
+  const DIFF_DISPLAY_LIMIT = 200;
+  const shown = diffs.slice(0, DIFF_DISPLAY_LIMIT);
+  const omitted = diffs.length - shown.length;
+  table.innerHTML = `
+    ${omitted > 0 ? `<p class="empty-hint">共 ${diffs.length} 处差异，下面只列出前 ${DIFF_DISPLAY_LIMIT} 处，另有 ${omitted} 处未显示；完整清单请导出账套备份或查看通知中心。</p>` : ""}
+    <table class="report-table">
+      <thead><tr><th>严重度</th><th>类型</th><th>工号</th><th>姓名</th><th>说明</th></tr></thead>
+      <tbody>
+        ${shown
+          .map(
+            (d) => `<tr>
+              <td>${d.severity === "error" ? "严重" : "提示"}</td>
+              <td>${escapeHtml(d.kindLabel || d.kind || "")}</td>
+              <td>${escapeHtml(d.employeeNo || "")}</td>
+              <td>${escapeHtml(d.name || "")}</td>
+              <td>${escapeHtml(d.detail || "")}</td>
+            </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>`;
+}
+
+function renderLedgersView() {
+  renderLedgers();
+  renderLedgerReconcile();
+}
+
+document.addEventListener("click", async (event) => {
+  if (event.target.closest("#ledgerRefresh")) {
+    loadLedgers();
+    return;
+  }
+  if (event.target.closest("#ledgerCreate")) {
+    createLedger();
+    return;
+  }
+  if (event.target.closest("#ledgerReconcileRun")) {
+    loadReconciliation(true);
+    return;
+  }
+  if (event.target.closest("#ledgerReconcileLoad")) {
+    loadReconciliation(false);
+    return;
+  }
+  if (event.target.closest("#ledgerRestoreRun")) {
+    restoreLedgerBackup();
+    return;
+  }
+  if (event.target.closest("#auditReportExport")) {
+    exportAuditReport();
+    return;
+  }
+  const toButton = event.target.closest("[data-ledger-to]");
+  if (toButton) {
+    transitionLedgerState(toButton.dataset.ledgerType, toButton.dataset.ledgerPeriod, toButton.dataset.ledgerTo);
+    return;
+  }
+  const carryButton = event.target.closest("[data-ledger-carry]");
+  if (carryButton) {
+    carryOverLedger(carryButton.dataset.ledgerType, carryButton.dataset.ledgerPeriod);
+    return;
+  }
+  const backupButton = event.target.closest("[data-ledger-backup]");
+  if (backupButton) {
+    downloadLedgerBackup(backupButton.dataset.ledgerType, backupButton.dataset.ledgerPeriod);
+    return;
+  }
+  const unlockButton = event.target.closest("[data-ledger-unlock]");
+  if (unlockButton) {
+    requestLedgerUnlock(unlockButton.dataset.ledgerType, unlockButton.dataset.ledgerPeriod);
+  }
+});
+
+/**
+ * 发起账套解锁申请（验收 8.10）。
+ *
+ * 跳到审批中心再开弹层，而不是就地开一个：申请提交后要在审批中心跟进度、
+ * 看谁批到哪一步了。就地弹一个框、提交完人还留在账套页，
+ * 他不知道下一步该去哪看。
+ */
+async function requestLedgerUnlock(type, period) {
+  switchView("approvals");
+  await loadOaTemplates();
+  const template = oaState.templates.find((t) => t.key === "ledger_unlock");
+  if (!template) {
+    showToast("当前账号无权发起账套解锁申请，请联系财务或系统管理员");
+    return;
+  }
+  await openOaCreateDialog("ledger_unlock", {
+    ledgerType: LEDGER_TYPE_LABELS[type] || "",
+    period,
+  });
+}
+
+document.addEventListener("change", (event) => {
+  if (event.target.closest("#ledgerFilterType")) {
+    loadLedgers({ type: event.target.value });
+    return;
+  }
+  if (event.target.closest("#ledgerFilterStatus")) {
+    loadLedgers({ status: event.target.value });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 系统监控（合同第七条第 6 项）
+// ---------------------------------------------------------------------------
+
+async function loadMonitoring() {
+  if (!backendMode()) return;
+  monitoringState = { ...monitoringState, loading: true, error: "" };
+  renderMonitoring();
+  try {
+    const data = await apiRequest("/api/monitoring");
+    monitoringState = { loaded: true, loading: false, error: "", data };
+  } catch (error) {
+    monitoringState = { ...monitoringState, loading: false, loaded: true, error: error.message || "加载失败" };
+  }
+  renderMonitoring();
+}
+
+function formatUptime(seconds) {
+  const s = Number(seconds || 0);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return d ? `${d} 天 ${h} 小时` : h ? `${h} 小时 ${m} 分` : `${m} 分`;
+}
+
+function renderMonitoring() {
+  if (state.activeView !== "monitoring") return;
+  const summary = document.querySelector("#monitoringSummary");
+  const table = document.querySelector("#monitoringChecks");
+  if (!summary || !table) return;
+
+  if (!monitoringState.loaded && !monitoringState.loading) {
+    loadMonitoring();
+    return;
+  }
+
+  const { loading, error, data } = monitoringState;
+  const failing = (data?.checks || []).filter((c) => !c.ok);
+  setReportStatus(
+    "#monitoringStatus",
+    loading ? "检查中" : error ? "加载失败" : data?.healthy ? "一切正常" : `${failing.length} 项异常`,
+  );
+
+  if (error) {
+    summary.innerHTML = "";
+    table.innerHTML = `<p class="empty-hint">${escapeHtml(error)}</p>`;
+    return;
+  }
+  if (!data) return;
+
+  summary.innerHTML = [
+    { label: "运行时长", value: formatUptime(data.uptimeSeconds) },
+    { label: "内存占用", value: `${data.memoryMb} MB` },
+    { label: "数据库", value: data.postgres?.configured ? (data.postgres.connected ? "已连接" : "已断开") : "文件模式" },
+    { label: "异常项", value: String(failing.length) },
+  ]
+    .map(
+      (m) =>
+        `<article class="metric"><p class="metric-label">${escapeHtml(m.label)}</p><p class="metric-value">${escapeHtml(String(m.value))}</p></article>`,
+    )
+    .join("");
+
+  // 异常排在最前面。正常项也要列出来——只显示异常的话，
+  // 一个空列表分不清是「都正常」还是「检查根本没跑」
+  const rows = [...failing, ...(data.checks || []).filter((c) => c.ok)];
+  table.innerHTML = `
+    <table class="report-table">
+      <thead><tr><th>检查项</th><th>级别</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+        ${rows
+          .map(
+            (c) => `<tr>
+              <td>${escapeHtml(c.name)}</td>
+              <td>${escapeHtml(MONITOR_LEVEL_LABELS[c.level] || c.level)}</td>
+              <td>${c.ok ? "正常" : "<strong>异常</strong>"}</td>
+              <td>${escapeHtml(c.detail || "—")}</td>
+            </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>
+    <p class="empty-hint">最近检查时间：${escapeHtml(data.at || "")}</p>`;
+}
+
+function renderMonitoringView() {
+  renderMonitoring();
+}
+
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#monitoringRefresh")) {
+    loadMonitoring();
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target.closest("#recordsMonth")) {
+    const month = event.target.value;
+    if (!month) return;
+    // 直接调加载函数，不靠改状态再让 render 里的「需不需要重新拉」去推断——
+    // 那条路要同时满足三个条件，中间任何一个不成立就静默什么都不做，
+    // 表现出来就是「点了月份没反应」
+    loadBackendAttendanceRecords(currentTeacherId(), month);
+  }
+});

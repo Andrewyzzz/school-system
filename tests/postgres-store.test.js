@@ -1,6 +1,30 @@
+// 本测试会 DROP 掉所有 app_* 表，所以必须在**独立的临时库**里跑。
+//
+// 原先它直连默认的 school_system_dev——也就是开发与试运行正在用的那个库，
+// 跑一次测试就把审批单、工资单全部清空。在学校服务器上任何人执行 npm test
+// 都会抹掉生产数据。因此这里先建一个带进程号的临时库，把 DATABASE_URL 指过去，
+// 用完删掉；连接串必须在 import postgresStore 之前设置，因为连接池是惰性建的，
+// 一旦建好就固定在那个库上了。
 import assert from "node:assert/strict";
-import { createInitialData } from "../server/storage.js";
-import {
+import pg from "pg";
+
+const ADMIN_URL = process.env.TEST_ADMIN_URL || "postgresql://localhost:5432/postgres";
+const DB_NAME = `school_store_test_${process.pid}`;
+const TEST_URL = process.env.TEST_DATABASE_URL || `postgresql://localhost:5432/${DB_NAME}`;
+let createdTempDb = false;
+
+if (!process.env.TEST_DATABASE_URL) {
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS "${DB_NAME}"`);
+  await admin.query(`CREATE DATABASE "${DB_NAME}"`);
+  await admin.end();
+  createdTempDb = true;
+}
+process.env.DATABASE_URL = TEST_URL;
+
+const { createInitialData } = await import("../server/storage.js");
+const {
   closePostgresPool,
   diffDatabaseAgainstPostgres,
   loadDatabaseFromPostgres,
@@ -8,7 +32,23 @@ import {
   postgresHealth,
   postgresPing,
   resetPostgresStore,
-} from "../server/db/postgresStore.js";
+} = await import("../server/db/postgresStore.js");
+
+async function dropTempDb() {
+  if (!createdTempDb) return;
+  await closePostgresPool();
+  const admin = new pg.Client({ connectionString: ADMIN_URL });
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS "${DB_NAME}"`);
+  await admin.end();
+}
+// 断言失败也要把临时库删掉，否则每跑一次失败的测试就留下一个库
+process.on("exit", () => {});
+process.on("uncaughtException", async (error) => {
+  await dropTempDb().catch(() => {});
+  console.error(error);
+  process.exit(1);
+});
 
 // PostgreSQL 持久层验收（第二阶段 M1）：
 // 差量写、删除同步、数组顺序还原、单例对象、重复主键拒绝、核对工具。
@@ -18,7 +58,7 @@ import {
 const reachable = await postgresPing();
 assert.ok(
   reachable,
-  `PostgreSQL 不可达（${postgresHealth.lastError}）。第二阶段测试要求本机数据库就绪：brew services start postgresql@16 && createdb school_system_dev`,
+  `PostgreSQL 不可达（${postgresHealth.lastError}）。第二阶段测试要求本机数据库就绪：brew services start postgresql@16`,
 );
 
 await resetPostgresStore();
@@ -95,5 +135,5 @@ assert.equal(dirtyDiff.identical, false, "未持久化的内存改动必须被�
 assert.equal(dirtyDiff.collections.teachers.mismatched, 1);
 
 await resetPostgresStore();
-await closePostgresPool();
+await dropTempDb();
 console.log("postgres store checks passed");

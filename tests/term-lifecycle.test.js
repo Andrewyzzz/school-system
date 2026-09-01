@@ -13,14 +13,14 @@ import {
   updateTeacherAssignment,
 } from "../server/storage.js";
 import {
+  applySubstituteArrangements,
   buildSchedulingConfig,
   generateScheduleDraft,
   publishScheduleDraft,
 } from "../server/scheduling.js";
-import { submitTeacherAttendance } from "../server/attendance.js";
 
 // 学期生命周期验收：真实运转是“一个学期接一个学期”，
-// 新旧学期的课表、签到、工作量、工资必须完全隔离，归档学期必须只读。
+// 新旧学期的课表、工作量、工资必须完全隔离，归档学期必须只读。
 
 function actor(db, username) {
   const account = db.accounts.find((item) => item.username === username);
@@ -124,15 +124,18 @@ assert.throws(
 
 const teacherAccount = db.accounts.find((account) => account.teacherId === sampleTeacherId);
 const archivedLesson = oldTermLessons.find((lesson) => lesson.teacherId === sampleTeacherId);
+// 签到取消后，课次层面唯一的写入路径是调课/代课，用它来验「归档学期只读」。
+// 换一条路径测同一件事，比删掉这条断言好——归档学期能不能改课表，
+// 是这个测试最该守住的东西。
 assert.throws(
   () =>
-    submitTeacherAttendance(
+    applySubstituteArrangements(
       db,
-      { lessonId: archivedLesson.id, action: "checkIn", qrPayload: "{}" },
-      teacherAccount,
+      [{ lessonId: archivedLesson.id, action: "cancel", reason: "验证归档只读" }],
+      admin,
     ),
   /已归档/,
-  "归档学期的课次不能再签到",
+  "归档学期的课次不能再调课或取消",
 );
 
 assert.throws(
@@ -147,19 +150,19 @@ assert.throws(
   "归档学期的月份不能再生成工资",
 );
 
-// 6. 归档旧学期不影响新学期正常使用：签到走到业务校验而不是被“归档”拦截
+// 6. 归档旧学期不影响新学期正常使用：新学期的课次调课走到业务校验，
+//    而不是被「归档」一刀拦下
 const nextTermLesson = nextTermLessons.find((lesson) => lesson.teacherId === sampleTeacherId) || nextTermLessons[0];
-const nextTermTeacherAccount = db.accounts.find((account) => account.teacherId === nextTermLesson.teacherId);
 try {
-  submitTeacherAttendance(
+  applySubstituteArrangements(
     db,
-    { lessonId: nextTermLesson.id, action: "checkIn", qrPayload: "{}" },
-    nextTermTeacherAccount,
+    [{ lessonId: nextTermLesson.id, action: "cancel", reason: "验证新学期可写" }],
+    admin,
   );
 } catch (error) {
   assert.ok(
     !/已归档/.test(error.message),
-    `新学期课次签到不应被归档拦截，实际错误：${error.message}`,
+    `新学期课次调课不应被归档拦截，实际错误：${error.message}`,
   );
 }
 

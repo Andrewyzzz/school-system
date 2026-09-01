@@ -2,6 +2,7 @@
 // 覆盖：基本工资档、校龄四公式、考核浮动、试用期折算与最低工资兜底、
 //       兼岗叠加/择高、年级长按班数、课时系数与补课费、跨头课与心理辅导
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   DEFAULT_PAYROLL_RULES,
   calculateDedicatedTeacherPayroll,
@@ -527,4 +528,25 @@ console.log("salary policy 2026 checks passed");
     monthlyAssessment: { grade: "unqualified", amount: 0 },
   });
   assert.equal(amountOf(zero, "考核工资"), null, "核定 0 元时该项金额为 0，不出现在明细中");
+}
+
+// ---------------------------------------------------------------------------
+// 三个学部的正课标签都要对
+//
+// 原先用 `stageId === "middle" ? "初中" : "小学"`，只分了两档，高中落到 else
+// 显示成「小学正课」。金额是对的，但高中老师打开工资条看到"小学正课"，
+// 财务对账时也会困惑。
+// ---------------------------------------------------------------------------
+{
+  const payrollSource = readFileSync(new URL("../server/payroll.js", import.meta.url), "utf8");
+  assert.ok(
+    !/stageId === "middle" \? "初中" : "小学"/.test(payrollSource),
+    "学部名不能用二选一的三元表达式——高中会被显示成小学",
+  );
+  assert.match(payrollSource, /PAYROLL_STAGE_LABELS/, "应使用完整的学部标签表");
+  const table = /const PAYROLL_STAGE_LABELS = \{([^}]*)\}/.exec(payrollSource)?.[1] || "";
+  ["primary", "middle", "high"].forEach((stage) => {
+    assert.ok(table.includes(stage), `学部标签表应覆盖 ${stage}`);
+  });
+  assert.ok(table.includes("高中"), "必须有高中，这正是原先漏掉的那一档");
 }

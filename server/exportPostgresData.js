@@ -735,8 +735,6 @@ function buildRows(db) {
           "status",
           "salary_scheme_version",
           "gross_pay",
-          "tax",
-          "net_pay",
           "summary_snapshot",
           "line_snapshots",
           "dispute_reason",
@@ -762,8 +760,6 @@ function buildRows(db) {
           sqlText(normalizePayrollStatus(detail.status)),
           sqlString(detail.summarySnapshot?.salarySchemeVersion),
           sqlNumber(detail.summarySnapshot?.grossPay, 0),
-          sqlNumber(detail.summarySnapshot?.tax, 0),
-          sqlNumber(detail.summarySnapshot?.netPay, 0),
           sqlJson(detail.summarySnapshot || {}),
           sqlJson(detail.lineSnapshots || []),
           sqlString(detail.disputeReason),
@@ -825,7 +821,7 @@ function buildRows(db) {
       rows.push(
         insertSql(
           "payroll_batch_results",
-          ["id", "payroll_batch_id", "teacher_id", "ok", "status", "gross_pay", "net_pay", "error", "details"],
+          ["id", "payroll_batch_id", "teacher_id", "ok", "status", "gross_pay", "error", "details"],
           [
             sqlText(`${batch.id}-R${String(index + 1).padStart(5, "0")}`),
             sqlText(batch.id),
@@ -833,7 +829,6 @@ function buildRows(db) {
             sqlBoolean(Boolean(result.ok)),
             sqlString(result.status),
             sqlNumber(result.grossPay, 0),
-            sqlNumber(result.netPay, 0),
             sqlString(result.error),
             sqlJson(result),
           ],

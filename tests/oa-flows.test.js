@@ -506,14 +506,17 @@ function leaveForm(overrides = {}) {
   // 修改内置模板的审批链
   const updated = updateOaTemplate(
     db,
-    "attendance_fix",
+    // 原来用「补卡申请」测，它随扫码签到一起去掉了。换一个同样是内置、
+    // 同样是单级审批的模板——这里验的是「内置模板的审批链能不能改」，
+    // 跟具体是哪个模板无关
+    "overtime",
     {
-      name: "补卡申请",
+      name: "加班申请",
       icon: "⏱️",
       category: "考勤",
-      description: "考勤补记",
+      description: "加班登记",
       applicantRoles: ["teacher"],
-      formFields: [{ key: "fixDate", label: "补卡日期", type: "date", required: true }],
+      formFields: [{ key: "overtimeDate", label: "加班日期", type: "date", required: true }],
       steps: [
         { name: "部门负责人审批", approverRoles: ["division_head"], approverMode: "any" },
         { name: "人事复核", approverRoles: ["hr"], approverMode: "any" },
@@ -523,7 +526,7 @@ function leaveForm(overrides = {}) {
   );
   assert.equal(updated.steps.length, 2, "内置模板的审批链应可改为两级");
   assert.equal(updated.updatedByName, "总校管理员", "应记录修改人");
-  const newFix = createOaRequest(db, teacher, { templateKey: "attendance_fix", formData: { fixDate: "2026-09-10" } });
+  const newFix = createOaRequest(db, teacher, { templateKey: "overtime", formData: { overtimeDate: "2026-09-10" } });
   assert.equal(newFix.steps.length, 2, "新申请应按修改后的流程走");
 
   // 停用后不可发起，启用后恢复
@@ -607,17 +610,24 @@ function leaveForm(overrides = {}) {
   assert.equal(lessons[0].assignmentId, "A1");
   assert.equal(listTeacherLessonsInRange(db1, "T1", "2026-07-01", "2026-07-02").length, 0, "区间外不应返回课次");
 
-  // 已签到的课次不可变更并说明原因
+  // 已取消的课次不可再变更并说明原因。
+  // 原来这里测的是「已签到的课次」，签到取消后剩下的不可变更情形是
+  // 「已取消」——它已经从工资里扣掉了，改回来会让已定案的工资对不上。
   const db2 = buildScheduleDb();
-  db2.attendanceRecords.push({ lessonId: "L1" });
+  db2.lessonInstances.find((l) => l.id === "L1").status = "cancelled";
   const blocked = listTeacherLessonsInRange(db2, "T1", "2026-06-15", "2026-06-16");
-  assert.equal(blocked[0].changeable, false, "已有签到记录的课次不可变更");
-  assert.match(blocked[0].blockedReason, /签到/);
+  assert.equal(blocked[0].changeable, false, "已取消的课次不可变更");
+  assert.match(blocked[0].blockedReason, /已取消/, "要说清楚为什么不能变更");
 
-  // 已完成的课次同样不可变更
+  // 已锁定工资的月份同样不可变更：那个月的钱已经发出去了，
+  // 这时候改课表会让工资单和课表对不上
   const db3 = buildScheduleDb();
-  db3.lessonInstances[0].status = "completed";
-  assert.equal(listTeacherLessonsInRange(db3, "T1", "2026-06-15", "2026-06-16")[0].changeable, false);
+  db3.payrollDetails = [
+    { teacherId: "T1", month: "2026-06", status: "locked" },
+  ];
+  const lockedRows = listTeacherLessonsInRange(db3, "T1", "2026-06-15", "2026-06-16");
+  assert.equal(lockedRows[0].changeable, false, "已锁薪月份的课次不可变更");
+  assert.match(lockedRows[0].blockedReason, /工资已锁定/);
 
   // 取消课次
   const db4 = buildScheduleDb();

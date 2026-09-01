@@ -2,10 +2,37 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { issueClassroomQrToken, markMissingCheckOutExceptions, submitTeacherAttendance } from "./attendance.js";
-import { createToken, verifyPasswordAsync } from "./auth.js";
+import { createToken, verifyPassword, verifyPasswordAsync } from "./auth.js";
+import { assertConfigOrExit, inspectConfig } from "./config.js";
+import { parseMultipart } from "./multipart.js";
+import {
+  ATTACHMENT_CATEGORIES,
+  MAX_ATTACHMENT_BYTES,
+  deleteAttachment,
+  listAttachments,
+  readAttachment,
+  saveAttachment,
+} from "./hrAttachments.js";
 import { commitTeacherImport, previewTeacherImport } from "./importTeachers.js";
 import { queryTermBudget } from "./budget.js";
+import { buildScheduleGrid, exportSchedule } from "./scheduleExport.js";
+import {
+  buildAnnualSalary,
+  buildWeeklyWorkload,
+  exportAnnualSalary,
+  exportPayrollSheet,
+  exportWeeklyWorkload,
+} from "./reports.js";
+import {
+  ENTITY_KEYS,
+  buildResourceLedger,
+  commitEntityImport,
+  entitySpec,
+  exportEntityCsv,
+  exportEntityTemplate,
+  exportResourceLedger,
+  previewEntityImport,
+} from "./dataPorting.js";
 import {
   canFinanceActOnTeacher,
   filterOrgUnitsByFinanceScope,
@@ -50,6 +77,7 @@ import {
   applySubstituteArrangements,
 } from "./scheduling.js";
 import {
+  appendAuditLog,
   confirmMonthlyWorkload,
   approveMonthlyWorkload,
   archiveAcademicTerm,
@@ -74,7 +102,7 @@ import {
   queryNotifications,
   queryPayrollHistory,
   queryPersonnel,
-  queryTeacherAttendanceRecords,
+  queryTeacherLessonRecords,
   queryTeacherAssignments,
   queryTerms,
   queryTeachers,
@@ -99,7 +127,31 @@ import {
   DB_DRIVER,
   invalidateOpenPayrollDetailsForTeacher,
 } from "./storage.js";
-import { postgresHealth, postgresPing } from "./db/postgresStore.js";
+import {
+  ensureSchemaConstraints,
+  postgresHealth,
+  postgresPing,
+  queryArchivedRows,
+} from "./db/postgresStore.js";
+import {
+  LEDGER_TYPES,
+  autoArchiveEndedTerms,
+  buildLedgerBackup,
+  carryOverRoster,
+  exportLedgerData,
+  importLedgerBackup,
+  ledgerBackupFilename,
+  resolveLedgerRows,
+  findLedger,
+  initializeLedger,
+  ledgerDetail,
+  listLedgers,
+  transitionLedger,
+  unlockLedgerByApproval,
+} from "./ledgers.js";
+import { buildAuditReport } from "./auditReport.js";
+import { createMonitor } from "./monitoring.js";
+import { latestReconciliation, runReconciliation } from "./reconcile.js";
 import { piiEncryptionReady } from "./security/pii.js";
 import {
   addEmployeeContract,
@@ -145,6 +197,8 @@ import {
   TEACHER_ROLE_FIELDS,
 } from "./hr.js";
 import {
+  addOaCcRecipients,
+  listCcCandidates,
   registerOaSideEffect,
   listTemplatesForRole,
   listAllTemplates,
@@ -164,6 +218,14 @@ import {
   countOaTodos,
   scanOaTimeouts,
 } from "./oa.js";
+
+// 薪资审批表单里的「适用范围」存的是中文标签，锁定时要换回内部 scopeId
+const PAYROLL_SCOPE_BY_LABEL = {
+  小学部: "primary",
+  初中部: "middle",
+  高中部: "high",
+  总校行政后勤: "headquarters",
+};
 
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -218,13 +280,62 @@ const MIME_TYPES = {
   ".svg": "image/svg+xml",
 };
 
+// 安全响应头（验收 E-4）。
+//
+// CSP 里没有 'unsafe-eval'：前端是单文件原生 JS，不需要 eval，留着只是给
+// XSS 多一条路。'unsafe-inline' 暂时保留——index.html 里有内联事件与样式，
+// 去掉会直接白屏；要彻底移除得先把内联脚本抽出去，那是独立的一次改动。
+//
+// frame-ancestors 'none' 防点击劫持：教师工资页面被套进 iframe 诱导点击，
+// 后果是替人确认工资单。
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "same-origin",
+  "Permissions-Policy": "camera=(self), microphone=(), geolocation=()",
+  "Content-Security-Policy": [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "font-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; "),
+};
+
+// 跨域：默认不发 CORS 头——前后端同源（服务端自己托管 index.html），
+// 原先的 Access-Control-Allow-Origin: * 是任何站点都能调本系统接口。
+// 确有跨域需求时用 CORS_ALLOW_ORIGIN 显式指定来源，不接受 *。
+const CORS_ORIGIN = String(process.env.CORS_ALLOW_ORIGIN || "").trim();
+if (CORS_ORIGIN === "*") {
+  throw new Error("CORS_ALLOW_ORIGIN 不接受 *，请指定具体来源");
+}
+
+function securityHeaders(extra = {}) {
+  const headers = { ...SECURITY_HEADERS, ...extra };
+  // HSTS 只在确实跑在 HTTPS 后面时才发：明文 HTTP 下发 HSTS 会把浏览器
+  // 锁到 https，而学校若还没配证书就会整站打不开。
+  if (process.env.FORCE_HTTPS === "1") {
+    headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+  }
+  if (CORS_ORIGIN) {
+    headers["Access-Control-Allow-Origin"] = CORS_ORIGIN;
+    headers.Vary = "Origin";
+    headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+    headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS";
+  }
+  return headers;
+}
+
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  });
+  res.writeHead(
+    statusCode,
+    securityHeaders({ "Content-Type": "application/json; charset=utf-8" }),
+  );
   res.end(JSON.stringify(payload));
 }
 
@@ -286,9 +397,15 @@ async function readJsonBody(req) {
 // 部署在反向代理后时设 TRUST_PROXY=1，用 X-Forwarded-For 还原真实来源。
 const LOGIN_RATE_WINDOW_MS = 60 * 1000;
 const LOGIN_FAIL_MAX_PER_USERNAME = 10;
-const LOGIN_MAX_PER_IP = 3000;
+const LOGIN_MAX_PER_IP = Number(process.env.LOGIN_MAX_PER_IP || 3000);
+// 按 IP 的**失败**次数上限。上面两条都拦不住跨账号撞库：
+// 拿一份账号表、每个账号只试一次口令，既不触发单账号 10 次失败的锁定，
+// 总量也远在 3000 之下。但正常用户不会在一分钟内失败几十次——
+// 同一出口 IP 一分钟失败 60 次，几乎必然是在扫。
+const LOGIN_FAIL_MAX_PER_IP = Number(process.env.LOGIN_FAIL_MAX_PER_IP || 60);
 const loginFailBuckets = new Map();
 const loginIpBuckets = new Map();
+const loginIpFailBuckets = new Map();
 
 function slidingWindowHit(map, key, windowMs, increment = 1) {
   const now = Date.now();
@@ -318,6 +435,29 @@ function loginIpLimited(ip) {
   return slidingWindowHit(loginIpBuckets, ip, LOGIN_RATE_WINDOW_MS) > LOGIN_MAX_PER_IP;
 }
 
+// 监控用的登录失败统计。与上面的限流桶分开：限流桶是按 IP 分的滑动窗口，
+// 回答「这个 IP 该不该锁」；监控要回答的是「全站最近一小时失败了多少次、
+// 来自几个 IP」——爆破往往是很多 IP 各试几次，每个都不触发限流。
+const loginFailWindow = [];
+function noteLoginFailureForMonitor(ip) {
+  const now = Date.now();
+  loginFailWindow.push({ at: now, ip: ip || "unknown" });
+  // 只留一小时，顺手裁掉旧的，不需要另起定时器
+  while (loginFailWindow.length && now - loginFailWindow[0].at > 3600000) loginFailWindow.shift();
+}
+export function loginSecurityMetrics() {
+  const now = Date.now();
+  const recent = loginFailWindow.filter((e) => now - e.at <= 3600000);
+  return { failuresLastHour: recent.length, distinctIps: new Set(recent.map((e) => e.ip)).size };
+}
+
+function loginIpFailLocked(ip) {
+  const bucket = loginIpFailBuckets.get(ip);
+  if (!bucket) return false;
+  if (Date.now() - bucket.windowStart > LOGIN_RATE_WINDOW_MS) return false;
+  return bucket.count >= LOGIN_FAIL_MAX_PER_IP;
+}
+
 function loginUsernameLocked(username) {
   const bucket = loginFailBuckets.get(username);
   if (!bucket) return false;
@@ -325,14 +465,26 @@ function loginUsernameLocked(username) {
   return bucket.count >= LOGIN_FAIL_MAX_PER_USERNAME;
 }
 
-function recordLoginFailure(username) {
+function recordLoginFailure(username, ip) {
   slidingWindowHit(loginFailBuckets, username, LOGIN_RATE_WINDOW_MS);
+  if (ip) slidingWindowHit(loginIpFailBuckets, ip, LOGIN_RATE_WINDOW_MS);
+  noteLoginFailureForMonitor(ip);
 }
 
 function bearerToken(req) {
   const authorization = req.headers.authorization || "";
   return authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
 }
+
+// 必须先改密才能用的账号，只放行这几个接口，其余一律拦下。
+// 只在登录响应里回一个 mustChangePassword 标记是拦不住人的——
+// 前端可以不理，直接调业务接口照样能用。
+const PASSWORD_CHANGE_EXEMPT = new Set([
+  "/api/auth/change-password",
+  "/api/auth/logout",
+  "/api/me",
+  "/api/health",
+]);
 
 function requireAuth(req, res, db, allowedRoles = []) {
   const token = bearerToken(req);
@@ -347,6 +499,14 @@ function requireAuth(req, res, db, allowedRoles = []) {
     if (token) revokeSession(db, token, account || null);
     sendError(res, 401, "账号不可用，请重新登录");
     return null;
+  }
+
+  if (account.mustChangePassword) {
+    const pathname = new URL(req.url, "http://localhost").pathname;
+    if (!PASSWORD_CHANGE_EXEMPT.has(pathname)) {
+      sendError(res, 403, "首次登录请先修改密码", { code: "MUST_CHANGE_PASSWORD" });
+      return null;
+    }
   }
 
   if (allowedRoles.length && !allowedRoles.includes(account.role)) {
@@ -377,7 +537,8 @@ function teacherPayrollSummaryOnly(payroll) {
   return {
     teacher: teacherIdentityOnly(payroll.teacher),
     month: payroll.month,
-    netPay: payroll.netPay || 0,
+    // 锁定后老师端只看总额；系统结算至应发为止，税与社保由财务线下处理
+    grossPay: payroll.grossPay || 0,
     generated: payroll.generated
       ? {
           id: payroll.generated.id,
@@ -409,8 +570,6 @@ function teacherPayrollForConfirmation(payroll) {
     teacher: teacherIdentityOnly(payroll.teacher),
     month: payroll.month,
     grossPay: payroll.grossPay || 0,
-    tax: payroll.tax || 0,
-    netPay: payroll.netPay || 0,
     rows: payroll.rows || [],
     workloadSummary: payroll.workloadSummary || null,
     generated: payroll.generated
@@ -535,12 +694,15 @@ async function handleApi(req, res, db, url) {
         sendError(res, 401, "请先登录");
         return;
       }
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-      });
+      // SSE 与其他响应同口径：不再对任意来源开放
+      res.writeHead(
+        200,
+        securityHeaders({
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+        }),
+      );
       res.write("retry: 5000\n\n");
       res.write(`event: ready\ndata: {"topic":"ready"}\n\n`);
       sseClients.add(res);
@@ -571,10 +733,23 @@ async function handleApi(req, res, db, url) {
         sendError(res, 429, "该账号短时间内失败次数过多，请 1 分钟后再试");
         return;
       }
-      const account = findAccountByUsername(db, username);
 
-      if (!account || account.status !== "active" || !(await verifyPasswordAsync(password, account.passwordHash))) {
-        recordLoginFailure(username);
+      const account = findAccountByUsername(db, username);
+      const credentialsOk =
+        account &&
+        account.status === "active" &&
+        (await verifyPasswordAsync(password, account.passwordHash));
+
+      // 按 IP 的失败限流放在验证之后：校园网上千人共用一个出口 IP，
+      // 把这道闸放在验证之前，一次扫描就会连带把凭据正确的老师一起挡在门外。
+      // 凭据正确一律放行；扫描方按定义拿不出正确凭据，仍被限在阈值内。
+      if (!credentialsOk) {
+        if (loginIpFailLocked(clientIp)) {
+          // 措辞刻意不提「失败次数」：告诉扫描方触发了哪条规则，等于教他怎么绕
+          sendError(res, 429, "登录请求过于频繁，请 1 分钟后再试");
+          return;
+        }
+        recordLoginFailure(username, clientIp);
         sendError(res, 401, "用户名或密码错误");
         return;
       }
@@ -752,45 +927,6 @@ async function handleApi(req, res, db, url) {
       const payrollRules = updatePayrollRules(db, body.payrollRules || body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, { payrollRules });
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/api/classrooms") {
-      const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin", "classroom"]);
-      if (!auth) return;
-      const termId = url.searchParams.get("termId") || queryTerms(db).currentTerm.id;
-      sendJson(res, 200, {
-        rooms: filterStageRowsByFinanceScope(auth.account, roomsForTerm(db, termId)),
-        termId,
-      });
-      return;
-    }
-
-    if (parts[0] === "api" && parts[1] === "classrooms" && parts[3] === "dynamic-qr") {
-      if (req.method !== "GET") {
-        sendError(res, 405, "接口方法不支持");
-        return;
-      }
-      const roomId = decodeURIComponent(parts[2] || "");
-      const displayKey = url.searchParams.get("displayKey") || "";
-      sendJson(res, 200, issueClassroomQrToken(db, roomId, displayKey));
-      return;
-    }
-
-    if (parts[0] === "api" && parts[1] === "classrooms" && parts[3] === "qrcode") {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
-      if (!auth) return;
-      const roomId = decodeURIComponent(parts[2] || "");
-      const termId = url.searchParams.get("termId") || queryTerms(db).currentTerm.id;
-      const room = roomsForTerm(db, termId).find((item) => item.id === roomId);
-      if (!room) {
-        sendError(res, 404, "教室不存在");
-        return;
-      }
-      sendJson(res, 200, {
-        room,
-        classroomUrl: `/classroom.html?roomId=${encodeURIComponent(room.id)}&displayKey=${encodeURIComponent(room.displayKey)}`,
-      });
       return;
     }
 
@@ -1202,19 +1338,15 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
-      if (req.method === "GET" && parts[3] === "attendance-records") {
-        if (markMissingCheckOutExceptions(db)) {
-          await saveDatabase(db);
-        }
+      // 教师的课时记录（原「考勤记录」）。签到取消后这里列的是
+      // 「这个月排给我的课、哪些计薪、哪些因请假取消」
+      if (req.method === "GET" && parts[3] === "lesson-records") {
         const month = url.searchParams.get("month") || "2026-06";
-        sendJson(res, 200, queryTeacherAttendanceRecords(db, teacherId, month));
+        sendJson(res, 200, queryTeacherLessonRecords(db, teacherId, month));
         return;
       }
 
       if (req.method === "GET" && parts[3] === "workload") {
-        if (markMissingCheckOutExceptions(db)) {
-          await saveDatabase(db);
-        }
         const month = url.searchParams.get("month") || "2026-06";
         const workload = teacherMonthlyWorkload(db, teacherId, month);
         sendJson(
@@ -1252,25 +1384,6 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
-      if (req.method === "POST" && parts[3] === "attendance") {
-        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
-          sendError(res, 403, "只能由老师本人提交考勤");
-          return;
-        }
-        const body = await readJsonBody(req);
-        try {
-          const result = submitTeacherAttendance(db, body, auth.account);
-          await saveDatabase(db);
-          sendJson(res, 200, result);
-        } catch (error) {
-          if (error.details?.record) {
-            await saveDatabase(db);
-          }
-          throw error;
-        }
-        return;
-      }
-
       if (req.method === "PATCH" && parts[3] === "salary-profile") {
         if (!["finance", "system_admin"].includes(auth.account.role)) {
           sendError(res, 403, "只有财务或行政管理可以维护教师工资档案");
@@ -1279,14 +1392,13 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const teacher = updateTeacherSalaryProfile(db, teacherId, body.salaryProfile || body, auth.account);
         await saveDatabase(db);
+        // 职称档、考核档一改，工资金额跟着变，老师端要立刻看到
+        broadcastEvent("payroll");
         sendJson(res, 200, { teacher });
         return;
       }
 
       if (req.method === "GET" && parts[3] === "payroll") {
-        if (markMissingCheckOutExceptions(db)) {
-          await saveDatabase(db);
-        }
         const month = url.searchParams.get("month") || "2026-06";
 	        const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
 	        const visiblePayroll = auth.account.role === "teacher" ? teacherVisiblePayroll(payroll) : payroll;
@@ -1390,6 +1502,8 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = generatePayrollBatch(db, body, auth.account);
       await saveDatabase(db);
+      // 工资单一批出来，老师端的「我的工资」立刻要能看到
+      broadcastEvent("payroll");
       sendJson(res, 200, result);
       return;
     }
@@ -1400,6 +1514,7 @@ async function handleApi(req, res, db, url) {
       const body = await readJsonBody(req);
       const result = lockPayrollBatch(db, body, auth.account);
       await saveDatabase(db);
+      broadcastEvent("payroll");
       sendJson(res, 200, result);
       return;
     }
@@ -1407,10 +1522,384 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/payroll/export") {
       const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, exportPayrollDetails(db, {
-        ...Object.fromEntries(url.searchParams),
-        financeScope: financeScopeFor(auth.account),
-      }));
+      const scope = financeScopeFor(auth.account);
+      const options = { ...Object.fromEntries(url.searchParams), financeScope: scope };
+      // Excel 版是给财务归档与线下办税用的（验收 3.15）：带表头、合计行与签字栏；
+      // CSV 版保留给需要机器导入的场景。
+      if (url.searchParams.get("format") === "excel") {
+        sendJson(res, 200, exportPayrollSheet(db, options, {
+          scopeNote: scope ? financeScopeLabel(scope) : "全校",
+        }));
+        return;
+      }
+      sendJson(res, 200, exportPayrollDetails(db, options));
+      return;
+    }
+
+    // 课表：二维网格数据，供前端渲染与打印视图使用
+    if (req.method === "GET" && url.pathname === "/api/schedule/grid") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin", "finance", "hr", "division_head", "teacher"]);
+      if (!auth) return;
+      const params = Object.fromEntries(url.searchParams);
+      // 教师只能看本人课表，不能通过改参数看别人的
+      if (auth.account.role === "teacher") {
+        params.dimension = "teacher";
+        params.targetId = auth.account.teacherId || "";
+      }
+      sendJson(res, 200, {
+        grid: buildScheduleGrid(db, {
+          termId: params.termId || queryTerms(db).currentTerm.id,
+          dimension: params.dimension || "class",
+          targetId: params.targetId || "",
+          weekStart: params.weekStart || "",
+        }),
+      });
+      return;
+    }
+
+    // 归档学年的课次不在内存里（见 ledgers.js 的加载边界），查往年课表时
+    // 要从库里取。把结果塞进 db 的浅副本，现有的同步函数无需改动。
+    const withLessonsOf = async (termId) => {
+      const rows = await resolveLedgerRows(db, "lessonInstances", { termId }, { queryArchivedRows });
+      return { ...db, lessonInstances: rows };
+    };
+
+    // 课表导出（Excel）。PDF 由前端打印视图承载，一套实现覆盖导出与打印两项验收。
+    if (req.method === "GET" && url.pathname === "/api/schedule/export") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin", "finance", "hr", "division_head", "teacher"]);
+      if (!auth) return;
+      const params = Object.fromEntries(url.searchParams);
+      if (auth.account.role === "teacher") {
+        params.dimension = "teacher";
+        params.targetId = auth.account.teacherId || "";
+      }
+      const scopedDb = await withLessonsOf(params.termId || queryTerms(db).currentTerm.id);
+      const result = exportSchedule(scopedDb, {
+        termId: params.termId || queryTerms(db).currentTerm.id,
+        dimension: params.dimension || "class",
+        targetId: params.targetId || "",
+        weekStart: params.weekStart || "",
+      });
+      sendJson(res, 200, {
+        filename: result.filename,
+        content: result.content,
+        mimeType: result.mimeType,
+        total: result.total,
+      });
+      return;
+    }
+
+    // 教学基础数据批量导入导出（验收 2.1 班级/课程、2.2 教室）。
+    // 属教务与系统维护范畴，财务不参与——工资只读教师与课次，不改基础结构。
+    if (url.pathname.startsWith("/api/data-porting/")) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      const entity = parts[2] || "";
+      const action = parts[3] || "";
+      if (!ENTITY_KEYS.includes(entity)) {
+        sendJson(res, 404, { error: { message: `不支持的导入类型：${entity}`, details: null } });
+        return;
+      }
+
+      // 导出与模板：只读，教务与学部负责人也要用
+      if (req.method === "GET" && (action === "export" || action === "template")) {
+        const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "division_head"]);
+        if (!auth) return;
+        const result =
+          action === "template"
+            ? exportEntityTemplate(entity)
+            : exportEntityCsv(db, entity, {
+                termId: url.searchParams.get("termId") || queryTerms(db).currentTerm.id,
+                stageId: url.searchParams.get("stageId") || "",
+              });
+        sendJson(res, 200, result);
+        return;
+      }
+
+      // 预检与提交：会改基础结构，限行政与系统管理
+      if (req.method === "POST" && (action === "preview" || action === "commit")) {
+        const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const options = {
+          termId: body.termId || queryTerms(db).currentTerm.id,
+          includeAllRows: Boolean(body.includeAllRows),
+        };
+        if (action === "preview") {
+          sendJson(res, 200, previewEntityImport(db, entity, body.csvText || "", options));
+          return;
+        }
+        const result = commitEntityImport(db, entity, body.csvText || "", options, auth.account);
+        await saveDatabase(db);
+        broadcastEvent("base-data");
+        sendJson(res, 200, result);
+        return;
+      }
+
+      sendJson(res, 404, { error: { message: "接口不存在", details: null } });
+      return;
+    }
+
+    // 教学资源台账（验收 2.4）：查询、筛选、导出
+    if (req.method === "GET" && url.pathname === "/api/resource-ledger") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "division_head"]);
+      if (!auth) return;
+      const options = {
+        termId: url.searchParams.get("termId") || queryTerms(db).currentTerm.id,
+        stageId: url.searchParams.get("stageId") || "",
+        roomType: url.searchParams.get("roomType") || "",
+        keyword: url.searchParams.get("keyword") || "",
+        onlyIdle: url.searchParams.get("onlyIdle") === "true",
+      };
+      // 学部负责人只看自己学部的资源
+      const scope = Array.isArray(auth.account.scopeStageIds) ? auth.account.scopeStageIds : [];
+      if (scope.length === 1 && !options.stageId) options.stageId = String(scope[0]);
+
+      if (url.searchParams.get("format") === "excel") {
+        sendJson(res, 200, exportResourceLedger(db, options));
+        return;
+      }
+      sendJson(res, 200, buildResourceLedger(db, options));
+      return;
+    }
+
+    // --- 账套（验收第八章）---
+    if (url.pathname === "/api/ledgers" || url.pathname.startsWith("/api/ledgers/")) {
+      const parts = url.pathname.split("/").filter(Boolean); // api ledgers [type] [period] [action]
+      const type = parts[2] || "";
+      const period = parts[3] ? decodeURIComponent(parts[3]) : "";
+      const action = parts[4] || "";
+
+      // 清单与详情：教务、人事、财务、校领导都要能看数据边界（8.1）
+      if (req.method === "GET" && !type) {
+        const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "finance", "division_head", "principal"]);
+        if (!auth) return;
+        sendJson(res, 200, {
+          types: Object.entries(LEDGER_TYPES).map(([key, spec]) => ({ key, label: spec.label, period: spec.period })),
+          ledgers: listLedgers(db, {
+            type: url.searchParams.get("type") || "",
+            status: url.searchParams.get("status") || "",
+          }),
+        });
+        return;
+      }
+
+      if (req.method === "GET" && type && period && !action) {
+        const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "finance", "division_head", "principal"]);
+        if (!auth) return;
+        sendJson(res, 200, { ledger: ledgerDetail(db, type, period) });
+        return;
+      }
+
+      // 单账套备份下载（8.2 / 8.17）
+      if (req.method === "GET" && type && period && action === "backup") {
+        const auth = requireAuth(req, res, db, ["system_admin", "admin"]);
+        if (!auth) return;
+        const backup = buildLedgerBackup(db, type, period);
+        sendJson(res, 200, {
+          filename: ledgerBackupFilename(type, period),
+          content: JSON.stringify(backup, null, 2),
+          mimeType: "application/json",
+          total: backup.records,
+        });
+        return;
+      }
+
+      // 初始化（8.3）
+      if (req.method === "POST" && type && period && !action) {
+        const auth = requireAuth(req, res, db, ["system_admin", "admin", "finance", "hr"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const result = initializeLedger(db, { type, period, carryOver: body.carryOver !== false }, auth.account);
+        // 8.4：初始化时结转人员名册
+        if (result.created && body.carryOver !== false) carryOverRoster(db, type, period, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { ...result, ledger: ledgerDetail(db, type, period) });
+        return;
+      }
+
+      // 状态流转：锁定 / 归档（8.9 / 8.11）
+      if (req.method === "POST" && type && period && action === "transition") {
+        const auth = requireAuth(req, res, db, ["system_admin", "admin", "finance"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const ledger = transitionLedger(
+          db,
+          { type, period, to: String(body.to || ""), reason: String(body.reason || "") },
+          auth.account,
+        );
+        await saveDatabase(db);
+        // 账套一锁，财务端的「可编辑」状态就变了，要立刻反映出来
+        broadcastEvent("ledger");
+        sendJson(res, 200, { ledger });
+        return;
+      }
+
+      // 结转（8.4 / 8.6）
+      if (req.method === "POST" && type && period && action === "carry-over") {
+        const auth = requireAuth(req, res, db, ["system_admin", "hr", "finance"]);
+        if (!auth) return;
+        const roster = carryOverRoster(db, type, period, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, { roster });
+        return;
+      }
+
+      // 导入恢复（8.17）
+      if (req.method === "POST" && url.pathname === "/api/ledgers/import") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const result = importLedgerBackup(db, body.backup, { allowOverwrite: Boolean(body.force) }, auth.account);
+        await saveDatabase(db);
+        sendJson(res, 200, result);
+        return;
+      }
+
+      sendError(res, 404, "接口不存在");
+      return;
+    }
+
+    // 监控状态（合同第七条第 6 项）
+    if (req.method === "GET" && url.pathname === "/api/monitoring") {
+      const auth = requireAuth(req, res, db, ["system_admin"]);
+      if (!auth) return;
+      // 没跑过就现跑一轮，不要回一个 null 让界面显示空白——
+      // 刚重启就打开监控页是最常见的场景
+      const latest =
+        monitor.latest() ||
+        (await monitor.run(db, {
+          storageHealth,
+          postgresHealth,
+          solverProbe: checkSolverAvailability(),
+          security: loginSecurityMetrics(),
+          createNotification,
+        }));
+      sendJson(res, 200, {
+        at: latest.at,
+        healthy: latest.healthy,
+        checks: latest.checks,
+        uptimeSeconds: latest.metrics.uptimeSeconds,
+        memoryMb: Math.round(latest.metrics.memory.rss / 1048576),
+        counts: latest.metrics.counts,
+        storage: latest.metrics.storage,
+        postgres: latest.metrics.postgres,
+        backup: latest.metrics.backup,
+        reconciliation: latest.metrics.reconciliation,
+      });
+      return;
+    }
+
+    // 审计报表批量导出（验收 8.16）
+    if (req.method === "GET" && url.pathname === "/api/audit-report") {
+      const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
+      if (!auth) return;
+      // 学部负责人导出要按其可见范围裁剪：导出不能成为绕过数据权限的后门，
+      // 界面上看不到的记录，导出文件里也不能有
+      const scope = auth.account.role === "division_head" ? hrScopeFor(db, auth.account) : null;
+      const report = buildAuditReport(db, {
+        from: url.searchParams.get("from") || "",
+        to: url.searchParams.get("to") || "",
+        action: url.searchParams.get("action") || "",
+        actorName: auth.account.name || auth.account.username || "",
+        exportedAt: new Date().toISOString(),
+        scope,
+      });
+      // 导出审计报表本身也要留痕——审计报表里有全校的操作记录
+      appendAuditLog(db, {
+        action: "audit_report_export",
+        actorAccountId: auth.account.id,
+        actorName: auth.account.name || auth.account.username || "",
+        detail: `导出审计报表 ${report.total} 条（人事 ${report.counts.hr}、系统 ${report.counts.system}、账套 ${report.counts.ledgers}）`,
+      });
+      await saveDatabase(db);
+      sendJson(res, 200, report);
+      return;
+    }
+
+    // 对账（验收 8.12 / 8.13 / 8.14）
+    if (url.pathname === "/api/reconciliation") {
+      const auth = requireAuth(req, res, db, ["finance", "system_admin", "admin", "hr", "principal"]);
+      if (!auth) return;
+      const month = url.searchParams.get("month") || new Date().toISOString().slice(0, 7);
+      if (req.method === "GET") {
+        sendJson(res, 200, { month, report: latestReconciliation(db, month) });
+        return;
+      }
+      if (req.method === "POST") {
+        // 归档学年的课次不在内存里，对账要把它们取回来
+        // 归档学年的课次不在内存里，对账要把它们取回来，否则会把
+        // 「往年数据没加载」误报成「这些课没计薪」
+        const term = (db.terms || []).find(
+          (t) => t.startDate && t.endDate && `${month}-01` >= t.startDate.slice(0, 7) + "-01" && `${month}-01` <= t.endDate,
+        );
+        const lessons = term
+          ? await resolveLedgerRows(db, "lessonInstances", { termId: term.id }, { queryArchivedRows })
+          : undefined;
+        const report = runReconciliation(db, month, { lessons }, auth.account);
+        await saveDatabase(db);
+        broadcastEvent("notification");
+        sendJson(res, 200, { report });
+        return;
+      }
+      sendError(res, 405, "方法不支持");
+      return;
+    }
+
+    // 周教学工作量台账（验收 2.18）。范围裁剪在 reports.js 内按账号完成，
+    // 这里只负责把账号透传下去——不要在这里先取全量再过滤。
+    if (req.method === "GET" && url.pathname === "/api/reports/weekly-workload") {
+      const auth = requireAuth(req, res, db, [
+        "admin", "system_admin", "finance", "hr", "division_head", "teacher",
+      ]);
+      if (!auth) return;
+      const params = Object.fromEntries(url.searchParams);
+      const options = {
+        termId: params.termId || queryTerms(db).currentTerm.id,
+        weekStart: params.weekStart || "",
+        stageId: params.stageId || "",
+        teacherId: params.teacherId || "",
+        includeIdle: params.includeIdle !== "false",
+        account: auth.account,
+      };
+      const workloadDb = await withLessonsOf(options.termId);
+      if (params.format === "excel") {
+        const result = exportWeeklyWorkload(workloadDb, options);
+        sendJson(res, 200, {
+          filename: result.filename,
+          content: result.content,
+          mimeType: result.mimeType,
+          total: result.total,
+        });
+        return;
+      }
+      sendJson(res, 200, buildWeeklyWorkload(workloadDb, options));
+      return;
+    }
+
+    // 年度薪资汇总（验收 3.19）。教师可查本人，其余角色受财务/学部范围约束。
+    if (req.method === "GET" && url.pathname === "/api/reports/annual-salary") {
+      const auth = requireAuth(req, res, db, [
+        "admin", "system_admin", "finance", "hr", "division_head", "teacher",
+      ]);
+      if (!auth) return;
+      const params = Object.fromEntries(url.searchParams);
+      const options = {
+        year: Number(params.year) || new Date().getFullYear(),
+        stageId: params.stageId || "",
+        teacherId: params.teacherId || "",
+        account: auth.account,
+      };
+      if (params.format === "excel") {
+        const result = exportAnnualSalary(db, options);
+        sendJson(res, 200, {
+          filename: result.filename,
+          content: result.content,
+          mimeType: result.mimeType,
+          total: result.total,
+        });
+        return;
+      }
+      sendJson(res, 200, buildAnnualSalary(db, options));
       return;
     }
 
@@ -1515,6 +2004,7 @@ async function handleApi(req, res, db, url) {
         const body = await readJsonBody(req);
         const employee = createEmployee(db, body, auth.account, hrContext);
         await saveDatabase(db);
+        broadcastEvent("hr-employee");
         sendJson(res, 200, { employee });
         return;
       }
@@ -1526,6 +2016,102 @@ async function handleApi(req, res, db, url) {
         const result = exportEmployeesCsv(db, Object.fromEntries(url.searchParams), auth.account, hrContext);
         await saveDatabase(db);
         sendJson(res, 200, result);
+        return;
+      }
+
+      // --- 证件附件（验收 1.5）---
+      // 必须排在 employeeMatch 之前：那个分支对非 GET 请求一律先 readJsonBody，
+      // 会把 multipart 的请求流读掉，之后再解析就只剩空的。
+      const attachmentMatch = url.pathname.match(
+        /^\/api\/hr\/employees\/([^/]+)\/attachments(?:\/([^/]+)(?:\/(content))?)?$/,
+      );
+      if (attachmentMatch) {
+        const [, employeeId, attachmentId, sub] = attachmentMatch;
+        // 附件里是身份证与银行卡正面，与档案本身同一套可见范围
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        const employee = (db.employees || []).find((item) => item.id === employeeId);
+        if (!employee) {
+          sendError(res, 404, "人员档案不存在");
+          return;
+        }
+        assertEmployeeInScope(db, auth.account, employee);
+
+        if (req.method === "GET" && !attachmentId) {
+          sendJson(res, 200, { attachments: listAttachments(db, employeeId) });
+          return;
+        }
+
+        if (req.method === "POST" && !attachmentId) {
+          if (!["hr", "system_admin"].includes(auth.account.role)) {
+            sendError(res, 403, "只有人事与行政管理可以上传证件");
+            return;
+          }
+          const { fields, files } = await parseMultipart(req, { maxBytes: MAX_ATTACHMENT_BYTES });
+          if (!files.length) {
+            sendError(res, 400, "请选择要上传的文件");
+            return;
+          }
+          const saved = [];
+          for (const file of files) {
+            saved.push(
+              await saveAttachment(db, {
+                employeeId,
+                category: fields.category || "other",
+                filename: file.filename,
+                contentType: file.contentType,
+                data: file.data,
+                actorAccount: auth.account,
+              }),
+            );
+          }
+          await saveDatabase(db);
+          sendJson(res, 200, {
+            uploaded: saved.map((r) => ({ id: r.id, originalName: r.originalName, bytes: r.bytes, duplicated: Boolean(r.duplicated) })),
+            attachments: listAttachments(db, employeeId),
+          });
+          return;
+        }
+
+        if (req.method === "GET" && attachmentId && sub === "content") {
+          const { record, data } = await readAttachment(db, attachmentId);
+          if (record.employeeId !== employeeId) {
+            // 附件 ID 属于另一个人：范围校验是按 URL 里的员工做的，
+            // 不比对这一步就能拿 A 的档案路径去下 B 的证件
+            sendError(res, 404, "附件不存在");
+            return;
+          }
+          res.writeHead(
+            200,
+            securityHeaders({
+              "Content-Type": record.mimeType,
+              // 一律 attachment：证件是 PDF/图片，inline 打开等于在浏览器里
+              // 直接渲染用户上传的内容，多一条 XSS 面
+              "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`,
+              "Content-Length": data.length,
+              "Cache-Control": "no-store",
+            }),
+          );
+          res.end(data);
+          return;
+        }
+
+        if (req.method === "DELETE" && attachmentId) {
+          if (!["hr", "system_admin"].includes(auth.account.role)) {
+            sendError(res, 403, "只有人事与行政管理可以删除证件");
+            return;
+          }
+          const record = deleteAttachment(db, attachmentId, auth.account);
+          if (record.employeeId !== employeeId) {
+            sendError(res, 404, "附件不存在");
+            return;
+          }
+          await saveDatabase(db);
+          sendJson(res, 200, { ok: true, attachments: listAttachments(db, employeeId) });
+          return;
+        }
+
+        sendError(res, 404, "接口不存在");
         return;
       }
 
@@ -1549,12 +2135,18 @@ async function handleApi(req, res, db, url) {
         if (req.method === "PATCH" && !subPath) {
           const employee = updateEmployee(db, employeeId, body, auth.account, hrContext);
           await saveDatabase(db);
+          // 人事档案是跨模块共享的主数据：改了职称、任教科目，排课与工资侧
+          // 立刻就跟着变（验收 4.1/4.3）。不广播的话，别的角色要刷新页面才看得到，
+          // 而 4.5 要的是「实时推送」。
+          broadcastEvent("hr-employee");
           sendJson(res, 200, { employee });
           return;
         }
         if (req.method === "POST" && subPath === "status") {
           const employee = setEmployeeStatus(db, employeeId, String(body.status || ""), body.reason, auth.account, hrContext);
           await saveDatabase(db);
+          // 入离职直接影响当月核算人数（8.12 对账的人事侧基数）
+          broadcastEvent("hr-employee");
           sendJson(res, 200, { employee });
           return;
         }
@@ -1746,7 +2338,7 @@ async function handleApi(req, res, db, url) {
 
     // ---------------------------------------------------------------- 通用审批（OA）
     if (parts[0] === "api" && parts[1] === "oa") {
-      const ALL_ROLES = ["teacher", "admin", "finance", "hr", "division_head", "system_admin"];
+      const ALL_ROLES = ["teacher", "admin", "finance", "hr", "division_head", "principal", "system_admin"];
 
       // 可发起的审批类型（按角色过滤）
       if (req.method === "GET" && url.pathname === "/api/oa/templates") {
@@ -1851,6 +2443,35 @@ async function handleApi(req, res, db, url) {
         broadcastEvent("oa-request");
         broadcastEvent("notification");
         sendJson(res, 200, { request });
+        return;
+      }
+
+      // 可抄送人候选清单：候选范围与提交时的校验口径一致，
+      // 否则界面上选得到、点提交却报错
+      if (req.method === "GET" && url.pathname === "/api/oa/cc-candidates") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        sendJson(res, 200, {
+          candidates: listCcCandidates(
+            db,
+            url.searchParams.get("templateKey") || "",
+            url.searchParams.get("keyword") || "",
+          ),
+        });
+        return;
+      }
+
+      // 给已存在的单子补抄送人
+      const ccMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)\/cc$/);
+      if (ccMatch && req.method === "POST") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const result = addOaCcRecipients(db, ccMatch[1], body.accountIds || [], auth.account);
+        await saveDatabase(db);
+        broadcastEvent("oa-request");
+        broadcastEvent("notification");
+        sendJson(res, 200, result);
         return;
       }
 
@@ -1963,10 +2584,10 @@ async function serveStatic(req, res, url) {
     const contentType = MIME_TYPES[ext] || "application/octet-stream";
     const content = await fs.readFile(filePath);
 
-    res.writeHead(200, {
-      "Content-Type": contentType,
-      "Cache-Control": "no-store",
-    });
+    res.writeHead(
+      200,
+      securityHeaders({ "Content-Type": contentType, "Cache-Control": "no-store" }),
+    );
     res.end(content);
   } catch (error) {
     res.writeHead(404, {
@@ -1976,17 +2597,110 @@ async function serveStatic(req, res, url) {
   }
 }
 
+/**
+ * 审批通过后要落地的业务动作。
+ *
+ * 抽成独立函数是为了能被测试调用：这些注册原本埋在 createServer() 里，
+ * 想验证「审批通过后账套真的解开了」就得先起一个 HTTP 服务。
+ * 于是测试往往退而求其次，在测试里自己注册一份一模一样的 handler——
+ * 那验证的是测试自己写的副本，生产代码里那份错了也照样通过。
+ */
+export function registerApprovalSideEffects() {
+  // 请假审批通过后由调课引擎真正更新课表（含全部冲突与锁定校验）
+  registerOaSideEffect("applySubstitutes", (database, arrangements, account) =>
+    applySubstituteArrangements(database, arrangements, account),
+  );
+
+  // 账套解锁三级通过后才真的解锁（验收 8.10）。
+  //
+  // unlockLedgerByApproval 是唯一的解锁入口——账套路由上没有解锁动作，
+  // 界面上也不画解锁按钮。这里不注册的话，函数就是死代码，
+  // 而账套一旦锁上就再也解不开了。
+  registerOaSideEffect("unlockApprovedLedger", (database, payload) => {
+    const ledger = unlockLedgerByApproval(
+      database,
+      { type: payload.type, period: payload.period, reason: payload.reason, requestId: payload.requestId },
+      { id: "SYSTEM-OA", name: `${payload.actorName}（审批 ${payload.requestId}）` },
+    );
+    broadcastEvent("ledger");
+    return {
+      type: "ledger_unlock",
+      ledgerType: ledger.type,
+      period: ledger.period,
+      status: ledger.status,
+      // 解锁次数带进审批结果：翻这张单子就能看到「这是第几次解锁」，
+      // 不用再去账套列表里找
+      unlockCount: ledger.unlockCount,
+    };
+  });
+
+  // 薪资审批三级通过后才锁定工资、生成台账（验收 3.13 / 3.14）。
+  // 走 lockPayrollBatch 而不是自己改状态：批量锁定里带着"老师是否已确认、
+  // 异议是否已处理"等前置校验，绕过去等于把这些校验一起绕过了。
+  registerOaSideEffect("lockApprovedPayroll", (database, payload) => {
+    const scopeId = PAYROLL_SCOPE_BY_LABEL[payload.scope] || "";
+    if (!scopeId) throw new Error(`薪资审批的适用范围无法识别：${payload.scope}`);
+    // 范围必须挂在「操作账号」上：batchTeacherIdsInScope 是按账号的
+    // financeScope 圈定人员的，传个没有范围的账号会锁掉全校，
+    // 等于批了小学部却把初高中的工资一起发了。
+    const batch = lockPayrollBatch(
+      database,
+      { month: payload.month },
+      {
+        id: "SYSTEM-OA",
+        role: "finance",
+        financeScope: scopeId,
+        name: `${payload.actorName}（审批 ${payload.requestId}）`,
+      },
+    );
+    // 把没锁上的原因带出来。一张"审批通过但 0 人锁定"的单子若和
+    // "335 人全部锁定"长得一样，财务会以为工资已经发了。
+    const reasons = [...new Set(batch.results.filter((item) => !item.ok).map((item) => item.error))].slice(0, 3);
+
+    // 账套级锁定（验收 8.9）：逐条锁工资单还答不了「2026-06 这个账套锁没锁」，
+    // 半锁半不锁是个查不出来的状态。账套状态才是那个能一眼看到的答案。
+    // 注意顺序：先锁完工资单再锁账套，反过来会被账套边界把自己的锁定动作挡下。
+    initializeLedger(database, { type: "payroll", period: payload.month }, payload.account);
+    const ledgerBefore = findLedger(database, "payroll", payload.month);
+    if (ledgerBefore?.status === "active") {
+      transitionLedger(
+        database,
+        { type: "payroll", period: payload.month, to: "locked", reason: `薪资审批 ${payload.requestId} 通过` },
+        payload.account,
+      );
+    }
+    return {
+      month: payload.month,
+      scope: payload.scope,
+      lockedCount: batch.successCount,
+      skippedCount: batch.failedCount,
+      failureReasons: reasons,
+      ledgerStatus: findLedger(database, "payroll", payload.month)?.status || "",
+      totalAmount: batch.results
+        .filter((item) => item.ok)
+        .reduce((sum, item) => sum + Number(item.grossPay || 0), 0),
+    };
+  });
+}
+
+// 监控器持有「上一轮各项检查是不是正常」的状态，用来只在状态翻转时告警。
+// 放在模块级而不是 createServer 里：重启会丢状态是可以接受的
+// （重启后第一轮把当前所有异常重报一遍，正是想要的行为）。
+const monitor = createMonitor();
+
 export async function createServer() {
   const db = await ensureDatabase();
+
+  // 外键与索引随表走：一次 DROP TABLE 就全没了，而重启只会重建裸表。
+  // 靠人记得跑脚本是不行的——它已经这样悄无声息地消失过一次。
+  if (postgresHealth.connected) await ensureSchemaConstraints();
 
   // M3：人事审批超时扫描（每小时一次，停留超 3 个工作日提醒；启动即扫一次）
   // 审批模板首次运行时播种（幂等，已有模板不会被覆盖）
   if (ensureOaTemplates(db)) await saveDatabase(db);
 
-  // 请假审批通过后由调课引擎真正更新课表（含全部冲突与锁定校验）
-  registerOaSideEffect("applySubstitutes", (database, arrangements, account) =>
-    applySubstituteArrangements(database, arrangements, account),
-  );
+  registerApprovalSideEffects();
+
 
   const runHrTimeoutScan = async () => {
     try {
@@ -2001,6 +2715,32 @@ export async function createServer() {
   };
   runHrTimeoutScan();
   setInterval(runHrTimeoutScan, 60 * 60 * 1000).unref();
+
+  // 监控与告警（合同第七条第 6 项）。
+  // 五分钟一轮：一分钟太密（磁盘与备份检查要读文件系统），
+  // 十五分钟又太稀——数据库断开十五分钟才知道，业务早就报错一片了。
+  const runMonitor = async () => {
+    try {
+      const before = (db.notifications || []).length;
+      await monitor.run(db, {
+        storageHealth,
+        postgresHealth,
+        solverProbe: checkSolverAvailability(),
+        security: loginSecurityMetrics(),
+        createNotification,
+      });
+      // 只有真发了通知才落盘。每五分钟无条件写一次库，
+      // 一天就是 288 次没有任何改动的持久化
+      if ((db.notifications || []).length !== before) {
+        await saveDatabase(db);
+        broadcastEvent("notification");
+      }
+    } catch (error) {
+      console.error("[monitor] 监控轮次执行失败:", error.message);
+    }
+  };
+  runMonitor();
+  setInterval(runMonitor, 5 * 60 * 1000).unref();
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
@@ -2017,20 +2757,60 @@ export async function createServer() {
 const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 
 if (isDirectRun) {
+  // 配置自检要在建服务之前：连不上库、没有加密密钥的服务，
+  // 跑起来比不跑更糟——等发现时数据已经写进去一半了。
+  assertConfigOrExit();
   const server = await createServer();
+  // 上线前的硬性前提（E-4）：默认口令、未配 HTTPS、未配加密密钥。
+  // 只在文档里写"记得改"是没用的——每次启动都吼一遍才不会被忘掉。
+  const warnInsecureDefaults = async () => {
+    // 这里在 createServer 之外，拿不到它内部的 db；自己取一次
+    // （ensureDatabase 有缓存，不会重复加载）
+    const database = await ensureDatabase();
+    const issues = [];
+    // 只探管理类账号：一千多个教师账号逐个验散列会拖慢启动，
+    // 而真正致命的是管理账号还留着默认口令。
+    const MGMT = ["admin", "system_admin", "finance", "hr", "division_head", "principal"];
+    const weakMgmt = (database.accounts || []).filter(
+      (a) => a.status === "active" && MGMT.includes(a.role) && verifyPassword("123456", a.passwordHash),
+    );
+    if (weakMgmt.length) {
+      issues.push(
+        `${weakMgmt.length} 个管理类账号仍在使用默认口令 123456（${weakMgmt
+          .slice(0, 3)
+          .map((a) => a.username)
+          .join("、")}${weakMgmt.length > 3 ? " 等" : ""}）→ node scripts/rotate-passwords.js --admins`,
+      );
+    }
+    if (process.env.FORCE_HTTPS !== "1") {
+      issues.push("未启用 HTTPS：工资与身份证信息在网络上是明文传输 → 配置反向代理证书后设 FORCE_HTTPS=1");
+    }
+    if (!process.env.HR_ENCRYPTION_KEY) {
+      issues.push("未配置 HR_ENCRYPTION_KEY：身份证、银行卡、工资金额将无法加密落库");
+    }
+    if (!issues.length) return;
+    console.warn("");
+    console.warn("  ⚠ 上线前必须处理的安全事项：");
+    issues.forEach((text, i) => console.warn(`    ${i + 1}. ${text}`));
+    console.warn("");
+  };
+
   server.on("error", (error) => {
     console.error("[server] HTTP 服务错误:", error.message);
     if (error.code === "EADDRINUSE") process.exit(1);
   });
   server.listen(PORT, HOST, () => {
     const solverProbe = checkSolverAvailability();
-    console.log(`School system demo running at http://${HOST}:${PORT}/`);
+    console.log(`School system running at http://${HOST}:${PORT}/  [${inspectConfig().profile}]`);
     console.log(`Local URL: http://127.0.0.1:${PORT}/`);
     console.log(`API health: http://127.0.0.1:${PORT}/api/health`);
     console.log(
       solverProbe.available
         ? `[scheduler] OR-Tools CP-SAT 可用（${solverProbe.pythonBin}）`
         : `[scheduler] 警告：${solverProbe.message}，排课将回退内置启发式算法`,
+    );
+    warnInsecureDefaults().catch((error) =>
+      console.warn(`[security] 安全自检失败：${error.message}`),
     );
   });
 }

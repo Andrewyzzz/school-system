@@ -91,19 +91,37 @@ const g1RoomSlots = new Set(g1Lessons.map((lesson) => `${lesson.roomId}|${lesson
 
 // 4. 人为制造跨年级教室冲突：把二年级一节操场课调整到一年级已占用的同一操场同一时段，
 //    草稿冲突里必须出现 room-global，且发布必须被硬阻断。
-const g1PlaygroundLesson = g1Lessons.find((lesson) => String(lesson.roomId || "").includes("PLAYGROUND"));
-assert.ok(g1PlaygroundLesson, "一年级应有操场课节");
-const g2PlaygroundAssignment = (g2Draft.draft.assignments || []).find(
-  (assignment) => String(assignment.roomId || "").includes("PLAYGROUND"),
-);
-assert.ok(g2PlaygroundAssignment, "二年级草稿应有操场课节");
+//    挑目标时段时必须避开「每班每天最多 1 节体育」这条学科规则：如果二年级
+//    那个班当天已经有体育课，调课会先被学科规则拦下来抛 400，根本走不到教室
+//    冲突这一步。日期是排课排出来的，每次运行都不一样——随手取第一条会让这个
+//    测试大约六次挂一次，而挂的原因跟它要验的东西毫无关系。
+const g2Assignments = g2Draft.draft.assignments || [];
+const g1Config = buildSchedulingConfig(db, g1Scope);
+const periodOfTime = (time) => g1Config.periods.find((item) => item.time === time)?.period;
 
-const g1PlaygroundPeriod = (() => {
-  const config = buildSchedulingConfig(db, g1Scope);
-  const period = config.periods.find((item) => item.time === g1PlaygroundLesson.time);
-  return period?.period;
+const clash = (() => {
+  for (const assignment of g2Assignments.filter((a) => String(a.roomId || "").includes("PLAYGROUND"))) {
+    for (const lesson of g1Lessons.filter((l) => String(l.roomId || "").includes("PLAYGROUND"))) {
+      const period = periodOfTime(lesson.time);
+      if (!period) continue;
+      const sameDaySameSubject = g2Assignments.some(
+        (other) =>
+          other.id !== assignment.id &&
+          other.classId === assignment.classId &&
+          other.date === lesson.date &&
+          other.subjectId === assignment.subjectId,
+      );
+      if (sameDaySameSubject) continue;
+      return { assignment, lesson, period };
+    }
+  }
+  return null;
 })();
-assert.ok(g1PlaygroundPeriod, "应能定位一年级操场课节次");
+assert.ok(clash, "应能找到一对不触发学科规则的操场课节用于制造教室冲突");
+
+const g1PlaygroundLesson = clash.lesson;
+const g2PlaygroundAssignment = clash.assignment;
+const g1PlaygroundPeriod = clash.period;
 
 const adjusted = adjustScheduleAssignment(
   db,

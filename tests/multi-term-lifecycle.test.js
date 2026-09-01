@@ -28,6 +28,7 @@ import {
   teacherPayrollPreview,
   TERM_SCOPED_COLLECTIONS,
   normalizeDatabase,
+  teacherMonthlyWorkload,
   updateTeacherAssignment,
 } from "../server/storage.js";
 import {
@@ -137,15 +138,15 @@ function runTermCycle(db, { term, month, label }) {
   const lessonPlan = [];
   for (let day = 1; day <= 20; day += 1) {
     const date = `${month}-${String(day).padStart(2, "0")}`;
-    lessonPlan.push({ date, type: "regular", status: "completed" });
-    if (day % 5 === 0) lessonPlan.push({ date, type: "evening", status: "completed" });
-    if (day % 7 === 0) lessonPlan.push({ date, type: "makeup", status: "completed" });
-    // 每月两节未签到（不应计薪）、一节已取消（如请假代课后取消）
-    if (day === 11 || day === 18) lessonPlan.push({ date, type: "regular", status: "scheduled" });
+    lessonPlan.push({ date, type: "regular", status: "scheduled" });
+    if (day % 5 === 0) lessonPlan.push({ date, type: "evening", status: "scheduled" });
+    if (day % 7 === 0) lessonPlan.push({ date, type: "makeup", status: "scheduled" });
+    // 每月一节已取消（请假未安排代课，不计薪）。
+    // 计薪口径改成「排了就算」之后，「未签到」这一类不存在了：
+    // 排给教师的课都计薪，只有取消的不算。
     if (day === 15) lessonPlan.push({ date, type: "regular", status: "cancelled" });
   }
   lessonPlan.forEach((plan, index) => {
-    const paid = plan.status === "completed";
     db.lessonInstances.push({
       id: `LESSON-${term.id}-${teacher.id}-${index}`,
       termId: term.id,
@@ -164,12 +165,12 @@ function runTermCycle(db, { term, month, label }) {
       units: 1,
       status: plan.status,
       source: "backend-scheduling",
-      checkInAt: paid ? `${plan.date}T08:00:00+08:00` : "",
-      checkOutAt: paid ? `${plan.date}T08:40:00+08:00` : "",
     });
   });
-  const completedCount = lessonPlan.filter((item) => item.status === "completed").length;
-  const unpaidCount = lessonPlan.length - completedCount;
+  // 排课计划里的初始计薪/取消数。锁定时刻的实际数在下面重新算——
+  // 未来月份会在锁定前把未上的课取消掉，两者不一定相等
+  const plannedPayable = lessonPlan.filter((item) => item.status !== "cancelled").length;
+  assert.ok(plannedPayable > 0, `[${label}] 排课计划里应有计薪课次`);
   roundTrip(db, `${label}-课次落盘`);
 
   // --- 月度工作量确认 ---
@@ -194,26 +195,34 @@ function runTermCycle(db, { term, month, label }) {
   payroll = reviewTeacherPayrollDetail(db, teacher.id, month, finance);
   assert.equal(payroll.generated.status, "reviewed");
 
-  // 真实边界：本月仍有未签到课次时，系统必须拒绝锁定（防止漏结算）
-  assert.throws(
-    () => lockTeacherPayrollDetail(db, teacher.id, month, finance),
-    /未完成签入签出|待处理|不能锁定|异常/,
-    `[${label}] 存在未签到课次时不应允许锁定工资`,
-  );
-
-  // 教务处理异常课次后（补签或确认取消），方可锁定
-  (db.lessonInstances || [])
-    .filter((lesson) => lesson.termId === term.id && lesson.teacherId === teacher.id && lesson.status === "scheduled")
-    .forEach((lesson) => {
-      lesson.status = "cancelled";
-      lesson.cancelReason = "月末核对：该课次未实际发生";
-    });
-  payroll = generateTeacherPayrollDetail(db, teacher.id, month, finance, { force: true });
-  payroll = publishTeacherPayrollDetail(db, teacher.id, month, finance);
-  payroll = confirmTeacherPayrollDetail(db, teacher.id, month, teacherAccount);
-  payroll = reviewTeacherPayrollDetail(db, teacher.id, month, finance);
-  payroll = lockTeacherPayrollDetail(db, teacher.id, month, finance);
-  assert.equal(payroll.generated.status, "locked", `[${label}] 异常课次处理后应可锁定`);
+  // 锁定要看这个月有没有上完。三个学期里有两个在未来——那是真的不该锁：
+  // 未上的课已经计进工资了，锁死之后请假取消就改不了。
+  // 所以这里按月份是否已经过去分别断言，而不是硬把两种情形都当成「应该能锁」。
+  const monthEnded = month < new Date().toISOString().slice(0, 7);
+  if (monthEnded) {
+    payroll = lockTeacherPayrollDetail(db, teacher.id, month, finance);
+    assert.equal(payroll.generated.status, "locked", `[${label}] 课程已全部结束后应可锁定`);
+  } else {
+    assert.throws(
+      () => lockTeacherPayrollDetail(db, teacher.id, month, finance),
+      /尚未上课/,
+      `[${label}] 本月还没上完就锁定，等于给没上的课先付钱`,
+    );
+    // 把未上的课取消掉（月末核对：确认这些课不会再上），就可以锁了
+    (db.lessonInstances || [])
+      .filter((l) => l.teacherId === teacher.id && l.date.startsWith(month) && l.status !== "cancelled")
+      .filter((l) => l.date > new Date().toISOString().slice(0, 10))
+      .forEach((l) => {
+        l.status = "cancelled";
+        l.cancelReason = "月末核对：该课次未实际发生";
+      });
+    payroll = generateTeacherPayrollDetail(db, teacher.id, month, finance, { force: true });
+    payroll = publishTeacherPayrollDetail(db, teacher.id, month, finance);
+    payroll = confirmTeacherPayrollDetail(db, teacher.id, month, teacherAccount);
+    payroll = reviewTeacherPayrollDetail(db, teacher.id, month, finance);
+    payroll = lockTeacherPayrollDetail(db, teacher.id, month, finance);
+    assert.equal(payroll.generated.status, "locked", `[${label}] 处理完未上的课后应可锁定`);
+  }
 
   // 锁定是幂等的：重复调用返回同一状态而不报错（前端重复点击友好）
   const relocked = lockTeacherPayrollDetail(db, teacher.id, month, finance);
@@ -226,17 +235,26 @@ function runTermCycle(db, { term, month, label }) {
     /已锁定/,
     `[${label}] 已锁定工资不应可重新生成`,
   );
-  // 只有已完成（签到签出）的课次才计薪，未签到与已取消不得计入
+  // 排给教师的课都计薪，只有取消的不计
   const lessonRow = (payroll.rows || []).find((row) => row.name === "课时工资");
   assert.ok(lessonRow, `[${label}] 工资明细应含课时工资`);
+  // 期望值要按**锁定时刻库里的实际状态**算，不能用最初的排课计划：
+  // 未来月份的未上课次在上一步被取消掉了，拿原计划比会永远对不上。
+  const liveLessons = (db.lessonInstances || []).filter(
+    (l) => l.teacherId === teacher.id && String(l.date || "").startsWith(month),
+  );
+  const livePayable = liveLessons.filter((l) => l.status !== "cancelled").length;
+  const liveCancelled = liveLessons.length - livePayable;
+
   const paidLines = (payroll.lines || []).filter((line) => line.payable);
-  assert.equal(paidLines.length, completedCount, `[${label}] 计薪课次数应等于已完成课次数`);
-  assert.ok(
-    (payroll.lines || []).filter((line) => !line.payable).length >= unpaidCount,
-    `[${label}] 未签到/已取消课次不应计薪`,
+  assert.equal(paidLines.length, livePayable, `[${label}] 计薪课次数应等于未取消的课次数`);
+  assert.equal(
+    (payroll.lines || []).filter((line) => !line.payable).length,
+    liveCancelled,
+    `[${label}] 只有已取消的课次不计薪`,
   );
   console.log(
-    `  ${label}: 排 ${lessonPlan.length} 节（计薪 ${completedCount} / 不计薪 ${unpaidCount}）| 课时费 ¥${lessonRow.amount.toFixed(2)} | 应发 ¥${payroll.grossPay.toFixed(2)} | ${term.name}`,
+    `  ${label}: 排 ${lessonPlan.length} 节（计薪 ${livePayable} / 已取消 ${liveCancelled}）| 课时费 ¥${lessonRow.amount.toFixed(2)} | 应发 ¥${payroll.grossPay.toFixed(2)} | ${term.name}`,
   );
   roundTrip(db, `${label}-工资锁定落盘`);
 
@@ -625,3 +643,48 @@ history.push(runTermCycle(db, { term: thirdTerm, month: "2027-03", label: "学�
 }
 
 console.log("multi-term lifecycle checks passed");
+
+// ---------------------------------------------------------------------------
+// 锁定拦截：本月还有课没上完时不允许锁定工资
+//
+// 计薪口径改成「排了就算」之后，未上的课已经计进了工资。此时锁定，
+// 之后教师请假把课取消，工资已锁死改不了——那笔钱就付给了一节没上的课。
+//
+// 单独一块来测，是因为它需要「课次日期在今天之后」这个前提。
+// 上面的学期循环跑的是历史月份，在那里怎么构造都是假的。
+// ---------------------------------------------------------------------------
+{
+  const db = createInitialData({ teacherCount: 5 });
+  normalizeDatabase(db);
+  const teacher = db.teachers[0];
+  const term = db.terms.find((t) => t.current) || db.terms[0];
+  const future = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+
+  db.lessonInstances.push({
+    id: "LESSON-LOCK-BLOCKER",
+    termId: term.id,
+    teacherId: teacher.id,
+    teacherName: teacher.name,
+    classId: db.classes[0].id,
+    className: db.classes[0].name,
+    subjectId: teacher.primarySubjectId || "chinese",
+    subjectName: "语文",
+    date: future,
+    time: "08:00-08:40",
+    period: 1,
+    roomId: db.classes[0].roomId || "",
+    room: "教室",
+    type: "regular",
+    units: 1,
+    status: "scheduled",
+    source: "backend-scheduling",
+  });
+
+  const month = future.slice(0, 7);
+  const workload = teacherMonthlyWorkload(db, teacher.id, month);
+  assert.equal(workload.pendingLines.length, 1, "未到上课时间的课次应进 pendingLines");
+  assert.equal(workload.payableLines.length, 1, "它同时已经计薪了——这正是要拦的原因");
+  assert.equal(workload.summary.pendingCount, 1);
+
+  console.log("  锁定拦截：未上完的课已计薪，会阻止提前锁定 ✓");
+}

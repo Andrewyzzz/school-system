@@ -4333,8 +4333,6 @@ function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
     type: "regular",
     units: 1,
     status: "scheduled",
-    checkInAt: "",
-    checkOutAt: "",
     source: "backend-scheduling",
     schedulingDraftId: draft.id,
     scheduleVersionId,
@@ -4722,13 +4720,15 @@ function findPublishedLessonForChange(db, draft, assignmentId) {
 }
 
 function validatePublishedLessonChange(db, config, lesson, next) {
-  if (!lesson || lesson.status === "completed" || lesson.status === "checkedIn") {
-    const error = new Error("已签到或已完成的课程不能调课/代课");
-    error.statusCode = 400;
+  if (!lesson) {
+    const error = new Error("课次不存在");
+    error.statusCode = 404;
     throw error;
   }
-  if ((db.attendanceRecords || []).some((record) => record.lessonId === lesson.id)) {
-    const error = new Error("该课程已有签到记录，不能再变更排课");
+  // 取消掉的课不能再调：它已经从工资里扣掉了，改回来会让已定案的工资对不上。
+  // 要恢复请重新排课，不要在取消的课次上做文章。
+  if (lesson.status === "cancelled") {
+    const error = new Error("已取消的课次不能调课/代课，请重新排课");
     error.statusCode = 400;
     throw error;
   }
@@ -5394,13 +5394,11 @@ export function listTeacherLessonsInRange(db, teacherId, startDate, endDate) {
     )
     .map((lesson) => {
       const draft = (db.scheduleDrafts || []).find((item) => item.id === lesson.schedulingDraftId) || null;
-      const hasAttendance = (db.attendanceRecords || []).some((record) => record.lessonId === lesson.id);
       const locked = payrollLocked(db, lesson.teacherId, monthKey(lesson.date));
-      // 已签到/已完成/已锁薪的课次不能再动，前端据此禁用操作并说明原因
-      const blockedReason = ["completed", "checkedIn"].includes(lesson.status)
-        ? "该课次已签到或已完成，不能变更"
-        : hasAttendance
-          ? "该课次已有签到记录，不能变更"
+      // 已取消或已锁薪的课次不能再动，前端据此禁用操作并说明原因
+      const blockedReason =
+        lesson.status === "cancelled"
+          ? "该课次已取消，不能变更"
           : locked
             ? "该月工资已锁定，不能变更"
             : !draft || draft.status !== "published"
@@ -5500,6 +5498,14 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
       const draft = (db.scheduleDrafts || []).find((entry) => entry.id === lesson.schedulingDraftId);
       if (!draft) throw Object.assign(new Error("课次所属课表不存在"), { statusCode: 404 });
       const scope = { termId: draft.termId, divisionId: draft.divisionId, gradeId: draft.gradeId };
+
+      // 归档学期不能改。代课那条路走 createScheduleChangeRequest，里面已经校验了；
+      // 取消这条路是直接改 lesson.status，绕过了那道检查——归档学年的课被取消，
+      // 会改掉一个早已定案月份的计薪依据。
+      ensureEditableTerm(
+        (db.terms || []).find((t) => t.id === draft.termId),
+        item.action === "cancel" ? "取消课次" : "调课",
+      );
 
       if (item.action === "cancel") {
         // 取消课次：走请假停课，课次标记取消不再计薪，不产生代课记录

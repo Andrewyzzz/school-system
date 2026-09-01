@@ -20,9 +20,8 @@ const {
   withdrawHrFlow,
 } = await import("../server/hr.js");
 const { buildSchedulingConfig } = await import("../server/scheduling.js");
-const { submitTeacherAttendance } = await import("../server/attendance.js");
 
-// 第二阶段 M3+M4 验收：审批流三闭环、超时提醒、scope 越权、联动矩阵（登录/任课池/签到/计薪折算）。
+// 第二阶段 M3+M4 验收：审批流三闭环、超时提醒、scope 越权、联动矩阵（登录/任课池/计薪折算）。
 
 function actor(db, username) {
   const account = db.accounts.find((item) => item.username === username);
@@ -211,16 +210,12 @@ assert.ok(
 // ---- 6. 联动矩阵（PRD 4.5） ----
 const leftEligibility = teacherEligibility(db, offboardTarget.teacherId);
 assert.deepEqual(
-  [leftEligibility.canLogin, leftEligibility.inTeachingPool, leftEligibility.canAttend, leftEligibility.payroll],
-  [false, false, false, "until-left"],
+  [leftEligibility.canLogin, leftEligibility.inTeachingPool, leftEligibility.payroll],
+  [false, false, "until-left"],
 );
-
-// 签到拒绝
-assert.throws(
-  () =>
-    submitTeacherAttendance(db, { lessonId: "LESSON-OFFBOARD-0", action: "checkIn", qrPayload: "{}" }, offboardAccount),
-  /人事状态不允许签到/,
-);
+// canAttend 随扫码签到一起去掉了：它唯一的消费方是签到接口，
+// 「这个人的课算不算钱」现在由 payroll 一个字段回答
+assert.equal("canAttend" in leftEligibility, false, "不应保留没有消费方的字段");
 
 // 任课池过滤：已离职老师不出现在排课配置
 const config = buildSchedulingConfig(db, { divisionId: "elementary", gradeId: "elementary-g1" });

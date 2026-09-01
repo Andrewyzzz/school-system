@@ -252,7 +252,7 @@ const term = db.terms.find((item) => item.current);
       status: "locked",
       rowsSnapshot: [
         { name: "基本工资", amount: 5000, category: "fixed" },
-        { name: "个税代扣", amount: -150, category: "deduction" },
+        { name: "考勤扣款", amount: -150, category: "deduction" },
       ],
     },
     {
@@ -266,7 +266,7 @@ const term = db.terms.find((item) => item.current);
   );
 
   const after = queryTermBudget(db, term.id, "primary").items[0];
-  assert.equal(after.used, 5000, "已使用只统计已锁定工资单，且不含个税代扣");
+  assert.equal(after.used, 5000, "已使用只统计已锁定工资单，且不含扣减项");
   assert.equal(after.pending, 8000, "未锁定的金额计入结算中，不计入已使用");
   assert.equal(after.lockedCount, 1);
   assert.equal(after.remaining, 7000000 - 5000);
@@ -383,6 +383,37 @@ const term = db.terms.find((item) => item.current);
     [],
     "存在学段与考核档错配的老师",
   );
+}
+
+
+// ---------------------------------------------------------------------------
+// 职称档必须是合法枚举（验收 4.3 联动的前提）
+//
+// 不在枚举里的值存进去后，工资计算查不到对应的标准，会静默落到默认档：
+// 档案上写着「高级教师」，工资单上印着「三级教师」，两边不一致而且不报错。
+// 考核档早就有这道校验，职称档漏了——是做 4.3 联动验证时试出来的。
+// ---------------------------------------------------------------------------
+{
+  const db = createInitialData({ teacherCount: 5 });
+  normalizeDatabase(db);
+  const teacher = db.teachers[0];
+  const actor = { id: "ACC-FIN", name: "测试" };
+
+  assert.throws(
+    () => updateTeacherSalaryProfile(db, teacher.id, { qualificationGrade: "senior" }, actor),
+    /职称档只能是/,
+    "拼错的档位（senior 而非 seniorTeacher）必须被拒——存进去会让工资静默算错",
+  );
+  assert.throws(
+    () => updateTeacherSalaryProfile(db, teacher.id, { qualificationGrade: "不存在的档位" }, actor),
+    /职称档只能是/,
+  );
+
+  // 六个合法档位都要收
+  ["seniorProfessor", "seniorTeacher", "first", "second", "third", "ungraded"].forEach((grade) => {
+    updateTeacherSalaryProfile(db, teacher.id, { qualificationGrade: grade }, actor);
+    assert.equal(db.teachers[0].salaryProfile.qualificationGrade, grade, `${grade} 应被接受`);
+  });
 }
 
 console.log("finance scope & budget checks passed");

@@ -595,6 +595,8 @@ function rateFromGradeMap(map = {}, grade = null, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
+const PAYROLL_STAGE_LABELS = { primary: "小学", middle: "初中", high: "高中" };
+
 function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable = false }) {
   const stageId = lesson.stageId || teacher.stageId;
   const subjectId = lesson.subjectId || teacher.primarySubjectId;
@@ -632,8 +634,10 @@ function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, pay
     return {
       rate,
       amount: roundMoney(units * rate),
-      ruleName: `${stageId === "middle" ? "初中" : "小学"}正课`,
-      basis: `${stageId === "middle" ? "初中" : "小学"}正课：${baseRate} 元 × 学科系数 ${coefficient}`,
+      // 三元表达式只分了两档，高中会落到 else 显示成「小学正课」——
+      // 金额是对的，但高中老师打开工资条看到"小学正课"，财务对账也会困惑
+      ruleName: `${PAYROLL_STAGE_LABELS[stageId] || ""}正课`,
+      basis: `${PAYROLL_STAGE_LABELS[stageId] || ""}正课：${baseRate} 元 × 学科系数 ${coefficient}`,
     };
   }
 
@@ -959,7 +963,16 @@ export function calculateDedicatedTeacherPayroll({
   const sortedLessons = [...lessons].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const highRegularWeekUnits = new Map();
   const lines = sortedLessons.map((lesson) => {
-    const payable = lesson.status === "completed";
+    // 计薪口径：排给谁就算谁的，除非这节课被取消。
+    //
+    // 原来按「已签到完成」计薪，依赖教师逐节扫码签入签出——漏签一节就少一节的钱，
+    // 而漏签的原因往往和上没上课无关（手机没电、二维码被挡住）。学校的规则是
+    // 派了课就该上，于是签到只是在给一件本该确定的事引入不确定性。
+    //
+    // 代课与请假不需要在这里另做处理，课表已经反映了：
+    //   代课  审批通过时课次的 teacherId 被改成代课教师，课就归代课老师了
+    //   请假  审批时逐节安排，未安排代课的课次标记 cancelled，谁也不计
+    const payable = lesson.status !== "cancelled";
     const rule = lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable });
     return {
       lessonId: lesson.id,

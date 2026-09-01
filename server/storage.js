@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { assertLedgerWritable } from "./ledgers.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDatabaseFromPostgres, persistDatabaseToPostgres, resetPostgresStore } from "./db/postgresStore.js";
@@ -11,7 +12,9 @@ import {
   payrollScopeOfTeacher,
 } from "./financeScope.js";
 import {
+  QUALIFICATION_GRADE_LABELS,
   assessmentBandLabel,
+  normalizeQualificationGrade,
   assessmentBandsForStage,
   calculateDedicatedTeacherPayroll,
   createDefaultPayrollRules,
@@ -386,6 +389,17 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       status: "active",
     },
     {
+      // 校领导：只出现在需要校级审批的环节（薪资审批、预算），
+      // 不参与日常事务审批，也不持有任何数据维护权限。
+      id: "ACC-PRINCIPAL",
+      username: "principal",
+      passwordHash: defaultPasswordHash,
+      role: "principal",
+      name: "校领导",
+      department: "校办",
+      status: "active",
+    },
+    {
       id: "ACC-HEAD-PRIMARY",
       username: "head_primary",
       passwordHash: defaultPasswordHash,
@@ -633,6 +647,8 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     roomResourceOverrides: [],
     terms: defaultTerms(),
     lessonInstances,
+    // 历史遗留：扫码签到取消后不再有写入方，保留空集合是为了让旧库里
+    // 已有的签到流水仍能被导出和审计，不至于在升级时被当作未知集合丢掉
     attendanceRecords: [],
     payrollRules: createDefaultPayrollRules(),
     scheduleDrafts: [],
@@ -699,6 +715,25 @@ function backfillFinanceScopeAccounts(db, defaultPasswordHash) {
     });
     changed = true;
   });
+
+  // 校领导账号：薪资审批的末环节由他签批（验收 3.13）。老库里没有这个角色，
+  // 不补上的话那一环节没人能批，整条审批流会永远卡在最后一步。
+  if (!(db.accounts || []).some((account) => account.role === "principal")) {
+    const passwordHash =
+      defaultPasswordHash || (db.accounts || []).find((account) => account.role === "system_admin")?.passwordHash || "";
+    if (passwordHash) {
+      db.accounts.push({
+        id: "ACC-PRINCIPAL",
+        username: "principal",
+        passwordHash,
+        role: "principal",
+        name: "校领导",
+        department: "校办",
+        status: "active",
+      });
+      changed = true;
+    }
+  }
   return changed;
 }
 
@@ -1173,11 +1208,20 @@ async function writeDatabaseFile(db) {
 // SQL 侧失败会抛错阻断（迁移期以 SQL 为准绳），JSON 侧作为回滚兜底。
 async function persistDatabase(db) {
   if (DB_DRIVER === "postgres") {
-    const stats = await persistDatabaseToPostgres(db);
-    storageHealth.lastSaveAt = new Date().toISOString();
-    storageHealth.lastSaveDurationMs = stats.ms;
-    storageHealth.lastSaveError = "";
-    storageHealth.totalSaves += 1;
+    try {
+      const stats = await persistDatabaseToPostgres(db);
+      storageHealth.lastSaveAt = new Date().toISOString();
+      storageHealth.lastSaveDurationMs = stats.ms;
+      storageHealth.lastSaveError = "";
+      storageHealth.totalSaves += 1;
+    } catch (error) {
+      // 失败时也要记进 storageHealth：persistDatabaseToPostgres 只写
+      // postgresHealth.lastError 然后抛出，于是 postgres 模式下
+      // lastSaveError 永远是空的——而 /api/health 正把它当作
+      // 「最近一次保存有没有失败」对外报，等于在报一个假的。
+      storageHealth.lastSaveError = `${new Date().toISOString()} ${error.message}`;
+      throw error;
+    }
     return;
   }
   if (DB_DRIVER === "dual") {
@@ -1272,7 +1316,7 @@ function ensureNotifications(db) {
   return db.notifications;
 }
 
-function appendAuditLog(db, entry = {}) {
+export function appendAuditLog(db, entry = {}) {
   const now = new Date().toISOString();
   ensureAuditLogs(db).push({
     id: `AUDIT-${Date.now()}-${ensureAuditLogs(db).length + 1}`,
@@ -1692,11 +1736,6 @@ function termUsageCounts(db, termId = "") {
     scheduleDrafts: count("scheduleDrafts"),
     scheduleVersions: count("scheduleVersions"),
     lessonInstances: count("lessonInstances"),
-    attendanceRecords: count("attendanceRecords", (record) => {
-      if (record.termId === termId) return true;
-      const lesson = (db.lessonInstances || []).find((item) => item.id === record.lessonId);
-      return lesson?.termId === termId;
-    }),
     scheduleChangeRequests: count("scheduleChangeRequests"),
     workloadConfirmations: count("workloadConfirmations"),
     payrollDetails: count("payrollDetails"),
@@ -1961,14 +2000,46 @@ export function markNotificationRead(db, notificationId, account) {
   return publicNotification(notification, account);
 }
 
+// 常见弱口令。清单不长，但覆盖了实际会被填进去的绝大多数——
+// 这套系统装着全校工资，"至少 6 位"的旧规则连 123456 本身都拦不住。
+const WEAK_PASSWORDS = new Set([
+  "123456", "1234567", "12345678", "123456789", "1234567890",
+  "111111", "000000", "888888", "666666", "abc123", "abcd1234",
+  "password", "passw0rd", "qwerty", "iloveyou", "admin123",
+  "a123456", "123123", "112233", "5201314", "woaini1314",
+]);
+
+export function validatePasswordStrength(newPassword, account = null) {
+  const password = String(newPassword || "");
+  if (password.length < 8) return "新密码至少 8 位";
+  if (WEAK_PASSWORDS.has(password.toLowerCase())) return "该密码过于常见，请更换";
+
+  // 要求两类以上字符：纯数字 8 位的空间只有 1e8，离线爆破以秒计
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(password)).length;
+  if (classes < 2) return "新密码需包含字母、数字、符号中的至少两类";
+
+  // 不能就是自己的用户名——被拖库后这是攻击方第一个试的
+  const username = String(account?.username || "").toLowerCase();
+  if (username && password.toLowerCase().includes(username) && username.length >= 4) {
+    return "新密码不能包含用户名";
+  }
+  return "";
+}
+
 export function changeOwnPassword(db, account, currentPassword = "", newPassword = "") {
   if (!verifyPassword(currentPassword, account.passwordHash)) {
     const error = new Error("当前密码不正确");
     error.statusCode = 400;
     throw error;
   }
-  if (String(newPassword).length < 6) {
-    const error = new Error("新密码至少 6 位");
+  if (String(newPassword) === String(currentPassword)) {
+    const error = new Error("新密码不能与当前密码相同");
+    error.statusCode = 400;
+    throw error;
+  }
+  const weakness = validatePasswordStrength(newPassword, account);
+  if (weakness) {
+    const error = new Error(weakness);
     error.statusCode = 400;
     throw error;
   }
@@ -1993,8 +2064,11 @@ export function resetAccountPassword(db, accountId, newPassword = DEFAULT_PASSWO
     error.statusCode = 404;
     throw error;
   }
-  if (String(newPassword).length < 6) {
-    const error = new Error("新密码至少 6 位");
+  // 管理员重置也走同一套强度校验：否则管理员把全校口令重置成 123456，
+  // 前面对用户自助改密的约束就白设了。
+  const weakness = validatePasswordStrength(newPassword, account);
+  if (weakness) {
+    const error = new Error(weakness);
     error.statusCode = 400;
     throw error;
   }
@@ -2248,7 +2322,7 @@ export function queryPersonnel(db, query = {}) {
 }
 
 export function updatePayrollRules(db, rules = {}, actorAccount = null) {
-  const allowedKeys = ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime", "taxThreshold", "taxRate"];
+  const allowedKeys = ["baseSalary", "positionSalary", "regular", "morning", "evening", "weekend", "makeup", "overtime"];
   const nextRules = normalizePayrollRules(db.payrollRules);
   allowedKeys.forEach((key) => {
     if (rules[key] === undefined || rules[key] === "") return;
@@ -2258,7 +2332,7 @@ export function updatePayrollRules(db, rules = {}, actorAccount = null) {
       error.statusCode = 400;
       throw error;
     }
-    nextRules[key] = key === "taxRate" ? value : Math.round(value * 100) / 100;
+    nextRules[key] = Math.round(value * 100) / 100;
   });
   if (rules.teacherSalaryScheme && typeof rules.teacherSalaryScheme === "object" && !Array.isArray(rules.teacherSalaryScheme)) {
     nextRules.teacherSalaryScheme = deepMerge(nextRules.teacherSalaryScheme, {
@@ -2348,6 +2422,22 @@ export function updateTeacherSalaryProfile(db, teacherId, profilePatch = {}, act
     const allowed = assessmentBandsForStage(teacher.stageId).map(assessmentBandLabel).join("、");
     const error = new Error(
       `${teacher.stageName || "该学段"}老师的考核档只能是：${allowed}，不能设为「${assessmentBandLabel(nextProfile.assessmentBand)}」`,
+    );
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // 职称档同样要挡：不在枚举里的值存进去后，计算时匹配不到对应的工资标准，
+  // 会静默落到默认档——档案上写着「高级教师」，工资单上印着「三级教师」，
+  // 两边不一致而且没有任何报错。
+  if (
+    nextProfile.qualificationGrade &&
+    nextProfile.qualificationGrade !== previousProfile.qualificationGrade &&
+    !QUALIFICATION_GRADE_LABELS[normalizeQualificationGrade(nextProfile.qualificationGrade)]
+  ) {
+    const allowed = Object.values(QUALIFICATION_GRADE_LABELS).join("、");
+    const error = new Error(
+      `职称档只能是：${allowed}，不能设为「${nextProfile.qualificationGrade}」`,
     );
     error.statusCode = 400;
     throw error;
@@ -2554,7 +2644,6 @@ export function queryTeachers(db, query = {}, options = {}) {
     pendingCount: 0,
     exceptionCount: 0,
     grossPay: 0,
-    netPay: 0,
     lockedCount: 0,
     payrollStatusCounts: {},
     groups: {
@@ -2602,7 +2691,6 @@ export function queryTeachers(db, query = {}, options = {}) {
           bucket[key].pendingCount += lessonSummary.pendingCount || 0;
           bucket[key].exceptionCount += lessonSummary.exceptionCount || 0;
           bucket[key].gross += payroll?.grossPay || 0;
-          bucket[key].net += payroll?.netPay || 0;
           if (statusKey === "locked") bucket[key].lockedCount += 1;
         };
 
@@ -2611,7 +2699,6 @@ export function queryTeachers(db, query = {}, options = {}) {
         summary.exceptionCount += lessonSummary.exceptionCount || 0;
         summary.completedUnits += lessonSummary.completedUnits || 0;
         summary.grossPay += payroll?.grossPay || 0;
-        summary.netPay += payroll?.netPay || 0;
         if (statusKey === "locked") summary.lockedCount += 1;
         addGroup(summary.groups.department, stageKey);
         addGroup(summary.groups.subject, subjectKey);
@@ -2642,7 +2729,6 @@ export function queryTeachers(db, query = {}, options = {}) {
       payroll: payroll
         ? {
             grossPay: payroll.grossPay,
-            netPay: payroll.netPay,
             lessonAmount: payroll.lessonAmount,
             lineCount: payroll.lines.length,
             status: payrollDetail?.status || "preview",
@@ -2668,7 +2754,6 @@ export function queryTeachers(db, query = {}, options = {}) {
       pendingCount: financeSummary.pendingCount,
       exceptionCount: financeSummary.exceptionCount,
       grossPay: financeSummary.grossPay,
-      netPay: financeSummary.netPay,
       lockedCount: financeSummary.lockedCount,
       payrollStatusCounts: financeSummary.payrollStatusCounts,
       groups: {
@@ -2712,21 +2797,31 @@ function lessonsByTeacherForMonth(db, month) {
   return cache.byMonth.get(month);
 }
 
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function teacherLessonSummary(db, teacherId, month = "2026-06") {
   const lessons = lessonsByTeacherForMonth(db, month).get(teacherId) || [];
   return lessons.reduce(
     (summary, lesson) => {
       summary.total += 1;
-      if (lesson.status === "completed") summary.completedUnits += lesson.units;
-      if (lesson.status === "scheduled" || lesson.status === "checkedIn") summary.pendingCount += 1;
-      if (lesson.status === "exception") summary.exceptionCount += 1;
+      // 计薪口径：排给谁就算谁的，除非这节课被取消（请假未安排代课）
+      if (lesson.status === "cancelled") {
+        summary.cancelledCount += 1;
+      } else {
+        summary.payableUnits += lesson.units;
+        // 未到上课时间的课次单列：本月还没上完时，教师看到的「已计薪」
+        // 会大于「已经上过的」，不说清楚会以为算多了
+        if (lesson.date > todayIso()) summary.pendingCount += 1;
+      }
       return summary;
     },
     {
       total: 0,
-      completedUnits: 0,
+      payableUnits: 0,
       pendingCount: 0,
-      exceptionCount: 0,
+      cancelledCount: 0,
     },
   );
 }
@@ -2779,56 +2874,51 @@ export function teacherScheduleWeeks(db, teacherId, options = {}) {
   return Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
-function attendanceActionLabel(action) {
-  if (action === "checkOut") return "签出";
-  if (action === "missingCheckOut") return "未签出异常";
-  return "签入";
-}
-
-export function queryTeacherAttendanceRecords(db, teacherId, month = "2026-06") {
+/**
+ * 教师的课时记录（原「考勤记录」）。
+ *
+ * 签到取消后，这里不再读 attendanceRecords（那张表已经没有写入方），
+ * 而是直接列本月排给这位教师的课，并标出哪些计薪。
+ *
+ * 教师核对工资时问的是「我这个月被算了哪些课」，这份清单要能直接回答它。
+ */
+export function queryTeacherLessonRecords(db, teacherId, month = "2026-06") {
   const teacher = findTeacher(db, teacherId);
   if (!teacher) return null;
 
-  const records = (db.attendanceRecords || [])
-    .filter((record) => record.teacherId === teacherId && String(record.occurredAt || "").startsWith(month))
-    .sort((a, b) => String(a.occurredAt || "").localeCompare(String(b.occurredAt || "")))
-    .map((record) => {
-      const lesson = db.lessonInstances.find((item) => item.id === record.lessonId);
-      const failedCheck = (record.checks || []).find((check) => !check.passed);
-      const actionLabel = attendanceActionLabel(record.action);
-      const status = record.action === "missingCheckOut" ? "exception" : record.status || "rejected";
+  const records = (lessonsByTeacherForMonth(db, month).get(teacherId) || [])
+    .slice()
+    .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`))
+    .map((lesson) => {
+      const cancelled = lesson.status === "cancelled";
       return {
-        id: record.id,
-        lessonId: record.lessonId,
-        teacherId: record.teacherId,
+        lessonId: lesson.id,
+        teacherId,
         teacherName: teacher.name,
-        action: record.action,
-        actionLabel,
-        status,
-        occurredAt: record.occurredAt,
-        date: String(record.occurredAt || lesson?.date || "").slice(0, 10),
-        time: String(record.occurredAt || "").slice(11, 16),
-        className: lesson?.className || "",
-        subjectName: lesson?.subjectName || "",
-        roomId: record.roomId || lesson?.roomId || "",
-        room: record.room || (lesson ? lessonRoomName(db, lesson) : ""),
-        resultText:
-          status === "accepted"
-            ? `${actionLabel}通过`
-            : failedCheck?.detail || record.failureReason || "防作弊规则拦截",
-        checks: record.checks || [],
-        createdAt: record.createdAt,
+        date: lesson.date,
+        time: lesson.time,
+        className: lesson.className || "",
+        subjectName: lesson.subjectName || "",
+        roomId: lesson.roomId || "",
+        room: lessonRoomName(db, lesson),
+        type: lesson.type,
+        units: Number(lesson.units || 1),
+        payable: !cancelled,
+        status: lesson.status,
+        // 取消的课要说清楚为什么，教师才知道该找谁问
+        resultText: cancelled ? lesson.cancelReason || "已取消，不计薪" : "计入课时费",
       };
     });
 
+  const payable = records.filter((r) => r.payable);
   return {
     teacher,
     month,
     summary: {
       total: records.length,
-      acceptedCount: records.filter((record) => record.status === "accepted").length,
-      rejectedCount: records.filter((record) => record.status === "rejected").length,
-      exceptionCount: records.filter((record) => record.status === "exception").length,
+      payableCount: payable.length,
+      payableUnits: payable.reduce((sum, r) => sum + r.units, 0),
+      cancelledCount: records.length - payable.length,
     },
     records,
   };
@@ -2951,33 +3041,39 @@ function assertPayrollTeacherHandled(target) {
 
 function assertMonthTermEditable(db, month = "2026-06", actionName = "修改月度数据") {
   ensureEditableTerm(termForMonth(db, month), actionName);
+  // 账套边界（验收 8.9）：薪资账套锁定后不得再改。挂在这个统一入口上，
+  // 是因为所有薪资写入都会经过它——逐个入口去加，漏一个就是一条绕过去的路。
+  assertLedgerWritable(db, "payroll", month, actionName);
 }
 
 function publishedPayrollStatus(status = "") {
   return ["generated", "teacher_confirmed", "disputed", "reviewed", "locked"].includes(status);
 }
 
+// 工资单只列到应发为止。个税、社保等代扣项由学校财务线下处理，不进系统——
+// 系统算出的税额与财务实际扣缴口径未必一致，印在工资条上会被老师拿去对到账金额。
 function buildPayrollRows(db, payroll, workload) {
   if (!payroll || !workload) return [];
-  return [
-    ...(payroll.components || []).map((component) => ({
-      name: component.name,
-      basis: component.basis,
-      amount: component.amount,
-      category: component.category,
-    })),
-    {
-      name: "个税代扣",
-      basis: `起征点 ${db.payrollRules.taxThreshold} 元，当前试算税率 ${Math.round(db.payrollRules.taxRate * 100)}%`,
-      amount: -payroll.tax,
-      category: "deduction",
-    },
-  ];
+  return (payroll.components || []).map((component) => ({
+    name: component.name,
+    basis: component.basis,
+    amount: component.amount,
+    category: component.category,
+  }));
 }
 
+/**
+ * 锁定工资前的拦截项。
+ *
+ * 计薪口径改成「排了就算」之后，唯一还需要拦的是**这个月还没上完**：
+ * 未到时间的课已经计进工资了，此时锁定，之后教师请假把课取消，
+ * 工资已经锁死改不了——那笔钱就付给了一节没上的课。
+ *
+ * 取消的课次不算拦截项：它已经有定论（不计薪），没什么可等的。
+ */
 function payrollLockBlockersFromWorkload(workload) {
   if (!workload) return [];
-  const pending = (workload.pendingLines || []).map((line) => ({
+  return (workload.pendingLines || []).map((line) => ({
     type: "pending",
     lessonId: line.lessonId,
     date: line.date,
@@ -2986,23 +3082,8 @@ function payrollLockBlockersFromWorkload(workload) {
     subjectName: line.subjectName,
     room: line.room,
     status: line.status,
-    reason:
-      line.status === "checkedIn"
-        ? "已签入但未签出，暂不能计入工资"
-        : "未完成签入签出，暂不能计入工资",
+    reason: "课程尚未上课但已计入工资，锁定后若请假取消将无法调整",
   }));
-  const exceptions = (workload.exceptionLines || []).map((line) => ({
-    type: "exception",
-    lessonId: line.lessonId,
-    date: line.date,
-    time: line.time,
-    className: line.className,
-    subjectName: line.subjectName,
-    room: line.room,
-    status: "exception",
-    reason: line.note || "异常课次需处理后才能锁定工资",
-  }));
-  return [...pending, ...exceptions];
 }
 
 export function teacherPayrollDetail(db, teacherId, month = "2026-06") {
@@ -3116,8 +3197,6 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
       deductionAmount: detail.deductionAmount || 0,
       lessonAmount: detail.lessonAmount,
       grossPay: detail.grossPay,
-      tax: detail.tax,
-      netPay: detail.netPay,
       payableUnits: detail.workloadSummary.payableUnits,
       pendingCount: detail.workloadSummary.pendingCount,
       exceptionCount: detail.workloadSummary.exceptionCount,
@@ -3145,7 +3224,6 @@ export function generateTeacherPayrollDetail(db, teacherId, month = "2026-06", a
     termId: term.id,
     termName: term.name,
     grossPay: detail.grossPay,
-    netPay: detail.netPay,
   });
 	  return teacherPayrollDetail(db, teacherId, month);
 		}
@@ -3175,7 +3253,6 @@ export function publishTeacherPayrollDetail(db, teacherId, month = "2026-06", ac
     termId: target.termId || termForMonth(db, month).id,
     termName: target.termName || termForMonth(db, month).name,
     grossPay: target.summarySnapshot?.grossPay || 0,
-    netPay: target.summarySnapshot?.netPay || 0,
   });
   return teacherPayrollDetail(db, teacherId, month);
 }
@@ -3309,14 +3386,16 @@ export function lockTeacherPayrollDetail(db, teacherId, month = "2026-06", actor
   }
 
   const detail = teacherPayrollDetail(db, teacherId, month);
+  // 计薪口径改成「排了就算」之后，唯一还需要拦的是「这个月还没上完」：
+  // 未上的课已经计进工资，此时锁定，之后请假取消就改不了了。
+  // exceptionCount 随考勤一起去掉了——不要留一个永远是 0 的条件在这里，
+  // 那会让人以为还有另一种拦截情形。
   const pendingCount = detail?.workloadSummary?.pendingCount || 0;
-  const exceptionCount = detail?.workloadSummary?.exceptionCount || 0;
-  if (pendingCount || exceptionCount) {
-    const error = new Error("仍有待处理或异常课时，不能锁定薪资");
+  if (pendingCount) {
+    const error = new Error(`本月还有 ${pendingCount} 节课尚未上课且已计薪，不能锁定薪资`);
     error.statusCode = 409;
     error.details = {
       pendingCount,
-      exceptionCount,
       blockers: detail?.lockBlockers || [],
     };
     throw error;
@@ -3445,7 +3524,6 @@ export function generatePayrollBatch(db, options = {}, actorAccount = null) {
         teacherName: detail.teacher.name,
         status: detail.generated?.status || "generated",
         grossPay: detail.grossPay,
-        netPay: detail.netPay,
         ok: true,
       });
     } catch (error) {
@@ -3489,7 +3567,6 @@ export function lockPayrollBatch(db, options = {}, actorAccount = null) {
         teacherName: detail.teacher.name,
         status: detail.generated?.status || "locked",
         grossPay: detail.grossPay,
-        netPay: detail.netPay,
         ok: true,
       });
     } catch (error) {
@@ -3561,8 +3638,6 @@ export function exportPayrollDetails(db, options = {}) {
     "补充项明细",
     "扣减项明细",
     "应发",
-    "个税",
-    "实发",
     "可计薪课时",
     "待处理",
     "异常",
@@ -3573,7 +3648,7 @@ export function exportPayrollDetails(db, options = {}) {
     const snapshotRows = Array.isArray(detail.rowsSnapshot) ? detail.rowsSnapshot : [];
     const describeSnapshotRows = (category) =>
       snapshotRows
-        .filter((row) => row.category === category && row.name !== "个税代扣")
+        .filter((row) => row.category === category)
         .map((row) => `${row.name}:${row.amount}`)
         .join("；");
     return [
@@ -3597,8 +3672,6 @@ export function exportPayrollDetails(db, options = {}) {
       describeSnapshotRows("supplement"),
       describeSnapshotRows("deduction"),
       summary.grossPay || 0,
-      summary.tax || 0,
-      summary.netPay || 0,
       summary.payableUnits || 0,
       summary.pendingCount || 0,
       summary.exceptionCount || 0,
@@ -3621,7 +3694,7 @@ function payrollDetailTerm(db, detail) {
   return termForMonth(db, detail?.month || "2026-06");
 }
 
-function payrollDetailsByFilter(db, options = {}) {
+export function payrollDetailsByFilter(db, options = {}) {
   const month = String(options.month || "2026-06");
   const termId = String(options.termId || "").trim();
   const stageId = String(options.stageId || "").trim();
@@ -3675,8 +3748,6 @@ function payrollHistoryItem(db, detail) {
     reviewedAt: detail.reviewedAt || "",
     lockedAt: detail.lockedAt || "",
     grossPay: summary.grossPay || 0,
-    tax: summary.tax || 0,
-    netPay: summary.netPay || 0,
     payableUnits: summary.payableUnits || 0,
     pendingCount: summary.pendingCount || 0,
     exceptionCount: summary.exceptionCount || 0,
@@ -3716,11 +3787,7 @@ export function queryPayrollHistory(db, options = {}) {
       lockedCount: lockedItems.length,
       generatedCount: items.length - lockedItems.length,
       paidGrossPay: sumBy(lockedItems, "grossPay"),
-      paidTax: sumBy(lockedItems, "tax"),
-      paidNetPay: sumBy(lockedItems, "netPay"),
       grossPay: sumBy(items, "grossPay"),
-      tax: sumBy(items, "tax"),
-      netPay: sumBy(items, "netPay"),
       statusCounts,
     },
     items,
@@ -3819,8 +3886,11 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
   const payroll = teacherPayrollPreview(db, teacherId, month);
   const categories = payrollLineCategories(payroll?.lines || []);
 
+  // 计薪明细：排给这位教师的课，除了被取消的都算。
+  // 代课的课在审批通过时 teacherId 已改成代课教师，所以自然出现在代课人这里、
+  // 不再出现在原教师那里——不需要在这里做任何特殊处理。
   const payableLines = lessons
-    .filter((lesson) => lesson.status === "completed")
+    .filter((lesson) => lesson.status !== "cancelled")
     .map((lesson) => {
       const payrollLine = (payroll?.lines || []).find((line) => line.lessonId === lesson.id);
       return {
@@ -3833,15 +3903,16 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
         type: lesson.type,
         units: lesson.units,
         status: lesson.status,
-        checkInAt: lesson.checkInAt || "",
-        checkOutAt: lesson.checkOutAt || "",
         amount: payrollLine?.amount || 0,
         ruleName: payrollLine?.ruleName || workloadTypeLabel(lesson.type),
         basis: payrollLine?.basis || "",
       };
     });
+  // 未到上课时间的课次。它们已经计薪了（排了就算），单列出来是为了让教师明白
+  // 「本月计薪 40 节」里有几节还没上——不说清楚会以为系统算多了。
+  const today = new Date().toISOString().slice(0, 10);
   const pendingLines = lessons
-    .filter((lesson) => ["scheduled", "pending", "checkedIn"].includes(lesson.status))
+    .filter((lesson) => lesson.status !== "cancelled" && lesson.date > today)
     .map((lesson) => ({
       lessonId: lesson.id,
       date: lesson.date,
@@ -3850,11 +3921,11 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
       subjectName: lesson.subjectName,
       room: lessonRoomName(db, lesson),
       status: lesson.status,
-      checkInAt: lesson.checkInAt || "",
-      checkOutAt: lesson.checkOutAt || "",
     }));
-  const exceptionLines = lessons
-    .filter((lesson) => lesson.status === "exception")
+  // 取消的课次：请假审批时没有安排代课的那些，谁也不计薪。
+  // 要列出来而不是直接隐藏——教师核对工资时会问「我这周的课怎么少了两节」。
+  const cancelledLines = lessons
+    .filter((lesson) => lesson.status === "cancelled")
     .map((lesson) => ({
       lessonId: lesson.id,
       date: lesson.date,
@@ -3862,7 +3933,7 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
       className: lesson.className,
       subjectName: lesson.subjectName,
       room: lessonRoomName(db, lesson),
-      note: lesson.attendanceNote || lesson.note || "待复核",
+      note: lesson.cancelReason || "已取消，不计薪",
     }));
 
   return {
@@ -3875,15 +3946,14 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
       plannedUnits: lessons.reduce((sum, lesson) => sum + lesson.units, 0),
       payableUnits: payableLines.reduce((sum, lesson) => sum + lesson.units, 0),
       pendingCount: pendingLines.length,
-      exceptionCount: exceptionLines.length,
+      cancelledCount: cancelledLines.length,
       payableAmount: categories.reduce((sum, category) => sum + category.amount, 0),
       grossPay: payroll?.grossPay || 0,
-      netPay: payroll?.netPay || 0,
     },
     categories,
     payableLines,
     pendingLines,
-    exceptionLines,
+    cancelledLines,
     payroll,
     confirmation: publicWorkloadConfirmation(findMonthlyWorkloadConfirmation(db, teacherId, month)),
   };
@@ -3928,7 +3998,7 @@ export function confirmMonthlyWorkload(db, teacherId, month = "2026-06", actorAc
     summarySnapshot: workload.summary,
     payableLessonIds: workload.payableLines.map((line) => line.lessonId),
     pendingLessonIds: workload.pendingLines.map((line) => line.lessonId),
-    exceptionLessonIds: workload.exceptionLines.map((line) => line.lessonId),
+    cancelledLessonIds: workload.cancelledLines.map((line) => line.lessonId),
     createdAt: existing?.createdAt || now,
     updatedAt: now,
   };
@@ -4058,16 +4128,16 @@ export function validatePhase1Readiness(db) {
       detail: `当前发布课次 ${db.lessonInstances.filter((lesson) => lesson.source === "backend-scheduling").length} 节`,
     },
     {
-      key: "attendance_api",
-      label: "老师可扫码完成签入签出",
-      passed: db.rooms.some((room) => room.displayKey) && Boolean(db.attendanceRecords),
-      detail: "动态教室二维码、签入签出接口和异常流水已建立；真机摄像头兼容性需试运行现场验证",
+      key: "lesson_payable",
+      label: "课时费按课表计算",
+      passed: true,
+      detail: "排给教师的课次直接计入课时费，不依赖签到；代课在审批时改派课次，请假未安排代课的标记取消",
     },
     {
-      key: "exception_payroll",
-      label: "异常扫码不计薪",
+      key: "cancelled_not_payable",
+      label: "取消的课次不计薪",
       passed: true,
-      detail: "只有 completed 课次进入 payableLines，rejected/exception 记录不计入薪资",
+      detail: "status 为 cancelled 的课次不进入 payableLines，请假停课自动生效",
     },
     {
       key: "payroll_lock",

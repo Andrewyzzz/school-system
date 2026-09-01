@@ -7760,3 +7760,202 @@ body.dialog-open { overflow: hidden; }
 @media (max-width: 720px) {
   .budget-grid { grid-template-columns: 1fr; padding: 12px; }
 }
+
+/* ---- 课表导出与打印 ---- */
+.schedule-export-actions {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-left: auto;
+}
+
+/* 打印视图：只留课表本身，其余全部隐藏。
+   浏览器「打印 → 另存为 PDF」即得 PDF，一套实现覆盖导出 PDF 与打印两项验收。 */
+@media print {
+  body > *:not(.app-shell),
+  .sidebar,
+  .topbar,
+  .nav-item,
+  .panel-heading .status-pill,
+  .schedule-export-actions,
+  .admin-schedule-overview-toolbar,
+  .schedule-overview-summary,
+  .toast,
+  .command-palette,
+  .modal-backdrop {
+    display: none !important;
+  }
+  .app-shell,
+  .view,
+  .panel {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: #fff !important;
+  }
+  .view:not(.active) { display: none !important; }
+  /* 课表本身：黑白高对比，省墨且传真清晰 */
+  .schedule-week-grid table,
+  .schedule-print-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 10pt !important;
+  }
+  .schedule-week-grid th,
+  .schedule-week-grid td,
+  .schedule-print-table th,
+  .schedule-print-table td {
+    border: 1px solid #333 !important;
+    padding: 6px 4px !important;
+    color: #000 !important;
+    background: #fff !important;
+  }
+  .schedule-print-table thead th { background: #eee !important; font-weight: 700; }
+  /* 表头在每一页重复，跨页课表才读得懂 */
+  .schedule-print-table thead { display: table-header-group; }
+  .schedule-print-table tr { page-break-inside: avoid; }
+  .schedule-print-title { display: block !important; text-align: center; font-size: 15pt; font-weight: 700; margin-bottom: 4px; }
+  .schedule-print-subtitle { display: block !important; text-align: center; font-size: 9pt; color: #444 !important; margin-bottom: 12px; }
+  @page { size: A4 landscape; margin: 12mm; }
+}
+
+/* 打印标题在屏幕上不显示，只在打印时出现 */
+.schedule-print-title,
+.schedule-print-subtitle { display: none; }
+
+/* 打印宿主：屏幕上完全不可见，仅打印时显示 */
+.schedule-print-host { display: none; }
+@media print {
+  .schedule-print-host { display: block !important; }
+  /* 屏幕版课表在打印时隐藏，避免与打印表格重复 */
+  .admin-overview-grid { display: none !important; }
+}
+
+/* --- 统计报表 ------------------------------------------------------------ */
+/* 父级 .admin-schedule-overview-toolbar 是固定 3 列，报表工具栏项数不同（周报 4 项、
+   年度 3 项），固定列会把最后一项挤到下一行。改成按内容自适应。 */
+.report-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  column-gap: 20px;
+  row-gap: 12px;
+}
+/* 筛选器按内容占宽，操作组吃掉剩余空间并靠右——用 grid 时按钮会被挤进
+   最后一个窄列然后折行。 */
+.report-toolbar > .field-label { flex: 0 0 auto; }
+.report-toolbar .schedule-export-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+/* .field-label 默认 display:block，勾选框要横排 */
+.report-toolbar .report-checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  margin-bottom: 0;
+  padding-bottom: 9px;
+}
+.report-toolbar .report-checkbox input { margin: 0; width: auto; }
+
+/* 报表列多（年度表 12 个月 + 合计），横向滚动而不是压窄字号 */
+.report-table-wrap { overflow-x: auto; max-height: 62vh; overflow-y: auto; }
+.report-table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.report-table th,
+.report-table td { border: 1px solid var(--border-soft, #e3e7ee); padding: 6px 10px; text-align: center; }
+/* 表头吸顶，滚到第 300 行时还能看出这一列是几月 */
+.report-table thead th { position: sticky; top: 0; z-index: 2; background: var(--surface-muted, #edf0f4); font-weight: 700; }
+.report-table tfoot .report-total th,
+.report-table tfoot .report-total td { position: sticky; bottom: 0; background: var(--surface-muted, #f0f4f8); font-weight: 700; }
+.report-table tbody tr:nth-child(even) { background: rgba(0, 0, 0, 0.015); }
+/* 考勤异常与结算中的金额标红：混在数字堆里没人会注意到 */
+.report-table .report-warn { color: #b4232c; font-weight: 600; }
+
+@media print {
+  .report-toolbar,
+  .report-table-wrap { display: none !important; }
+  /* 打印用独立渲染的表格，不打印屏幕上那张（带滚动容器与吸顶表头） */
+  #reportPrintHost .report-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    font-size: 9pt !important;
+    white-space: normal !important;
+  }
+  #reportPrintHost .report-table th,
+  #reportPrintHost .report-table td {
+    border: 1px solid #333 !important;
+    padding: 4px 3px !important;
+    color: #000 !important;
+    background: #fff !important;
+    position: static !important;
+  }
+  #reportPrintHost .report-table thead th { background: #eee !important; }
+  /* 表头逐页重复；报表动辄几百行，第二页起没表头就读不懂 */
+  #reportPrintHost .report-table thead { display: table-header-group; }
+  #reportPrintHost .report-table tr { page-break-inside: avoid; }
+}
+
+/* --- 批量导入导出 --------------------------------------------------------- */
+.porting-import-box {
+  border: 1px solid var(--border-soft, #e3e7ee);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.porting-file-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.porting-textarea {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 10px;
+  border: 1px solid var(--border-soft, #e3e7ee);
+  border-radius: 8px;
+  resize: vertical;
+  white-space: pre;      /* CSV 靠列对齐读，不能自动折行 */
+  overflow-x: auto;
+}
+.porting-actions { margin-top: 12px; justify-content: flex-end; }
+
+.porting-messages { border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; font-size: 13px; }
+.porting-messages h4 { margin: 0 0 8px; font-size: 13px; }
+.porting-messages ul { margin: 0; padding-left: 20px; }
+.porting-messages li { margin-bottom: 4px; line-height: 1.6; }
+/* 错误必须比提示更刺眼——错误是"改完才能导"，提示只是"确认一下" */
+.porting-errors { background: #fdf2f2; color: #8c1c24; border: 1px solid #f3c7ca; }
+.porting-warnings { background: #fff8ec; color: #8a5a12; border: 1px solid #f3ddb4; }
+
+/* 差异表：左对齐更好读，且允许换行——一行可能有好几处字段变更 */
+.porting-diff td { text-align: left; white-space: normal; }
+.porting-diff .porting-changes { line-height: 1.7; }
+.porting-create { color: #1a7f45; font-weight: 600; }
+.porting-update { color: #1f5fa8; font-weight: 600; }
+
+/* --- 审批抄送 ------------------------------------------------------------- */
+.approval-cc-section { margin: 14px 0; }
+.approval-cc-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.approval-cc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.approval-cc-list li {
+  display: flex; align-items: baseline; gap: 6px;
+  background: var(--surface-muted, #f0f4f8);
+  border-radius: 999px; padding: 4px 12px; font-size: 12px;
+}
+.approval-cc-list li span { color: var(--muted); }
+.approval-cc-list li small { color: var(--muted); opacity: 0.8; }
+
+/* 抄送选择器：人多时要能滚动，否则弹层会被撑破 */
+.dialog-checklist {
+  max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border-soft, #e3e7ee);
+  border-radius: 8px; padding: 8px;
+}
+.dialog-check { display: flex; align-items: center; gap: 8px; padding: 5px 4px; cursor: pointer; }
+.dialog-check:hover { background: var(--surface-muted, #f0f4f8); border-radius: 6px; }
+.dialog-check input { margin: 0; width: auto; }
