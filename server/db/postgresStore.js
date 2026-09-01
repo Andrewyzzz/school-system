@@ -1,5 +1,12 @@
 import crypto from "node:crypto";
 import pg from "pg";
+import { auditConstraintsAndIndexes, ensureConstraintsAndIndexes } from "./constraints.js";
+import { archivedLoadFilter } from "../ledgers.js";
+import {
+  collectionNeedsEncryption,
+  decryptRowFromStorage,
+  encryptRowForStorage,
+} from "../security/payrollCrypto.js";
 
 // PostgreSQL 持久层引擎（第二阶段 M1）。
 //
@@ -146,14 +153,46 @@ export async function loadDatabaseFromPostgres() {
 
     const db = {};
     const shadow = { collections: new Map(), singletons: new Map(), knownTables: new Set() };
-    for (const { key } of registry.rows) {
-      const rows = await client.query(
-        `SELECT id, seq, data FROM ${quotedTableFor(key)} ORDER BY seq, id`,
+
+    // 账套必须先读：要先知道哪些期间已归档，才知道后面哪些集合能少读。
+    // 读不到（老库还没有这张表）就退化成全量加载，与改动前一致。
+    let loadFilter = {};
+    let skipped = 0;
+    if (registry.rows.some((r) => r.key === "ledgers")) {
+      const ledgerRows = await client.query(
+        `SELECT data FROM ${quotedTableFor("ledgers")} ORDER BY seq, id`,
       );
-      db[key] = rows.rows.map((row) => row.data);
+      loadFilter = archivedLoadFilter(ledgerRows.rows.map((r) => r.data));
+    }
+
+    for (const { key } of registry.rows) {
+      const rule = loadFilter[key];
+      // 归档期间的数据不读进内存。在 SQL 里过滤而不是读回来再筛——
+      // 读回来再筛省的只是 JS 堆，数据库那一趟该读的还是全读了。
+      const rows = rule
+        ? await client.query(
+            `SELECT id, seq, data FROM ${quotedTableFor(key)}
+             WHERE data->>'${rule.field}' IS NULL OR NOT (data->>'${rule.field}' = ANY($1::text[]))
+             ORDER BY seq, id`,
+            [rule.skipValues],
+          )
+        : await client.query(`SELECT id, seq, data FROM ${quotedTableFor(key)} ORDER BY seq, id`);
+      if (rule) {
+        const { rows: total } = await client.query(
+          `SELECT count(*)::int n FROM ${quotedTableFor(key)}`,
+        );
+        skipped += total[0].n - rows.rows.length;
+      }
+      // 工资金额在库里是密文，读出后还原成明文交给业务层，业务代码无感知
+      const decrypted = collectionNeedsEncryption(key)
+        ? rows.rows.map((row) => decryptRowFromStorage(key, row.data))
+        : rows.rows.map((row) => row.data);
+      db[key] = decrypted;
       const collectionShadow = new Map();
-      rows.rows.forEach((row, index) => {
-        collectionShadow.set(String(row.id), `${index}:${JSON.stringify(row.data)}`);
+      // 影子快照存【明文】序列化：AES-GCM 每次用随机 IV，同一明文的密文每次都不同，
+      // 若用密文比对，每次保存都会误判为「有变化」而全量重写整张表。
+      decrypted.forEach((row, index) => {
+        collectionShadow.set(String(rows.rows[index].id), `${index}:${JSON.stringify(row)}`);
       });
       shadow.collections.set(key, collectionShadow);
       shadow.knownTables.add(key);
@@ -164,6 +203,9 @@ export async function loadDatabaseFromPostgres() {
       shadow.singletons.set(row.key, JSON.stringify(row.data));
     });
     if (!db.meta) return null;
+    if (skipped > 0) {
+      console.log(`[db] 已归档账套的 ${skipped.toLocaleString()} 条数据未加载进内存（跨年度查询时经 queryArchivedRows 从库中读取）`);
+    }
     shadows.set(db, shadow);
     postgresHealth.connected = true;
     return db;
@@ -195,6 +237,7 @@ export async function persistDatabaseToPostgres(db) {
       await ensureCollectionTable(client, shadow, collectionKey);
       const rows = db[collectionKey];
       const previous = shadow.collections.get(collectionKey) || new Map();
+      const needsEncryption = collectionNeedsEncryption(collectionKey);
       const next = new Map();
       const upserts = [];
       const seenIds = new Set();
@@ -205,11 +248,13 @@ export async function persistDatabaseToPostgres(db) {
           throw new Error(`集合 ${collectionKey} 存在重复主键 ${rowId}，拒绝持久化以避免数据覆盖`);
         }
         seenIds.add(rowId);
-        const serializedData = JSON.stringify(row);
-        const serialized = `${index}:${serializedData}`;
+        // 比对用明文、落库用密文：AES-GCM 的密文每次都不同，用它比对会让每次
+        // 保存都全量重写。明文没变就跳过，密文只在真正要写时才生成。
+        const serialized = `${index}:${JSON.stringify(row)}`;
         next.set(rowId, serialized);
         if (previous.get(rowId) !== serialized) {
-          upserts.push({ rowId, seq: index, serializedData });
+          const stored = needsEncryption ? encryptRowForStorage(collectionKey, row) : row;
+          upserts.push({ rowId, seq: index, serializedData: JSON.stringify(stored) });
         }
       });
 
@@ -344,8 +389,11 @@ export async function resetPostgresStore() {
     await ensureBaseTables(client);
     const registry = await client.query(`SELECT key FROM ${REGISTRY_TABLE}`);
     await client.query("BEGIN");
+    // CASCADE：表之间有外键依赖（见 server/db/constraints.js），
+    // 被引用的表直接 DROP 会失败。重置本就是要清空全部业务表，
+    // 连带删掉依赖它的约束正是预期行为。
     for (const { key } of registry.rows) {
-      await client.query(`DROP TABLE IF EXISTS ${quotedTableFor(key)};`);
+      await client.query(`DROP TABLE IF EXISTS ${quotedTableFor(key)} CASCADE;`);
     }
     await client.query(`TRUNCATE ${REGISTRY_TABLE};`);
     await client.query(`TRUNCATE ${SINGLETON_TABLE};`);
@@ -362,5 +410,93 @@ export async function closePostgresPool() {
   if (pool) {
     await pool.end();
     pool = null;
+  }
+}
+
+/**
+ * 启动时补齐外键与索引（验收 7.6 / 7.7）。
+ *
+ * 之所以放在启动流程里而不是靠人记得跑脚本：约束是随表走的，一次
+ * DROP TABLE 就全没了，而应用重启只会重建裸表——外键悄无声息地消失，
+ * 直到验收现场「直接删一行确认被拒绝」时才发现删得掉。
+ *
+ * 失败不阻断启动：约束加不上通常是有孤儿数据，那要人工清洗；
+ * 为此让整个系统起不来，代价比收益大。但必须喊得足够响。
+ */
+export async function ensureSchemaConstraints(options = {}) {
+  const { log = console } = options;
+  const client = await getPool().connect();
+  try {
+    const before = await auditConstraintsAndIndexes(client);
+    if (before.ok) return { applied: false, ...before };
+
+    await ensureConstraintsAndIndexes(client, { log: () => {} });
+    const after = await auditConstraintsAndIndexes(client);
+
+    // 报「补了几个」要用体检前后的差值，不能用 ensureConstraintsAndIndexes 的
+    // applied 数——它走的是 CREATE INDEX IF NOT EXISTS，已存在的也会被算进去，
+    // 于是丢了 1 个索引却报「补了 15 个」，日志反而误导人。
+    const fixedForeignKeys = before.missingForeignKeys.length - after.missingForeignKeys.length;
+    const fixedIndexes = before.missingIndexes.length - after.missingIndexes.length;
+    if (fixedForeignKeys > 0 || fixedIndexes > 0) {
+      log.log(
+        `[db] 已补齐约束：外键 +${fixedForeignKeys}，索引 +${fixedIndexes}` +
+          `（当前 ${after.expectedForeignKeys - after.missingForeignKeys.length}/${after.expectedForeignKeys} 外键、` +
+          `${after.expectedIndexes - after.missingIndexes.length}/${after.expectedIndexes} 索引在位）`,
+      );
+    }
+    if (!after.ok) {
+      log.error(
+        `[db] 警告：仍有 ${after.missingForeignKeys.length} 个外键、${after.missingIndexes.length} 个索引未能建立。` +
+          `请执行 node scripts/apply-db-constraints.js --check 查看原因。` +
+          `外键缺失意味着删除教职工时不会被拦截（验收 7.6）。`,
+      );
+    }
+    return { applied: true, ...after };
+  } catch (error) {
+    log.error(`[db] 补齐约束失败：${error.message}`);
+    return { applied: false, ok: false, error: error.message };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * 读取归档账套的数据（验收 8.5 / 8.15）。
+ *
+ * 归档期间的数据不加载进内存，但**必须仍然查得到**——8.5 说的是
+ * 「初始化不清除往年数据」，8.15 说的是「往年数据支持跨年度检索」。
+ * 只卸载不提供读取路径，等于把数据变成了看不见的存在，
+ * 那比不卸载更糟：占着磁盘，却谁也用不了。
+ *
+ * 走 SQL 直查而不是把整个账套读回内存：查某位教师某学年的课表只要几十条，
+ * 为此把 12 万条读进来，就把刚省下的又还回去了。
+ */
+export async function queryArchivedRows(collectionKey, filters = {}, options = {}) {
+  const { limit = 5000 } = options;
+  const conditions = [];
+  const params = [];
+  Object.entries(filters).forEach(([field, value]) => {
+    if (value === undefined || value === null || value === "") return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error(`非法字段名：${field}`);
+    params.push(String(value));
+    conditions.push(`data->>'${field}' = $${params.length}`);
+  });
+  params.push(Math.min(Number(limit) || 5000, 20000));
+
+  const client = await getPool().connect();
+  try {
+    const { rows } = await client.query(
+      `SELECT data FROM ${quotedTableFor(collectionKey)}
+       ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+       ORDER BY seq, id
+       LIMIT $${params.length}`,
+      params,
+    );
+    return collectionNeedsEncryption(collectionKey)
+      ? rows.map((r) => decryptRowFromStorage(collectionKey, r.data))
+      : rows.map((r) => r.data);
+  } finally {
+    client.release();
   }
 }
