@@ -1,0 +1,17 @@
+# 定时重启（验收 6.4）
+#
+# 为什么需要：Node 长时间运行后内存不会主动归还给系统，一个学期不重启，
+# 常驻内存会缓慢爬升。每周一次重启把它压回去。
+#
+# 时间选在周日凌晨 3:40：周末无课，且此时既不与 02:17 的备份重叠，
+# 也避开了整点的其他定时任务。
+[Unit]
+Description=Weekly restart of School Management System
+
+[Timer]
+OnCalendar=Sun *-*-* 03:40:00
+# 机器关机错过了就在开机后补跑，而不是干等到下周
+Persistent=true
+
+[Install]
+WantedBy=timers.target

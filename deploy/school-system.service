@@ -1,0 +1,52 @@
+# 学校管理系统 systemd 单元（验收 6.4）
+# 由 deploy/install.sh 替换占位符后安装到 /etc/systemd/system/
+[Unit]
+Description=School Management System
+Documentation=file://@APP_DIR@/docs/运维手册.md
+# 数据库没起来就启动，应用会连不上库反复重启；等它就绪
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=@APP_USER@
+Group=@APP_USER@
+WorkingDirectory=@APP_DIR@
+# 配置走 Node 22 原生的 --env-file，口令不进 systemd 单元
+# （单元文件是 world-readable 的，而 config/production.env 是 600）
+ExecStart=/usr/bin/node --env-file=@APP_DIR@/config/production.env server/server.js
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+# 反复崩溃时不要无限重启：5 分钟内超过 5 次就停下来等人处理，
+# 否则日志会被刷爆，真正的故障原因反而被冲掉
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 1000+ 教师同时在线，加上 SSE 长连接，默认的 1024 个句柄不够
+LimitNOFILE=65535
+# 加密与排课是 CPU 密集的，线程池放大
+Environment=UV_THREADPOOL_SIZE=8
+
+# --- 安全加固：即便应用被攻破，也限制它能做什么 ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# 只有这两个目录可写；应用不该动系统其他任何地方
+ReadWritePaths=@APP_DIR@/server/data @APP_DIR@/backups /var/backups/school-system
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+# 只允许 IPv4/IPv6/Unix 套接字
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=school-system
+
+[Install]
+WantedBy=multi-user.target

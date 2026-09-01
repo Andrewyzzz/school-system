@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart School Management System
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart school-system.service
