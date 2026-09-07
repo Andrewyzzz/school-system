@@ -50,16 +50,24 @@ try {
   assert.ok(await ready(), `服务未能启动：\n${log.slice(-1500)}`);
 
   const admin = (await login("sysadmin")) || (await login("admin"));
+  const systemAdmin = await login("sysadmin");
   const hr = await login("hr");
   const finance = await login("finance_primary");
+  const totalFinance = await login("finance");
   const teacher = await login("teacher");
-  assert.ok(admin && hr && finance, "演示账号应能登录");
+  assert.ok(admin && systemAdmin && hr && finance && totalFinance, "演示账号应能登录");
 
   const get = (path, token) =>
     fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
   const patch = (path, token, body) =>
     fetch(`${BASE}${path}`, {
       method: "PATCH",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const post = (path, token, body) =>
+    fetch(`${BASE}${path}`, {
+      method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
@@ -84,6 +92,30 @@ try {
     const found = (teachers.items || teachers.teachers || []).find((t) => t.id === linked.teacherId);
     assert.ok(found, "排课侧应能查到该教师");
     assert.equal(found.name, marker, "人事改完姓名，排课侧应立即看到——不需要任何同步动作");
+  }
+
+  // -------------------------------------------------------------------------
+  // 4.1a 人员层级：仅总校人事 + 行政可以维护高层/中层/普通标签
+  // -------------------------------------------------------------------------
+  {
+    // 测试数据文件会在本地开发中持续保留；始终选择一个与当前值不同的标签，
+    // 避免重复运行时被“没有任何变化”这一正常业务校验误判为接口失败。
+    const targetLevel = linked.managementLevel === "middle" ? "senior" : "middle";
+    const targetLabel = targetLevel === "middle" ? "中层" : "高层";
+    const saved = await patch(`/api/hr/employees/${linked.id}`, systemAdmin, {
+      managementLevel: targetLevel,
+      reason: "验收：设置中层标签",
+    });
+    assert.equal(saved.status, 200, "总校人事 + 行政应能维护人员层级");
+    const employee = (await saved.json()).employee;
+    assert.equal(employee.managementLevel, targetLevel);
+    assert.equal(employee.managementLevelLabel, targetLabel);
+
+    const denied = await patch(`/api/hr/employees/${linked.id}`, hr, {
+      managementLevel: "senior",
+      reason: "越权尝试",
+    });
+    assert.equal(denied.status, 403, "旧人事角色不应绕过总校人事 + 行政维护人员层级");
   }
 
   // -------------------------------------------------------------------------
@@ -124,11 +156,30 @@ try {
       ["/api/hr/employees?pageSize=1", finance, 403, "财务不应读到人事档案"],
       ["/api/hr/employees?pageSize=1", teacher, 403, "教师不应读到他人档案"],
       ["/api/payroll/history?month=2026-06", finance, 200, "财务应能读工资记录"],
+      ["/api/payroll/export?month=2026-06", finance, 403, "学部财务只能查看和核算，不能导出工资记录"],
+      ["/api/payroll/export?month=2026-06", totalFinance, 200, "总校财务可以导出全校工资记录"],
+      ["/api/reports/weekly-workload?format=excel", finance, 403, "学部财务只能查看工作量台账，不能导出"],
+      ["/api/reports/weekly-workload?format=excel", totalFinance, 200, "总校财务可以导出工作量台账"],
+      ["/api/reports/annual-salary?format=excel", finance, 403, "学部财务不能导出薪资报表"],
+      ["/api/reports/annual-salary?format=excel", totalFinance, 200, "总校财务可以导出薪资报表"],
+      ["/api/payroll/history?month=2026-06", systemAdmin, 403, "总校人事行政不应读工资记录"],
+      ["/api/payroll/export?month=2026-06", systemAdmin, 403, "总校人事行政不应导出工资记录"],
+      [`/api/teachers/${linked.teacherId}/payroll?month=2026-06`, systemAdmin, 403, "总校人事行政不应读取个人工资单"],
+      ["/api/payroll-rules", finance, 403, "学部财务不应读取薪资配置"],
+      ["/api/payroll-rules", totalFinance, 200, "总校财务可以读取薪资配置"],
+      ["/api/payroll-rules", systemAdmin, 403, "总校人事行政不应读取薪资配置"],
+      ["/api/hr/org-units", finance, 403, "学部财务不应读取组织与岗位"],
+      ["/api/hr/org-units", totalFinance, 200, "总校财务可以读取组织与岗位"],
+      ["/api/hr/positions", finance, 403, "学部财务不应读取岗位列表"],
+      ["/api/hr/positions", totalFinance, 200, "总校财务可以读取岗位列表"],
+      ["/api/hr/salary-templates", systemAdmin, 403, "总校人事行政不应读取薪资模板"],
+      ["/api/reports/annual-salary", systemAdmin, 403, "总校人事行政不应读取年度薪资报表"],
       ["/api/payroll/history?month=2026-06", hr, 403, "人事不应读工资记录"],
       ["/api/payroll/history?month=2026-06", teacher, 403, "教师不应读全量工资记录"],
       ["/api/teachers?pageSize=1", admin, 200, "教务应能读教师列表"],
       ["/api/teachers?pageSize=1", teacher, 403, "教师不应读全量教师列表"],
-      ["/api/ledgers", finance, 200, "财务应能看账套"],
+      ["/api/ledgers", admin, 200, "总校人事行政应能管理账套"],
+      ["/api/ledgers", finance, 403, "财务不应直接管理账套"],
       ["/api/ledgers", teacher, 403, "教师不应看到账套"],
       ["/api/oa/requests?scope=todo", teacher, 200, "教师应能看自己的待办审批"],
     ];
@@ -137,6 +188,50 @@ try {
       const res = await get(path, token);
       assert.equal(res.status, expected, `${why}（${path} 期望 ${expected}，实际 ${res.status}）`);
     }
+
+    const teacherDetail = await (await get(`/api/teachers/${linked.teacherId}`, systemAdmin)).json();
+    assert.equal(teacherDetail.teacher?.salaryProfile, undefined, "总校人事行政读取教师名册时不应带出工资档案");
+  }
+
+  // -------------------------------------------------------------------------
+  // 4.4a 考核工资：财务输入分数，分数直接决定系数
+  // -------------------------------------------------------------------------
+  {
+    const primaryList = await (await get("/api/teachers?stageId=primary&pageSize=1", admin)).json();
+    const primaryTeacherId = primaryList.items?.[0]?.id;
+    assert.ok(primaryTeacherId, "应能找到一位小学部老师用于考核分数测试");
+
+    const saved = await post("/api/hr/assessments", finance, {
+      teacherId: primaryTeacherId,
+      month: "2026-06",
+      score: 120,
+      note: "验收：120 分按 120% 计发",
+    });
+    assert.equal(saved.status, 200, "对应学部财务应能保存本学部老师的考核分数");
+    const assessment = (await saved.json()).assessment;
+    assert.equal(assessment.score, 120, "接口只应保存分数，不再保存考核等级或核定金额");
+    assert.equal(assessment.grade, undefined);
+    assert.equal(assessment.amount, undefined);
+
+    const payrollPayload = await (await get(`/api/teachers/${primaryTeacherId}/payroll?month=2026-06`, finance)).json();
+    const payroll = payrollPayload.payroll || payrollPayload;
+    const scoreRow = (payroll.components || []).find((item) => item.name === "考核工资");
+    assert.match(scoreRow?.basis || "", /考核分数 120 分（120%）/, "工资单应写明分数和直接换算的比例");
+
+    const hrDenied = await post("/api/hr/assessments", hr, {
+      teacherId: primaryTeacherId,
+      month: "2026-06",
+      score: 100,
+    });
+    assert.equal(hrDenied.status, 403, "人事账号不能录入工资核算分数");
+
+    const middleList = await (await get("/api/teachers?stageId=middle&pageSize=1", admin)).json();
+    const crossScopeDenied = await post("/api/hr/assessments", finance, {
+      teacherId: middleList.items?.[0]?.id,
+      month: "2026-06",
+      score: 100,
+    });
+    assert.equal(crossScopeDenied.status, 403, "小学部财务不能录入初中部老师的考核分数");
   }
 
   // -------------------------------------------------------------------------
@@ -215,6 +310,7 @@ try {
       "createEmployee",
       "setEmployeeStatus",
       "updateTeacherSalaryProfile",
+      "upsertMonthlyAssessment",
       "generatePayrollBatch",
       "lockPayrollBatch",
       "commitEntityImport",

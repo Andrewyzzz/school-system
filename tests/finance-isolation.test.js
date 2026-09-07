@@ -2,9 +2,9 @@
 //
 // 前一版实现只在教师列表、工资单这几个"明显"的接口上做了范围过滤，
 // 教室、组织架构、薪酬制度这些顺带能看到他部信息的接口全漏了；
-// 前端各页面又各自缓存了一份数据、换账号不清，于是四个账号登进去长得一样。
+// 前端各页面又各自缓存了一份数据、换账号不清，于是学部账号登进去长得一样。
 //
-// 这个测试不看实现，直接以四个财务账号的身份把它们有权访问的接口全部打一遍，
+// 这个测试不看实现，直接以五个财务账号的身份把它们有权访问的接口全部打一遍，
 // 在原始响应体里搜他部关键词。新增接口若忘了收敛范围，这里就会红。
 //
 // 需要服务端在跑：SCHOOL_SYSTEM_BASE_URL 可覆盖，默认 http://127.0.0.1:4173
@@ -13,12 +13,13 @@ import assert from "node:assert/strict";
 const BASE = process.env.SCHOOL_SYSTEM_BASE_URL || "http://127.0.0.1:4173";
 const PASSWORD = process.env.SCHOOL_SYSTEM_TEST_PASSWORD || "123456";
 
-// 每个账号「绝对不该出现」的关键词。学部之间互斥，总校财务三个学部都不该见。
+// 学部之间互斥；总校财务按新口径可只读查看全部学部，因此不设只读关键词禁区。
 const ACCOUNTS = [
-  { username: "finance_primary", label: "小学部财务", forbidden: ["初中部", "高中部", '"middle"', '"high"'] },
-  { username: "finance_middle", label: "初中部财务", forbidden: ["小学部", "高中部", '"primary"', '"high"'] },
-  { username: "finance_high", label: "高中部财务", forbidden: ["小学部", "初中部", '"primary"', '"middle"'] },
-  { username: "finance", label: "总校财务", forbidden: ["小学部", "初中部", "高中部", '"primary"', '"middle"', '"high"'] },
+  { username: "finance_kindergarten", label: "幼儿园财务", forbidden: ["小学部", "初中部", "高中部", '"primary"', '"middle"', '"high"'] },
+  { username: "finance_primary", label: "小学部财务", forbidden: ["幼儿园", "初中部", "高中部", '"kindergarten"', '"middle"', '"high"'] },
+  { username: "finance_middle", label: "初中部财务", forbidden: ["幼儿园", "小学部", "高中部", '"kindergarten"', '"primary"', '"high"'] },
+  { username: "finance_high", label: "高中部财务", forbidden: ["幼儿园", "小学部", "初中部", '"kindergarten"', '"primary"', '"middle"'] },
+  { username: "finance", label: "总校财务", forbidden: [] },
 ];
 
 // 财务角色有权访问的读接口，逐个扫。新增财务可见接口请加到这里。

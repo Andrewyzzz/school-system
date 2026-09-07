@@ -13,6 +13,8 @@ import {
   listTemplatesForRole,
   createOaRequest,
   actOnOaRequest,
+  addOaExecutionEvidence,
+  executeOaRequest,
   withdrawOaRequest,
   urgeOaRequest,
   queryOaRequests,
@@ -20,7 +22,10 @@ import {
   countOaTodos,
   scanOaTimeouts,
   findTemplate,
+  calculateLeaveDays,
+  registerOaSideEffect,
 } from "../server/oa.js";
+import { registerApprovalSideEffects } from "../server/server.js";
 
 const account = (id, role, name) => ({ id, role, displayName: name, username: id });
 const teacher = account("ACC-T1", "teacher", "张老师");
@@ -28,7 +33,7 @@ const teacher2 = account("ACC-T2", "teacher", "李老师");
 const head = account("ACC-H1", "division_head", "小学部负责人");
 const hr = account("ACC-HR", "hr", "人事专员");
 const admin = account("ACC-AD", "admin", "教务");
-const finance = account("ACC-FI", "finance", "财务");
+const finance = { ...account("ACC-FI", "finance", "总校财务"), financeScope: "headquarters", financeReadAll: true };
 const sysadmin = account("ACC-SA", "system_admin", "总校管理员");
 
 function freshDb() {
@@ -37,15 +42,83 @@ function freshDb() {
   return db;
 }
 
+// -------------------------------------------------------- 审批完成后的执行留痕
+{
+  const db = freshDb();
+  db.accounts = [teacher, head, finance];
+  const template = createOaTemplate(
+    db,
+    {
+      key: "execution_trace_test",
+      name: "执行留痕测试",
+      applicantRoles: ["teacher"],
+      formFields: [{ key: "reason", label: "事项", type: "text", required: true }],
+      steps: [{ name: "负责人审批", approverAccountIds: [head.id], approverMode: "any" }],
+      execution: {
+        enabled: true,
+        name: "财务拨款",
+        executorAccountIds: [finance.id],
+        evidenceRequired: true,
+        evidenceLabel: "拨款凭证",
+      },
+    },
+    sysadmin,
+  );
+  const request = createOaRequest(db, teacher, { templateKey: template.key, formData: { reason: "测试拨款" } });
+  actOnOaRequest(db, request.id, "approve", head, { comment: "批准" });
+  assert.equal(request.status, "executing", "末级审批通过后应进入待执行，而不是直接办结");
+  assert.equal(request.execution.status, "pending");
+  assert.equal(countOaTodos(db, finance), 1, "指定执行人应收到可操作待办");
+  assert.equal(getOaRequestDetail(db, request.id, finance).canExecute, true, "执行人可查看并办理执行环节");
+  assert.ok(
+    db.notifications.some((item) => item.accountIds.includes(finance.id) && item.title.includes("待执行")),
+    "执行人应收到待执行通知，而不是只读抄送",
+  );
+  assert.throws(() => executeOaRequest(db, request.id, finance, {}), /请先上传拨款凭证/);
+  assert.throws(() => executeOaRequest(db, request.id, head, {}), /不由您处理/);
+  addOaExecutionEvidence(db, request.id, [{ id: "ATT-EXEC-1", originalName: "拨款回单.pdf" }], finance);
+  executeOaRequest(db, request.id, finance, { comment: "已完成拨款" });
+  assert.equal(request.status, "approved", "执行人确认后才正式办结");
+  assert.equal(request.execution.status, "executed");
+  assert.equal(request.execution.executedByAccountId, finance.id);
+  assert.deepEqual(request.execution.evidenceAttachmentIds, ["ATT-EXEC-1"]);
+  assert.ok(request.timeline.some((item) => item.action === "executed"), "执行完成必须进入审批时间线");
+}
+
 function leaveForm(overrides = {}) {
   return {
     leaveType: "事假",
     startDate: "2026-09-10",
+    startHalf: "上午",
     endDate: "2026-09-11",
+    endHalf: "下午",
     days: 2,
     reason: "家中有事",
     ...overrides,
   };
+}
+
+function outboundForm(overrides = {}) {
+  return {
+    startDate: "2026-09-10",
+    startHalf: "上午",
+    endDate: "2026-09-11",
+    endHalf: "下午",
+    reason: "参加市级教学培训",
+    ...overrides,
+  };
+}
+
+// -------------------------------------------------------- 请假半天精度
+{
+  assert.equal(calculateLeaveDays("2026-09-10", "上午", "2026-09-10", "上午"), 0.5);
+  assert.equal(calculateLeaveDays("2026-09-10", "上午", "2026-09-10", "下午"), 1);
+  assert.equal(calculateLeaveDays("2026-09-10", "下午", "2026-09-10", "下午"), 0.5);
+  assert.equal(calculateLeaveDays("2026-09-10", "下午", "2026-09-11", "上午"), 1);
+  assert.throws(
+    () => calculateLeaveDays("2026-09-10", "下午", "2026-09-10", "上午"),
+    /结束时间不能早于开始时间/,
+  );
 }
 
 // ------------------------------------------------------------ 模板与角色过滤
@@ -62,6 +135,7 @@ function leaveForm(overrides = {}) {
 
   const teacherTemplates = listTemplatesForRole(freshDb(), "teacher").map((item) => item.key);
   assert.ok(teacherTemplates.includes("leave"), "老师应能发起请假");
+  assert.ok(teacherTemplates.includes("outbound"), "老师应能发起外出申请");
   assert.ok(teacherTemplates.includes("lesson_swap"), "老师应能发起调课");
   assert.ok(!teacherTemplates.includes("budget_confirm"), "老师不应能发起预算确认");
   assert.ok(!teacherTemplates.includes("class_size_confirm"), "老师不应能发起人数确认");
@@ -69,6 +143,89 @@ function leaveForm(overrides = {}) {
   const financeTemplates = listTemplatesForRole(freshDb(), "finance").map((item) => item.key);
   assert.ok(financeTemplates.includes("budget_confirm"), "财务应能发起预算确认");
   assert.ok(financeTemplates.includes("lesson_rule_confirm"), "财务应能发起课时规则确认");
+
+  const budgetTemplate = findTemplate(freshDb(), "budget_confirm");
+  assert.deepEqual(
+    budgetTemplate.formFields.find((field) => field.key === "termId"),
+    { key: "termId", label: "适用学期", type: "term", required: true, hint: "仅显示已建立、未完成且未归档的正式学期" },
+    "学部薪酬预算必须通过正式学期主键选择，不能手填名称",
+  );
+  assert.deepEqual(
+    budgetTemplate.formFields.map((field) => field.key),
+    ["termId", "budgetScope", "amount"],
+    "预算申请只应填写适用学期、目标学部和该学部金额",
+  );
+  assert.equal(budgetTemplate.formFields.find((field) => field.key === "budgetScope")?.type, "budget_scope");
+  const divisionBudgetTemplate = findTemplate(freshDb(), "division_budget_use");
+  assert.equal(divisionBudgetTemplate.formFields[0].key, "termId");
+  assert.equal(divisionBudgetTemplate.formFields[0].type, "term");
+  assert.equal(divisionBudgetTemplate.formFields[0].hint, "仅显示已建立、未完成且未归档的正式学期");
+
+  const divisionHeadTemplates = listTemplatesForRole(freshDb(), "division_head").map((item) => item.key);
+  assert.ok(divisionHeadTemplates.includes("division_budget_use"), "学部主任应能发起本学部预算使用申请");
+  assert.ok(divisionHeadTemplates.includes("class_size_confirm"), "学部主任应能发起本学部班级人数确认");
+
+  const schedulerTemplates = listTemplatesForRole(freshDb(), "admin").map((item) => item.key);
+  assert.ok(!schedulerTemplates.includes("class_size_confirm"), "学部排课负责人不应发起班级人数确认");
+
+  const headquartersHrTemplates = listTemplatesForRole(freshDb(), "system_admin").map((item) => item.key);
+  assert.ok(!headquartersHrTemplates.includes("class_size_confirm"), "总校人事行政只审批班级人数，不应自行发起");
+}
+
+// ---------------------------------------------------------- 外出：课程安排 + 人事备案，不计请假扣薪
+{
+  const db = freshDb();
+  const outboundTemplate = findTemplate(db, "outbound");
+  assert.ok(outboundTemplate, "应内置外出申请模板");
+  assert.equal(outboundTemplate.steps.length, 2, "外出应经过学部负责人审批和人事备案");
+  assert.equal(outboundTemplate.formFields.find((field) => field.key === "reason")?.label, "外出原因");
+  assert.ok(
+    outboundTemplate.steps[0].approverFields.some((field) => field.type === "lessonArrangement" && field.required),
+    "学部负责人必须逐节安排外出期间课程",
+  );
+  const request = createOaRequest(db, teacher, { templateKey: "outbound", formData: outboundForm() });
+  assert.equal(request.summary, "外出：2026-09-10 上午 至 2026-09-11 下午");
+  assert.throws(
+    () => createOaRequest(freshDb(), teacher, { templateKey: "outbound", formData: outboundForm({ startHalf: "下午", endHalf: "上午", endDate: "2026-09-10" }) }),
+    /结束时间不能早于开始时间/,
+    "外出起止时段必须闭合，避免漏列课程",
+  );
+  actOnOaRequest(db, request.id, "approve", head, {
+    approverData: { lessonArrangements: [], lessonArrangements__empty: true },
+  });
+  assert.equal(request.steps[1].status, "pending", "课程安排完成后应流转人事备案");
+  actOnOaRequest(db, request.id, "approve", hr, {});
+  assert.equal(request.status, "approved", "人事备案后外出申请正式完成");
+  assert.equal(request.appliedResult, undefined, "外出不应触发请假扣薪副作用");
+}
+
+// ----------------------------------------------------------- 指定审批人路由
+{
+  const db = freshDb();
+  const primaryTeacher = account("ACC-T-PRIMARY", "teacher", "小学老师");
+  primaryTeacher.teacherId = "T-PRIMARY";
+  const primaryHead = { ...account("ACC-HEAD-PRIMARY", "division_head", "小学部主任"), scopeStageIds: ["primary"], department: "小学部", title: "小学部主任" };
+  const highHead = { ...account("ACC-HEAD-HIGH", "division_head", "高中部主任"), scopeStageIds: ["high"], department: "高中部", title: "高中部主任" };
+  db.accounts = [primaryTeacher, primaryHead, highHead, sysadmin];
+  db.teachers = [{ id: "T-PRIMARY", stageId: "primary" }];
+
+  const template = createOaTemplate(
+    db,
+    {
+      key: "direct_person_test",
+      name: "指定审批人测试",
+      applicantRoles: ["teacher"],
+      formFields: [{ key: "reason", label: "事由", type: "text", required: true }],
+      steps: [{ name: "学部主任审批", approverAccountIds: [primaryHead.id, highHead.id], approverMode: "any" }],
+    },
+    sysadmin,
+  );
+  assert.deepEqual(template.steps[0].approverRoles, [], "指定人员后不应退回为角色群发");
+
+  const request = createOaRequest(db, primaryTeacher, { templateKey: template.key, formData: { reason: "测试" } });
+  assert.deepEqual(request.steps[0].approverAccountIds, [primaryHead.id], "小学老师的申请只应路由给小学部主任");
+  assert.throws(() => actOnOaRequest(db, request.id, "approve", highHead, {}), /只能审批本学部申请|当前环节不由您处理/);
+  assert.doesNotThrow(() => actOnOaRequest(db, request.id, "approve", primaryHead, {}));
 }
 
 // ---------------------------------------------------------------- 表单校验
@@ -95,33 +252,23 @@ function leaveForm(overrides = {}) {
   // 业务规则：结束早于开始
   assert.throws(
     () => createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm({ startDate: "2026-09-20", endDate: "2026-09-10" }) }),
-    /结束日期不能早于开始日期/,
+    /结束时间不能早于开始时间/,
   );
-  // 业务规则：天数必须为正
-  assert.throws(
-    () => createOaRequest(db, teacher, { templateKey: "leave", formData: leaveForm({ days: 0 }) }),
-    /请假天数必须大于 0/,
-  );
-  // 业务规则：预算比例之和必须为 100
+  // 天数由服务端复核，不能通过篡改客户端字段改变结果
+  const corrected = createOaRequest(freshDb(), teacher, { templateKey: "leave", formData: leaveForm({ days: 999 }) });
+  assert.equal(corrected.formData.days, 2);
+  // 业务规则：预算金额必须为正数，且预算学部必须是四个教学学部之一。
   assert.throws(
     () =>
       createOaRequest(db, finance, {
         templateKey: "budget_confirm",
         formData: {
-          termName: "2026学年第一学期",
-          totalBudget: 1000000,
-          payoutRatio: 90,
-          reserveRatio: 20,
-          // 分部门明细已改为四个结构化口径（v2），此处各口径之和刻意配平，
-          // 让断言只被"比例之和不为 100%"这一条规则命中
-          budget_primary: 400000,
-          budget_middle: 300000,
-          budget_high: 200000,
-          budget_headquarters: 100000,
-          reason: "测试",
+          termId: "TERM-TEST",
+          budgetScope: "primary",
+          amount: 0,
         },
       }),
-    /之和应为 100%/,
+    /必须大于 0/,
   );
   assert.equal(db.oaRequests.length, 0, "校验失败不应产生审批单");
 }
@@ -148,7 +295,7 @@ function leaveForm(overrides = {}) {
   assert.equal(request.steps.length, 2, "请假为两级审批");
   assert.equal(request.steps[0].status, "pending");
   assert.equal(request.steps[1].status, "waiting");
-  assert.equal(request.summary, "事假 2 天（2026-09-10 至 2026-09-11）", "摘要应可读");
+  assert.equal(request.summary, "事假 2 天（2026-09-10 上午 至 2026-09-11 下午）", "摘要应可读");
   assert.equal(request.timeline.length, 1);
   assert.ok(db.notifications.length > 0, "应通知当前审批人");
 
@@ -181,6 +328,38 @@ function leaveForm(overrides = {}) {
   );
   // 已结束不能再操作
   assert.throws(() => actOnOaRequest(db, request.id, "approve", hr, {}), /已通过/);
+}
+
+// --------------------------------------------- 请假最终备案后工资单自动失效
+{
+  // 这里验证的是生产服务注册的副作用，而不是测试内复制一份失效逻辑。
+  registerApprovalSideEffects();
+  // 本用例不测排课落地，避免空排课数据影响请假计薪副作用的验证。
+  registerOaSideEffect("applySubstitutes", () => ({ applied: 0, cancelled: 0 }));
+  const payrollTeacher = { ...teacher, teacherId: "T-LEAVE-PAYROLL" };
+  const db = freshDb();
+  db.accounts = [payrollTeacher, head, hr];
+  db.payrollDetails = [
+    { id: "PAY-OPEN", teacherId: payrollTeacher.teacherId, month: "2026-09", status: "generated" },
+    { id: "PAY-LOCKED", teacherId: payrollTeacher.teacherId, month: "2026-08", status: "locked" },
+  ];
+  const request = createOaRequest(db, payrollTeacher, {
+    templateKey: "leave",
+    formData: leaveForm({ startDate: "2026-08-31", startHalf: "下午", endDate: "2026-09-01", endHalf: "上午" }),
+  });
+  actOnOaRequest(db, request.id, "approve", head, {
+    approverData: { lessonArrangements: [], lessonArrangements__empty: true },
+  });
+  actOnOaRequest(db, request.id, "approve", hr, {});
+  assert.equal(request.status, "approved");
+  assert.equal(request.appliedResult.type, "leave_payroll");
+  assert.deepEqual(request.appliedResult.months, ["2026-08", "2026-09"], "跨月请假应让两个月分别重算");
+  assert.equal(request.appliedResult.invalidatedCount, 1, "只删除未锁定的已生成工资单");
+  assert.deepEqual(
+    db.payrollDetails.map((item) => item.id),
+    ["PAY-LOCKED"],
+    "已锁定工资单不得被请假审批直接改写",
+  );
 }
 
 // -------------------------------------------------------------------- 拒绝
@@ -228,28 +407,58 @@ function leaveForm(overrides = {}) {
 // ------------------------------------------------------------ 单级流程与或签
 {
   const db = freshDb();
-  // 调课：单级教务审批
+  db.accounts = [{ ...teacher, teacherId: "T1" }, admin];
+  db.lessonInstances = [
+    {
+      id: "SWAP-L1",
+      source: "backend-scheduling",
+      teacherId: "T1",
+      teacherName: "张老师",
+      termId: "TERM-1",
+      divisionId: "elementary",
+      stageId: "primary",
+      date: "2026-09-15",
+      period: 3,
+      className: "小学一(1)班",
+      subjectName: "语文",
+      status: "scheduled",
+    },
+    {
+      id: "SWAP-L2",
+      source: "backend-scheduling",
+      teacherId: "T2",
+      teacherName: "李老师",
+      termId: "TERM-1",
+      divisionId: "elementary",
+      stageId: "primary",
+      date: "2026-09-16",
+      period: 2,
+      className: "小学二(1)班",
+      subjectName: "数学",
+      status: "scheduled",
+    },
+  ];
+  let appliedSwapPayload = null;
+  registerOaSideEffect("applyLessonSwap", (_database, payload) => {
+    appliedSwapPayload = payload;
+    return { type: "lesson_swap", source: { lessonId: "SWAP-L1" }, counterpart: { lessonId: "SWAP-L2" } };
+  });
+  // 调课：双方已协商课程后，由排课负责人单级审批并落地到排课引擎
   const request = createOaRequest(db, teacher, {
     templateKey: "lesson_swap",
     formData: {
-      lessonDate: "2026-09-15",
-      lessonInfo: "高一(1)班 数学 第3节",
-      swapType: "他人代课",
-      reason: "外出培训",
+      sourceLessonId: "SWAP-L1",
+      counterpartTeacherId: "T2",
+      counterpartLessonId: "SWAP-L2",
+      reason: "双方协商调换上课时间",
     },
   });
   assert.equal(request.steps.length, 1);
-  // 具体安排由教务在审批时指定
-  assert.throws(
-    () => actOnOaRequest(db, request.id, "approve", admin, { comment: "已安排" }),
-    /请填写「调课安排」/,
-    "未填调课安排应被拦截",
-  );
-  actOnOaRequest(db, request.id, "approve", admin, {
-    comment: "已安排",
-    approverData: { arrangement: "改由王老师代课" },
-  });
-  assert.equal(request.steps[0].approverData.arrangement, "改由王老师代课", "安排应留痕");
+  assert.match(request.summary, /小学一\(1\)班/, "调课摘要应展示真实课程，而非内部课次 ID");
+  actOnOaRequest(db, request.id, "approve", admin, { comment: "双方课程无冲突，同意调课" });
+  assert.equal(appliedSwapPayload.formData.sourceLessonId, "SWAP-L1", "审批通过应把真实源课次交给排课引擎");
+  assert.equal(appliedSwapPayload.formData.counterpartLessonId, "SWAP-L2", "审批通过应把协商课次交给排课引擎");
+  assert.equal(request.appliedResult.type, "lesson_swap", "调课执行结果应写回审批单留痕");
   assert.equal(request.status, "approved", "单级审批通过即完成");
 
   // 或签：加班审批多角色任一处理即可
@@ -271,28 +480,63 @@ function leaveForm(overrides = {}) {
   assert.equal(countOaTodos(db, head), 0, "完成后其他人待办清空");
 }
 
-// ------------------------------------------------------ 三级流程（人数确认）
+// ------------------------------------------------------ 人数确认（学部主任发起，校长审批后抄送）
 {
   const db = freshDb();
-  const request = createOaRequest(db, admin, {
+  const term = {
+    id: "TERM-PRIMARY-2026-AUTUMN",
+    name: "2026-2027学年上学期",
+    schoolYear: "2026-2027",
+    startDate: "2026-08-01",
+    endDate: "2027-01-31",
+    status: "active",
+    current: true,
+  };
+  const primaryHead = { ...head, id: "ACC-HEAD-PRIMARY", scopeStageIds: ["primary"] };
+  const headquartersFinance = { ...finance, id: "ACC-FINANCE" };
+  const headquartersAdmin = { ...sysadmin, id: "ACC-SYSTEM-ADMIN" };
+  const principal = account("ACC-PRINCIPAL", "principal", "校长");
+  db.terms = [term];
+  db.accounts = [primaryHead, headquartersFinance, headquartersAdmin, principal];
+  const request = createOaRequest(db, primaryHead, {
     templateKey: "class_size_confirm",
     formData: {
-      termName: "2026学年第一学期",
-      effectiveMonth: "2026-09",
-      scopeInfo: "小学部全部班级",
+      termId: term.id,
+      // 即使浏览器伪造了所属学部，服务端也必须按发起主任的范围覆盖。
+      stageName: "高中部",
       classDetail: "一年级1班,45\n一年级2班,44",
       reason: "学期初核定",
     },
   });
-  assert.equal(request.steps.length, 3, "人数确认为三级审批");
-  actOnOaRequest(db, request.id, "approve", head, { comment: "核对无误" });
-  assert.equal(request.currentStepIndex, 1);
-  actOnOaRequest(db, request.id, "approve", finance, { comment: "财务确认" });
-  assert.equal(request.currentStepIndex, 2);
-  assert.equal(request.status, "pending");
-  actOnOaRequest(db, request.id, "approve", sysadmin, { comment: "同意" });
-  assert.equal(request.status, "approved", "三级全部通过后完成");
-  assert.equal(request.timeline.filter((item) => item.action === "approved").length, 3);
+  assert.equal(request.termId, term.id, "人数确认必须关联已存在的正式学期主键");
+  assert.equal(request.formData.termName, term.name, "学期名称必须由服务端按 termId 回填");
+  assert.equal(request.formData.stageId, "primary", "人数所属学部必须按发起主任的权限范围固化");
+  assert.equal(request.formData.stageName, "小学部", "浏览器不能伪造其他学部的人数确认");
+  assert.equal(request.formData.effectiveMonth, undefined, "人数确认不再单独维护生效月份");
+  assert.equal(request.formData.scopeInfo, undefined, "班级名单已能说明范围，不再单独填写确认范围");
+  assert.equal(request.steps.length, 1, "人数确认只需校长审批");
+  assert.deepEqual(request.steps[0].approverRoles, ["principal"]);
+  assert.equal(request.ccRecipients.length, 0, "校长审批前不应提前抄送");
+  actOnOaRequest(db, request.id, "approve", principal, { comment: "同意" });
+  assert.equal(request.status, "approved", "校长审批通过后完成");
+  assert.deepEqual(
+    request.ccRecipients.map((item) => item.accountId).sort(),
+    [headquartersAdmin.id, headquartersFinance.id].sort(),
+    "审批完成后应只抄送总校人事行政和总校财务",
+  );
+  assert.ok(
+    db.notifications.some((item) => item.accountIds.includes(headquartersFinance.id) && item.title.includes("抄送给您")),
+    "总校财务应收到审批完成后的抄送通知",
+  );
+  assert.throws(
+    () =>
+      createOaRequest(db, primaryHead, {
+        templateKey: "class_size_confirm",
+        formData: { termId: "TERM-NOT-EXIST", classDetail: "一年级1班,45" },
+      }),
+    /请选择系统中已建立的正式学期/,
+    "人数确认不可手填或伪造不存在的学期",
+  );
 }
 
 // ------------------------------------------------------------------ 查询范围
@@ -577,27 +821,35 @@ function leaveForm(overrides = {}) {
 
 // ------------------------------- 请假代课落到课表：课次查询、阻断原因与回滚
 {
-  const { applySubstituteArrangements, listTeacherLessonsInRange } = await import("../server/scheduling.js");
+  const {
+    applyApprovedLessonSwap,
+    applySubstituteArrangements,
+    listLessonSwapOptions,
+    listTeacherLessonsInRange,
+  } = await import("../server/scheduling.js");
 
   const buildScheduleDb = () => ({
     meta: { updatedAt: "" },
     auditLogs: [], notifications: [], attendanceRecords: [], payrollDetails: [], accounts: [],
     subjects: [{ id: "chinese", name: "语文", teacherIds: ["T1", "T2", "T3"] }],
     teachers: [
-      { id: "T1", name: "原老师", status: "active" },
-      { id: "T2", name: "代课A", status: "active" },
+      { id: "T1", name: "原老师", status: "active", stageId: "primary", primarySubjectId: "chinese", employeeNo: "T1" },
+      { id: "T2", name: "代课A", status: "active", stageId: "primary", primarySubjectId: "chinese", employeeNo: "T2" },
     ],
-    terms: [{ id: "TERM-1", name: "测试学期", current: true, status: "active", startDate: "2026-06-01", endDate: "2026-07-31" }],
+    classes: [{ id: "C1", stageId: "primary", grade: 1, active: true, roomId: "R1", name: "一(1)班" }],
+    rooms: [{ id: "R1", stageId: "primary", active: true, roomType: "homeroom", name: "101" }],
+    teacherAssignments: [{ stageId: "primary", grade: 1, subjectId: "chinese", teacherIds: ["T1", "T2"] }],
+    terms: [{ id: "TERM-1", name: "测试学期", current: true, status: "active", startDate: "2026-06-15", endDate: "2026-07-31" }],
     scheduleDrafts: [{
-      id: "DRAFT-1", termId: "TERM-1", divisionId: "primary", gradeId: "primary-1", status: "published",
+      id: "DRAFT-1", termId: "TERM-1", divisionId: "elementary", gradeId: "elementary-g1", weekStart: "2026-06-15", status: "published",
       assignments: [
         { id: "A1", teacherId: "T1", date: "2026-06-15", time: "08:00-08:40", period: 1, dayIndex: 0, classId: "C1", subjectId: "chinese", roomId: "R1" },
         { id: "A2", teacherId: "T1", date: "2026-06-16", time: "08:00-08:40", period: 1, dayIndex: 1, classId: "C1", subjectId: "chinese", roomId: "R1" },
       ],
     }],
     lessonInstances: [
-      { id: "L1", scheduleAssignmentId: "A1", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-15", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", status: "scheduled" },
-      { id: "L2", scheduleAssignmentId: "A2", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-16", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", status: "scheduled" },
+      { id: "L1", termId: "TERM-1", divisionId: "elementary", gradeId: "elementary-g1", stageId: "primary", scheduleAssignmentId: "A1", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-15", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", type: "regular", units: 1, status: "scheduled" },
+      { id: "L2", termId: "TERM-1", divisionId: "elementary", gradeId: "elementary-g1", stageId: "primary", scheduleAssignmentId: "A2", schedulingDraftId: "DRAFT-1", source: "backend-scheduling", teacherId: "T1", teacherName: "原老师", date: "2026-06-16", time: "08:00-08:40", period: 1, classId: "C1", className: "一(1)班", subjectId: "chinese", subjectName: "语文", roomId: "R1", room: "101", type: "regular", units: 1, status: "scheduled" },
     ],
     scheduleChangeRequests: [],
   });
@@ -635,6 +887,58 @@ function leaveForm(overrides = {}) {
   assert.equal(cancelled.cancelled.length, 1);
   assert.equal(db4.lessonInstances.find((item) => item.id === "L1").status, "cancelled", "课次应标记取消");
   assert.match(db4.lessonInstances.find((item) => item.id === "L1").cancelReason, /请假/);
+
+  // 外出安排：课表转给代课老师，代课课型按代课单价计；原老师保留正常课时工资投影。
+  const dbOutbound = buildScheduleDb();
+  dbOutbound.payrollDetails = [
+    { id: "PAY-T1", teacherId: "T1", month: "2026-06", status: "generated" },
+    { id: "PAY-T2", teacherId: "T2", month: "2026-06", status: "generated" },
+  ];
+  const outboundApplied = applySubstituteArrangements(
+    dbOutbound,
+    [{ lessonId: "L1", substituteTeacherId: "T2", preserveOriginalLessonPay: true, arrangementContext: "outbound" }],
+    { id: "ACC", name: "审批人", role: "admin", scopeStageIds: ["primary"] },
+  );
+  const outboundLesson = dbOutbound.lessonInstances.find((item) => item.id === "L1");
+  assert.equal(outboundLesson.teacherId, "T2", "外出时课表应转给代课老师");
+  assert.equal(outboundLesson.type, "substitute", "代课老师必须按代课课型计薪");
+  assert.equal(outboundLesson.outboundOriginalTeacherId, "T1", "外出应保留原任课老师的计薪归属");
+  assert.equal(outboundLesson.outboundOriginalLessonType, "regular", "原老师应按原课程类型保留正常课时工资");
+  assert.equal(outboundApplied.applied[0].preserveOriginalLessonPay, true);
+  assert.equal(dbOutbound.payrollDetails.length, 0, "外出改课后，两位老师未锁定的工资明细应自动作废重算");
+
+  // 审批中心调课：老师选择自己和协商老师的两节实际课程，审批通过后原子互换上课时间。
+  const dbSwap = buildScheduleDb();
+  const counterpartLesson = dbSwap.lessonInstances.find((item) => item.id === "L2");
+  counterpartLesson.teacherId = "T2";
+  counterpartLesson.teacherName = "代课A";
+  dbSwap.scheduleDrafts[0].assignments.find((item) => item.id === "A2").teacherId = "T2";
+  dbSwap.accounts = [{ id: "ACC-T1", teacherId: "T1", role: "teacher" }];
+  dbSwap.payrollDetails = [
+    { id: "PAY-SWAP-T1", teacherId: "T1", month: "2026-06", status: "generated" },
+    { id: "PAY-SWAP-T2", teacherId: "T2", month: "2026-06", status: "generated" },
+  ];
+  const swapOptions = listLessonSwapOptions(dbSwap, "T1");
+  assert.equal(swapOptions.sourceLessons.length, 1, "老师只能从自己的已发布课程中选择待调课次");
+  assert.equal(swapOptions.counterpartLessons.length, 1, "应列出同学部其他老师的协商课次");
+  const appliedSwap = applyApprovedLessonSwap(
+    dbSwap,
+    {
+      requestId: "OA-SWAP-1",
+      applicantAccountId: "ACC-T1",
+      formData: { sourceLessonId: "L1", counterpartLessonId: "L2" },
+    },
+    { id: "ACC-SCHEDULER", name: "小学排课负责人", role: "admin", scopeStageIds: ["primary"] },
+  );
+  const swappedSource = dbSwap.lessonInstances.find((item) => item.id === "L1");
+  const swappedCounterpart = dbSwap.lessonInstances.find((item) => item.id === "L2");
+  assert.equal(swappedSource.date, "2026-06-16", "源课程应换到协商课程原来的时间");
+  assert.equal(swappedCounterpart.date, "2026-06-15", "协商课程应换到源课程原来的时间");
+  assert.equal(swappedSource.teacherId, "T1", "调课只交换时间，不改变任课老师");
+  assert.equal(swappedCounterpart.teacherId, "T2", "调课只交换时间，不改变任课老师");
+  assert.equal(dbSwap.payrollDetails.length, 0, "调课后双方尚未锁定的工资明细应自动作废重算");
+  assert.equal(appliedSwap.type, "lesson_swap", "调课结果应作为审批执行留痕返回");
+  assert.ok(dbSwap.auditLogs.some((item) => item.action === "oa_lesson_swap_apply"), "调课应写入排课审计日志");
 
   // 中途失败整单回滚：第一节取消成功，第二节课次不存在
   const db5 = buildScheduleDb();

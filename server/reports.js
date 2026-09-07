@@ -16,13 +16,15 @@ import {
   QUALIFICATION_GRADE_LABELS,
 } from "./payroll.js";
 import { buildWorkbook, cell, exportFilename, row } from "./excel.js";
-import { financeScopeFor, payrollScopeOfTeacher } from "./financeScope.js";
+import { financeReadScopeFor, payrollScopeOfTeacher } from "./financeScope.js";
 import { payrollDetailsByFilter } from "./storage.js";
 
 const WEEKDAYS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
 const LESSON_TYPE_LABELS = {
   regular: "正常课时",
+  selfStudy: "自习",
+  activity: "活动",
   morning: "早自习",
   evening: "晚自习",
   weekend: "周末补课",
@@ -108,7 +110,7 @@ export function scopeTeachers(db, account, { stageId = "", teacherId = "" } = {}
     notes.push("仅本人");
   }
 
-  const financeScope = financeScopeFor(account);
+  const financeScope = financeReadScopeFor(account);
   if (financeScope) {
     teachers = teachers.filter((t) => payrollScopeOfTeacher(db, t.id) === financeScope);
     notes.push(financeScope === "headquarters" ? "总校行政后勤" : stageLabelOf(financeScope));
@@ -158,7 +160,7 @@ export function buildWeeklyWorkload(db, options = {}) {
   const allowed = new Map(teachers.map((t) => [t.id, t]));
 
   const lessons = (db.lessonInstances || [])
-    .filter((l) => l.termId === term.id && l.date >= start && l.date <= end && allowed.has(l.teacherId))
+    .filter((l) => l.termId === term.id && l.date >= start && l.date <= end && allowed.has(l.teacherId) && !l.nonPayable)
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
 
   // 每位教师一行；没有课的教师也要列出来，否则看表的人分不清

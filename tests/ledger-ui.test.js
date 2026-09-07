@@ -38,6 +38,7 @@ const server = await fs.readFile(new URL("../server/server.js", import.meta.url)
     (html.match(/data-view="ledgers" data-role="([^"]*)"/) || [, ""])[1].split(",").filter(Boolean),
   );
   assert.ok(navRoles.size > 0, "应能解析出菜单角色");
+  assert.deepEqual([...navRoles], ["system_admin"], "账套管理菜单只能交给总校人事行政账号");
 
   // 后端 GET /api/ledgers 的放行角色
   const block = server.slice(server.indexOf('if (url.pathname === "/api/ledgers"'));
@@ -49,6 +50,7 @@ const server = await fs.readFile(new URL("../server/server.js", import.meta.url)
       .filter(Boolean),
   );
   assert.ok(serverRoles.size > 0, "应能解析出后端放行角色");
+  assert.deepEqual([...serverRoles], ["system_admin"], "账套接口不能只隐藏菜单，后端也只能放行总校人事行政");
 
   const extra = [...navRoles].filter((r) => !serverRoles.has(r));
   assert.deepEqual(extra, [], `菜单对以下角色可见，但后端会拒绝，点进去只会看到加载失败：${extra.join("、")}`);
@@ -236,20 +238,17 @@ const server = await fs.readFile(new URL("../server/server.js", import.meta.url)
 }
 
 // ---------------------------------------------------------------------------
-// 7. 只读角色不该看到操作面板
+// 7. 账套管理统一归总校人事行政
 //
-// 校领导、人事看得到账套边界（8.1），但建立与恢复不是他们的活。
-// 按钮画出来点不动，比不画更让人困惑。
+// 财务、校领导等岗位仍参与审批，但不能进入账套页或直接操作账套。
 // ---------------------------------------------------------------------------
 {
   assert.match(app, /function canManageLedger/, "应区分可操作角色");
   assert.match(app, /function canRestoreLedger/, "恢复权限应单列——它能覆盖现有数据");
 
   const manage = app.match(/function canManageLedger[^}]*\}/)[0];
-  ["system_admin", "admin", "finance"].forEach((r) =>
-    assert.ok(manage.includes(`"${r}"`), `${r} 应可操作账套`),
-  );
-  ["principal", "division_head", "teacher"].forEach((r) =>
+  assert.ok(manage.includes('role === "system_admin"'), "总校人事行政应可操作账套");
+  ["admin", "finance", "hr", "principal", "division_head", "teacher"].forEach((r) =>
     assert.ok(!manage.includes(`"${r}"`), `${r} 不应有账套操作权`),
   );
 

@@ -61,7 +61,9 @@ createOaRequest(
     formData: {
       leaveType: "事假",
       startDate: "2026-06-01",
+      startHalf: "上午",
       endDate: "2026-06-02",
+      endHalf: "下午",
       days: 2,
       reason: "生成数据库设计文档的样本数据",
     },

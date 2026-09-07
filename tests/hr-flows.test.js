@@ -104,6 +104,51 @@ const newEmployee = employeeByTeacherId(db, newTeacher.id);
 assert.equal(newEmployee.status, "probation", "新入职默认试用期");
 assert.equal(newEmployee.salaryTemplateId, "TPL-TEACHER-STD", "应自动套用岗位默认薪资模板");
 
+// ---- 2.1 生活老师：仅小学／初中／高中，入职不要求任教学科 ----
+assert.throws(
+  () =>
+    createHrFlow(
+      db,
+      sysadmin,
+      {
+        flowType: "onboard",
+        personName: "幼儿园生活老师",
+        orgUnitId: "ORG-STAGE-kindergarten",
+        positionId: "POS-LIFE-TEACHER",
+        hiredAt: "2026-09-01",
+        reason: "错误岗位测试",
+      },
+      context,
+    ),
+  /仅可归属小学、初中或高中/,
+  "幼儿园不得任命生活老师",
+);
+const lifeOnboard = createHrFlow(
+  db,
+  headPrimary,
+  {
+    flowType: "onboard",
+    personName: "小学生活老师甲",
+    phone: "13700002222",
+    orgUnitId: "ORG-STAGE-primary",
+    positionId: "POS-LIFE-TEACHER",
+    hiredAt: "2026-09-01",
+    reason: "秋季宿舍生活管理补员",
+  },
+  context,
+);
+approveHrFlowStep(db, lifeOnboard.id, "approve", "资料齐全", hr, context);
+approveHrFlowStep(db, lifeOnboard.id, "approve", "同意录用", sysadmin, context);
+const lifeTeacher = db.teachers.find((teacher) => teacher.name === "小学生活老师甲");
+assert.ok(lifeTeacher, "生活老师终审通过后应建立教师侧人员记录");
+assert.equal(lifeTeacher.primarySubjectId, "", "生活老师不应要求任教学科");
+assert.equal(lifeTeacher.salaryProfile.salaryCategory, "lifeTeacher", "生活老师应自动套用独立工资方案");
+const lifeEmployee = employeeByTeacherId(db, lifeTeacher.id);
+assert.equal(lifeEmployee.positionId, "POS-LIFE-TEACHER", "生活老师档案应保留岗位标识");
+const lifeAccount = db.accounts.find((account) => account.teacherId === lifeTeacher.id);
+assert.deepEqual(lifeAccount.roles, ["teacher", "life_teacher"], "生活老师应有教师登录及生活老师角色标识");
+assert.equal(queryEmployees(db, { search: "小学生活老师甲" }).items[0].isLifeTeacher, true, "人员列表应标识生活老师岗位");
+
 // ---- 3. 调岗流程闭环（小学部 → 初中部） ----
 const transferTarget = db.employees.find((employee) => employee.orgUnitId === "ORG-STAGE-primary" && employee.teacherId && employee.id !== newEmployee.id);
 const transfer = createHrFlow(

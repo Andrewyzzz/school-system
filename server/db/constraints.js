@@ -31,6 +31,7 @@ export const FOREIGN_KEYS = [
   { child: "lessonInstances", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "payrollDetails", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "termBudgets", field: "termId", parent: "terms", onDelete: "RESTRICT" },
+  { child: "termBudgetUsageEntries", field: "termId", parent: "terms", onDelete: "RESTRICT" },
 
   // 教师：验收清单 7.6 明确要求「删除教职工时配套课时、薪资数据有保护机制」。
   // 系统本身不做物理删除（离职走状态流转），这道约束是防止绕过应用层直接删库。

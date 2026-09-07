@@ -9,8 +9,10 @@ import {
   seniorityAllowanceFor,
   applyProbationPolicy,
   applyPostAllowancePolicy,
+  minimumWageForScheme,
   normalizePayrollRules,
 } from "../server/payroll.js";
+import { approvedLeaveSettlementForMonth } from "../server/storage.js";
 
 const scheme = DEFAULT_PAYROLL_RULES.teacherSalaryScheme;
 const amountOf = (result, name) => result.components.find((item) => item.name === name)?.amount ?? null;
@@ -135,6 +137,84 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   });
 }
 
+// ----------------------------------------------------- 生活老师：人数工作量、考核、兼岗与假期
+{
+  const lifeTeacher = {
+    id: "T-LIFE-PRIMARY",
+    name: "小学生活老师",
+    stageId: "primary",
+    hiredAt: "2020-09-01",
+    salaryProfile: {
+      salaryCategory: "lifeTeacher",
+      seniorityCategory: "lifeTeacher",
+      schoolYears: 4,
+      probationRate: 1,
+      roles: {
+        lifeTeacherKind: "lower",
+        lifeTeacherStudentCount: 70,
+        lifeManager: true,
+        buildingLead: true,
+        nightShiftLead: false,
+        primaryDayShift: true,
+      },
+    },
+  };
+  const result = calculateDedicatedTeacherPayroll({
+    teacher: lifeTeacher,
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { positionId: "POS-LIFE-TEACHER", status: "active", managementLevel: "ordinary", roles: lifeTeacher.salaryProfile.roles },
+    monthlyAssessment: { score: 120, lifeTeacherTransport: { short: 2, medium: 0, long: 0, extraLong: 0 } },
+  });
+  assert.equal(amountOf(result, "基本工资"), 2520, "生活老师基本工资应取独立方案");
+  assert.equal(amountOf(result, "工作量工资"), 600, "小学生活老师 70 人工作量应按 10 元/生、600 元封顶");
+  assert.equal(amountOf(result, "考核工资"), 972, "低段生活老师考核工资应按 810 元 × 120% 计算");
+  assert.equal(amountOf(result, "校龄工资"), 200, "生活老师校龄应按 50 元/年计算");
+  assert.equal(amountOf(result, "住房补贴"), 1000, "生活老师住房补贴应取独立标准");
+  assert.equal(amountOf(result, "生活主管津贴"), 600);
+  assert.equal(amountOf(result, "栋长津贴"), 300);
+  assert.equal(amountOf(result, "一年级／六年级白班津贴"), 300);
+  assert.equal(amountOf(result, "接送补助"), 160, "接送补助应按月度实际次数计入");
+  assert.equal(result.lessonAmount, 0, "生活老师不应产生学科课时工资");
+  assert.equal(result.lines.length, 0, "生活老师不应产生课程计薪明细");
+
+  const holiday = calculateDedicatedTeacherPayroll({
+    teacher: lifeTeacher,
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { positionId: "POS-LIFE-TEACHER", status: "active", managementLevel: "ordinary", roles: lifeTeacher.salaryProfile.roles },
+    monthlyAssessment: { score: 120 },
+    calendarSettlement: { totalDays: 30, holidayDays: 30, holidayEntries: [{ name: "暑假" }] },
+  });
+  assert.equal(amountOf(holiday, "基本工资"), 2016, "普通生活老师假期基本工资按 80% 结算");
+  assert.equal(amountOf(holiday, "考核工资"), null, "普通生活老师假期不计考核工资");
+
+  const agreement = calculateDedicatedTeacherPayroll({
+    teacher: lifeTeacher,
+    month: "2026-09",
+    payrollRules: DEFAULT_PAYROLL_RULES,
+    hrFacts: { positionId: "POS-LIFE-TEACHER", status: "active", employmentType: "agreement", agreementMonthlySalary: 9000 },
+    calendarSettlement: { totalDays: 30, holidayDays: 30, holidayEntries: [{ name: "暑假" }] },
+  });
+  assert.equal(amountOf(agreement, "协议工资"), 7200, "协议生活老师假期应按协议价 80% 结算");
+  assert.equal(agreement.components.length, 1, "协议生活老师不应叠加其他固定项");
+
+  const custom = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
+  custom.teacherSalaryScheme.lifeTeacher.workloadByStage.primary.perStudent = 12;
+  custom.teacherSalaryScheme.lifeTeacher.assessmentByStage.primary.lower = 900;
+  custom.teacherSalaryScheme.lifeTeacher.transportAllowance.short = 90;
+  const configured = calculateDedicatedTeacherPayroll({
+    teacher: lifeTeacher,
+    month: "2026-09",
+    payrollRules: custom,
+    hrFacts: { positionId: "POS-LIFE-TEACHER", status: "active", roles: lifeTeacher.salaryProfile.roles },
+    monthlyAssessment: { score: 100, lifeTeacherTransport: { short: 2 } },
+  });
+  assert.equal(amountOf(configured, "工作量工资"), 600, "修改单价后仍应遵循可配置封顶额");
+  assert.equal(amountOf(configured, "考核工资"), 900, "生活老师考核基准应可配置");
+  assert.equal(amountOf(configured, "接送补助"), 180, "生活老师接送单价应可配置");
+}
+
 // ------------------------------------ 未配置规则的岗位类别不发校龄津贴（不得回退到教师标准）
 {
   const teacher = baseTeacher();
@@ -158,33 +238,211 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   assert.equal(amountOf(teacherResult, "校龄工资"), 500, "专任教师同条件下应有校龄津贴");
 }
 
-// -------------------------------------------------------------- 考核工资浮动
+// -------------------------------------------------------------- 考核工资按分数直接浮动
 {
   const teacher = baseTeacher();
   const normal = runPayroll({ teacher, profile: { assessmentBand: "high" } });
-  assert.equal(amountOf(normal, "考核工资"), 1480, "高中考核工资标准应为 1480");
+  assert.equal(amountOf(normal, "考核工资"), 1480, "未录入时按 100 分预览，高中考核工资应为 1480");
 
-  const excellent = runPayroll({
+  const score120 = runPayroll({
     teacher,
     profile: { assessmentBand: "high" },
-    monthlyAssessment: { grade: "excellent" },
+    monthlyAssessment: { score: 120 },
   });
-  assert.equal(amountOf(excellent, "考核工资"), 1776, "优秀应上浮 1.2 倍");
+  assert.equal(amountOf(score120, "考核工资"), 1776, "120 分应按 120% 计发");
 
-  const unqualified = runPayroll({
+  const score80 = runPayroll({
     teacher,
     profile: { assessmentBand: "high" },
-    monthlyAssessment: { grade: "unqualified" },
+    monthlyAssessment: { score: 80 },
   });
-  assert.equal(amountOf(unqualified, "考核工资"), 888, "不合格应梯度扣减至 0.6");
+  assert.equal(amountOf(score80, "考核工资"), 1184, "80 分应按 80% 计发");
 
-  // 区间制岗位（幼儿园）：直接指定金额覆盖系数
-  const override = runPayroll({
+  // 旧的直接核定金额不再覆盖分数公式，避免两套口径并存。
+  const amountIgnored = runPayroll({
     teacher,
     profile: { assessmentBand: "high" },
-    monthlyAssessment: { amount: 1620 },
+    monthlyAssessment: { score: 120, amount: 1620 },
   });
-  assert.equal(amountOf(override, "考核工资"), 1620, "指定金额应覆盖系数计算");
+  assert.equal(amountOf(amountIgnored, "考核工资"), 1776, "考核工资只能由分数决定");
+}
+
+// ---------------------------------------------------------- 校历标签驱动假期结算
+{
+  const teacher = baseTeacher();
+  const fullHoliday = {
+    totalDays: 31,
+    holidayDays: 31,
+    holidayEntries: [{ id: "CAL-SUMMER", name: "26-27 暑假", type: "summer_break", days: 31 }],
+  };
+  const normal = runPayroll({ teacher, profile: { assessmentBand: "high" }, monthlyAssessment: { score: 120 } });
+  const middleHoliday = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    monthlyAssessment: { score: 120 },
+    hrFacts: { managementLevel: "middle", status: "active" },
+    calendarSettlement: fullHoliday,
+  });
+  assert.equal(middleHoliday.calendarSettlement.tag, "holiday", "假期时间段应进入假期结算口径");
+  assert.equal(amountOf(middleHoliday, "基本工资"), amountOf(normal, "基本工资"), "中层以上假期基本工资按 100% 计发");
+  assert.equal(amountOf(middleHoliday, "考核工资"), 1480, "中层以上假期按 100% 标准额，不沿用 120 分考核系数");
+
+  const ordinaryHoliday = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    monthlyAssessment: { score: 120 },
+    hrFacts: { managementLevel: "ordinary", status: "active" },
+    calendarSettlement: fullHoliday,
+  });
+  assert.equal(amountOf(ordinaryHoliday, "基本工资"), amountOf(normal, "基本工资") * 0.8, "普通人员假期按标准月工资的 80% 计发");
+  assert.equal(amountOf(ordinaryHoliday, "考核工资"), null, "普通人员假期不核算考核工资");
+  assert.equal(ordinaryHoliday.calendarSettlement.holidayRate, 0.8, "假期结算应保留 80% 规则快照");
+}
+
+// -------------------------------------------------------- 请假按自然日／半天结算
+{
+  const teacher = baseTeacher();
+  const fullPay = runPayroll({ teacher, profile: { assessmentBand: "high" } });
+  const leavePay = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    leaveSettlement: {
+      daysInMonth: 30,
+      maternityDays: 1,
+      sickDays: 1,
+      personalDays: 1.5,
+      policyLeaveDays: 3.5,
+    },
+  });
+  const money = (amount) => Math.round(amount * 100) / 100;
+  assert.equal(
+    amountOf(leavePay, "基本工资"),
+    money(amountOf(fullPay, "基本工资") * (1 - 1.5 / 30)),
+    "事假按实际 1.5 天扣基本工资；病假、产假不扣基本工资",
+  );
+  assert.equal(amountOf(leavePay, "住房补贴"), amountOf(fullPay, "住房补贴"), "三类请假均不扣住房补贴");
+  assert.equal(
+    amountOf(leavePay, "考核工资"),
+    money(amountOf(fullPay, "考核工资") * (1 - 3.5 / 30)),
+    "病假、产假、事假均按实际天数扣减考核工资",
+  );
+  assert.match(
+    leavePay.components.find((item) => item.name === "基本工资").basis,
+    /事假 1.5 天.*按 30 个自然日折算/,
+    "工资明细应留下逐日折算依据",
+  );
+
+  const fullPersonalLeave = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    leaveSettlement: { daysInMonth: 30, personalDays: 30, policyLeaveDays: 30 },
+  });
+  assert.equal(amountOf(fullPersonalLeave, "基本工资"), null, "整月事假不发基本工资");
+  assert.equal(amountOf(fullPersonalLeave, "考核工资"), null, "整月事假不发考核工资");
+  assert.equal(amountOf(fullPersonalLeave, "住房补贴"), amountOf(fullPay, "住房补贴"), "整月事假只保留住房补贴");
+}
+
+// -------------------------------------------------- 请假跨月、重叠时按半天去重
+{
+  const db = {
+    accounts: [{ id: "ACC-LEAVE-TEACHER", teacherId: "T-LEAVE" }],
+    oaRequests: [
+      {
+        id: "OA-SICK",
+        templateKey: "leave",
+        status: "approved",
+        applicantAccountId: "ACC-LEAVE-TEACHER",
+        formData: { leaveType: "病假", startDate: "2026-09-01", startHalf: "上午", endDate: "2026-09-02", endHalf: "下午" },
+      },
+      {
+        id: "OA-PERSONAL",
+        templateKey: "leave",
+        status: "approved",
+        applicantAccountId: "ACC-LEAVE-TEACHER",
+        formData: { leaveType: "事假", startDate: "2026-09-02", startHalf: "下午", endDate: "2026-09-03", endHalf: "上午" },
+      },
+      {
+        id: "OA-MATERNITY",
+        templateKey: "leave",
+        status: "approved",
+        applicantAccountId: "ACC-LEAVE-TEACHER",
+        formData: { leaveType: "产假", startDate: "2026-09-05", startHalf: "上午", endDate: "2026-09-05", endHalf: "上午" },
+      },
+      {
+        id: "OA-PENDING",
+        templateKey: "leave",
+        status: "pending",
+        applicantAccountId: "ACC-LEAVE-TEACHER",
+        formData: { leaveType: "事假", startDate: "2026-09-10", startHalf: "上午", endDate: "2026-09-10", endHalf: "下午" },
+      },
+    ],
+  };
+  const settlement = approvedLeaveSettlementForMonth(db, "T-LEAVE", "2026-09");
+  assert.equal(settlement.daysInMonth, 30);
+  assert.equal(settlement.sickDays, 1.5, "与事假重叠的半天不得重复扣病假");
+  assert.equal(settlement.personalDays, 1, "事假按两个半天计 1 天");
+  assert.equal(settlement.maternityDays, 0.5, "单个上午产假计 0.5 天");
+  assert.equal(settlement.policyLeaveDays, 3, "只累计已批准且去重后的实际请假半天");
+}
+
+// ------------------------------------------------------- 退休返聘／协议工资
+{
+  const teacher = baseTeacher();
+  const agreementFacts = {
+    employmentType: "agreement",
+    agreementMonthlySalary: 10000,
+    managementLevel: "ordinary",
+    status: "active",
+  };
+  const teaching = runPayroll({ teacher, lessons: [{ id: "L-1", date: "2026-09-01", time: "08:00", status: "completed" }], hrFacts: agreementFacts });
+  assert.equal(amountOf(teaching, "协议工资"), 10000, "协议教师在正式学期按协议月薪 100% 结算");
+  assert.equal(teaching.components.length, 1, "协议教师不应叠加课时、考核或岗位津贴项目");
+  assert.equal(teaching.lessonAmount, 0, "协议教师课时不单独计薪");
+
+  const holiday = runPayroll({
+    teacher,
+    hrFacts: agreementFacts,
+    calendarSettlement: {
+      totalDays: 31,
+      holidayDays: 31,
+      holidayEntries: [{ id: "CAL-WINTER", name: "26-27 寒假", type: "winter_break", days: 31 }],
+    },
+  });
+  assert.equal(amountOf(holiday, "协议工资"), 8000, "协议教师在完整假期按协议月薪 80% 结算");
+  assert.equal(holiday.calendarSettlement.holidayRate, 0.8, "协议教师假期结算快照应标记 80% 比例");
+
+  const mixed = runPayroll({
+    teacher,
+    hrFacts: agreementFacts,
+    calendarSettlement: {
+      totalDays: 30,
+      holidayDays: 15,
+      holidayEntries: [{ id: "CAL-MIXED", name: "26-27 寒假", type: "winter_break", days: 15 }],
+    },
+  });
+  assert.equal(amountOf(mixed, "协议工资"), 9000, "跨正式学期与假期月份应按天数拆分 100%／80% 协议工资");
+}
+
+// -------------------------------------------------- 就业／待岗与统一最低工资
+{
+  const minimumWageRules = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
+  assert.equal(minimumWageForScheme(minimumWageRules.teacherSalaryScheme), 2700, "最低工资标准应为 2700");
+  minimumWageRules.teacherSalaryScheme.minimumWage = 2850;
+  assert.equal(minimumWageForScheme(minimumWageRules.teacherSalaryScheme), 2850, "调整后应读取统一配置");
+
+  const standby = calculateDedicatedTeacherPayroll({
+    teacher: baseTeacher(),
+    lessons: [{ id: "L-STANDBY", date: "2026-09-01", time: "08:00", status: "completed" }],
+    month: "2026-09",
+    payrollRules: { ...minimumWageRules, teacherSalaryScheme: { ...minimumWageRules.teacherSalaryScheme, minimumWage: 2700 } },
+    hrFacts: { workStatus: "standby", status: "active", employmentType: "normal" },
+  });
+  assert.equal(amountOf(standby, "待岗工资"), 2160, "待岗工资应为最低工资标准的 80%");
+  assert.equal(amountOf(standby, "住房补贴"), 2100, "待岗人员住房补贴应全额保留");
+  assert.equal(standby.grossPay, 4260, "待岗工资只能由最低工资 80% 和房补组成");
+  assert.equal(amountOf(standby, "课时工资"), null, "待岗期间不另计课时工资");
+  assert.equal(standby.lines[0].amount, 0, "待岗期间的历史课次不得计薪");
+  assert.match(standby.components.find((item) => item.name === "待岗工资").basis, /最低工资标准 2700 元 × 80%/);
 }
 
 // -------------------------------------------- 试用期 80% 折算与最低工资兜底
@@ -212,7 +470,7 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
     scheme,
   );
   const total = low.reduce((s, i) => s + i.amount, 0);
-  assert.equal(total, 2520, "折算后低于最低工资应补足到 2520");
+  assert.equal(total, 2700, "折算后低于最低工资应补足到 2700");
   assert.ok(low.some((i) => i.name === "最低工资补足"), "应出现最低工资补足项");
 
   // 非试用期不受影响
@@ -309,6 +567,19 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   assert.equal(rules.primary.regularBaseRate, 19);
   assert.equal(rules.primary.evening, 12);
   assert.equal(rules.primary.nonRegular, 9.5);
+
+  // 外出期间原老师保留的课时投影仍按原正课规则；真正去上课的代课老师按代课单价。
+  const originalOutbound = runPayroll({
+    teacher: baseTeacher({ stageId: "primary", grade: 3, primarySubjectId: "chinese" }),
+    lessons: [{ id: "L-OUT-ORIGINAL", date: "2026-09-08", time: "08:00", type: "regular", status: "scheduled", outboundOriginalPay: true }],
+  });
+  const substituteOutbound = runPayroll({
+    teacher: baseTeacher({ stageId: "primary", grade: 3, primarySubjectId: "chinese" }),
+    lessons: [{ id: "L-OUT-SUBSTITUTE", date: "2026-09-08", time: "08:00", type: "substitute", status: "scheduled" }],
+  });
+  assert.equal(originalOutbound.lines[0].rate, 19 * 1.2, "外出原老师应按原正课及学科系数计薪");
+  assert.match(originalOutbound.lines[0].basis, /原任课老师课时工资照发/);
+  assert.equal(substituteOutbound.lines[0].rate, rules.primary.substitute, "代课老师应按学部代课单价计薪");
 }
 
 // ------------------------------------------------------ 住房补贴与考核标准
@@ -357,7 +628,7 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
 
   // 最低工资标准可调，且调整后即时兜底
   const minWageRules = JSON.parse(JSON.stringify(DEFAULT_PAYROLL_RULES));
-  minWageRules.teacherSalaryScheme.probationRule.minimumWage = 9999;
+  minWageRules.teacherSalaryScheme.minimumWage = 9999;
   const probation = calculateDedicatedTeacherPayroll({
     teacher: { ...teacher, salaryProfile: { qualificationGrade: "first", probationRate: 0.8, roles: {} } },
     lessons: [],
@@ -394,12 +665,18 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   const schoolCustom = {
     version: "fuyuan-policy-2026-09",
     assessmentSalary: { high: 1600 },
-    probationRule: { minimumWage: 2800 },
+    minimumWage: 2800,
   };
   const kept = normalizePayrollRules({ teacherSalaryScheme: schoolCustom }).teacherSalaryScheme;
   assert.equal(kept.assessmentSalary.high, 1600, "同版本下学校自定义标准应保留");
-  assert.equal(kept.probationRule.minimumWage, 2800, "同版本下最低工资自定义值应保留");
+  assert.equal(kept.minimumWage, 2800, "同版本下最低工资自定义值应保留");
   assert.equal(kept.assessmentSalary.middle, 3280, "未自定义项仍取制度默认值");
+
+  const migratedAnnualConfig = normalizePayrollRules({
+    teacherSalaryScheme: { version: "fuyuan-policy-2026-09", minimumWageByYear: { "2026": 2750 } },
+  }).teacherSalaryScheme;
+  assert.equal(migratedAnnualConfig.minimumWage, 2750, "旧年度配置应迁移为唯一最低工资标准");
+  assert.equal(migratedAnnualConfig.minimumWageByYear, undefined, "迁移后不应保留年度最低工资配置");
 }
 
 // ------------------------------------------------ 校龄由入职日期自动推算（比到月日）
@@ -509,29 +786,25 @@ console.log("salary policy 2026 checks passed");
   assert.equal(amountOf(legacy, "学历补贴"), 500);
 }
 
-// --------------------------------- 月度考核未核定金额时按等级系数浮动
+// --------------------------------------- 考核分数支持小数与 0 分
 {
   const teacher = baseTeacher();
-  // amount 为 null/空表示"未核定金额"，应走等级系数而非当成 0 元
-  [null, undefined, ""].forEach((emptyValue) => {
-    const result = runPayroll({
-      teacher,
-      profile: { assessmentBand: "high" },
-      monthlyAssessment: { grade: "excellent", amount: emptyValue },
-    });
-    assert.equal(amountOf(result, "考核工资"), 1776, `amount=${JSON.stringify(emptyValue)} 时应按系数浮动`);
+  const decimal = runPayroll({
+    teacher,
+    profile: { assessmentBand: "high" },
+    monthlyAssessment: { score: 85.5 },
   });
-  // 显式核定 0 元仍然生效（如考核不合格全额扣发）
+  assert.equal(amountOf(decimal, "考核工资"), 1265.4, "85.5 分应精确按 85.5% 计发");
   const zero = runPayroll({
     teacher,
     profile: { assessmentBand: "high" },
-    monthlyAssessment: { grade: "unqualified", amount: 0 },
+    monthlyAssessment: { score: 0 },
   });
-  assert.equal(amountOf(zero, "考核工资"), null, "核定 0 元时该项金额为 0，不出现在明细中");
+  assert.equal(amountOf(zero, "考核工资"), null, "0 分时考核工资为 0，不出现在明细中");
 }
 
 // ---------------------------------------------------------------------------
-// 三个学部的正课标签都要对
+// 四个学部的正课标签都要对
 //
 // 原先用 `stageId === "middle" ? "初中" : "小学"`，只分了两档，高中落到 else
 // 显示成「小学正课」。金额是对的，但高中老师打开工资条看到"小学正课"，
@@ -545,8 +818,9 @@ console.log("salary policy 2026 checks passed");
   );
   assert.match(payrollSource, /PAYROLL_STAGE_LABELS/, "应使用完整的学部标签表");
   const table = /const PAYROLL_STAGE_LABELS = \{([^}]*)\}/.exec(payrollSource)?.[1] || "";
-  ["primary", "middle", "high"].forEach((stage) => {
+  ["kindergarten", "primary", "middle", "high"].forEach((stage) => {
     assert.ok(table.includes(stage), `学部标签表应覆盖 ${stage}`);
   });
+  assert.ok(table.includes("幼儿园"), "新增幼儿园后必须有对应课时工资标签");
   assert.ok(table.includes("高中"), "必须有高中，这正是原先漏掉的那一档");
 }

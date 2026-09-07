@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { currentTerm, ensureEditableTerm, weekStartForDivision } from "./terms.js";
+import { currentTerm, ensureEditableTerm, termCalendarRangeForStage, weekStartForDivision } from "./terms.js";
 import { teacherEligibility } from "./hr.js";
-import { updateTeacherAssignment } from "./storage.js";
+import { invalidateOpenPayrollDetailsForTeacher, updateTeacherAssignment } from "./storage.js";
+import { assertSchedulingAccess } from "./accessScope.js";
 
 const ORTOOLS_SOLVER_PATH = fileURLToPath(new URL("./solver/ortools_scheduler.py", import.meta.url));
 
@@ -47,6 +48,24 @@ const SUBJECT_DEFAULT_ROOM_TYPES = {
 };
 
 const DIVISIONS = [
+  {
+    id: "kindergarten",
+    stageId: "kindergarten",
+    name: "幼儿园",
+    shortName: "幼儿园",
+    weekStart: "2026-06-15",
+    grades: [
+      { id: "kindergarten-g1", name: "小班", grade: 1 },
+      { id: "kindergarten-g2", name: "中班", grade: 2 },
+      { id: "kindergarten-g3", name: "大班", grade: 3 },
+    ],
+    subjectRules: [
+      { subjectId: "chinese", weeklyLessons: 5 },
+      { subjectId: "math", weeklyLessons: 3 },
+      { subjectId: "english", weeklyLessons: 2 },
+      { subjectId: "pe", weeklyLessons: 3, maxPerClassPerDay: 1, allowConsecutive: false, preferredDayPart: "afternoon" },
+    ],
+  },
   {
     id: "elementary",
     stageId: "primary",
@@ -178,7 +197,7 @@ function pushScheduleNotification(db, options = {}, actorAccount = null) {
 }
 
 function divisionById(divisionId = "elementary") {
-  return DIVISIONS.find((division) => division.id === divisionId) || DIVISIONS[0];
+  return DIVISIONS.find((division) => division.id === divisionId) || DIVISIONS.find((division) => division.id === "elementary") || DIVISIONS[0];
 }
 
 function gradeById(division, gradeId = "") {
@@ -270,6 +289,20 @@ function periodTypeLabel(type = "regular") {
   return "正课";
 }
 
+function nonRegularPeriodDefaultContent(type = "selfStudy") {
+  if (type === "activity") return "活动";
+  if (type === "evening") return "晚自习";
+  return "自习";
+}
+
+function isRegularSchedulePeriod(period) {
+  return period?.type === "regular" && period.active !== false;
+}
+
+function regularSchedulePeriods(periods = []) {
+  return (periods || []).filter(isRegularSchedulePeriod);
+}
+
 function periodDayPartFromTime(startTime = "") {
   const minutes = timeToMinutes(startTime);
   if (minutes === null) return "afternoon";
@@ -323,6 +356,8 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       type,
       typeName: periodTypeLabel(type),
       active: period.active !== false,
+      content: type === "regular" ? "" : String(period.content || "").trim().slice(0, 80),
+      responsibleTeacherId: type === "regular" ? "" : String(period.responsibleTeacherId || "").trim(),
     });
   });
 
@@ -361,6 +396,8 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       typeName: period.typeName,
       dayPart: periodDayPartFromTime(period.startTime),
       active: period.active !== false,
+      content: period.type === "regular" ? "" : period.content || "",
+      responsibleTeacherId: period.type === "regular" ? "" : period.responsibleTeacherId || "",
     };
   });
 }
@@ -372,7 +409,17 @@ function schedulingPeriods(db, division, grade, term) {
     (row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade),
     (row) => `${row.stageId}:${row.grade}`,
   ).find((row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade));
-  return normalizeSchedulePeriods(template?.periods || []);
+  return normalizeSchedulePeriods(template?.periods || []).map((period) => {
+    const responsibleTeacher = (db.teachers || []).find(
+      (teacher) => teacher.id === period.responsibleTeacherId && teacher.status === "active",
+    );
+    return {
+      ...period,
+      content: period.type === "regular" ? "" : period.content || "",
+      responsibleTeacherId: period.type === "regular" ? "" : responsibleTeacher?.id || "",
+      responsibleTeacherName: responsibleTeacher?.name || "",
+    };
+  });
 }
 
 function findScopedRoom(db, roomId, term) {
@@ -474,6 +521,18 @@ function schedulingTeacherRows(db, subjects) {
   );
   return db.teachers
     .filter((teacher) => teacherIds.has(teacher.id))
+    .map(publicSchedulingTeacher);
+}
+
+function schedulingNonRegularTeacherRows(db, division) {
+  return (db.teachers || [])
+    .filter(
+      (teacher) =>
+        teacher.status === "active" &&
+        teacher.stageId === division.stageId &&
+        teacherEligibility(db, teacher.id).inTeachingPool,
+    )
+    .sort((a, b) => String(a.employeeNo || a.id).localeCompare(String(b.employeeNo || b.id), "zh-CN"))
     .map(publicSchedulingTeacher);
 }
 
@@ -926,6 +985,9 @@ export function buildSchedulingConfig(db, options = {}) {
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
   const periods = schedulingPeriods(db, division, grade, term);
+  // 课程规则仍按作息表中的节次编号保存。这样即使第 3 节是自习、第 6 节仍是正课，
+  // “禁排第 6 节”之类的既有规则也不会在读取时被错误丢弃；真正的候选时段由
+  // schedulingSlots 统一筛成正课。
   const courseRules = schedulingCourseRules(db, division, grade, term, periods.length);
   const subjects = schedulingSubjects(db, division, grade, term, courseRules);
   const classes = schedulingClasses(db, division, grade, term);
@@ -934,20 +996,23 @@ export function buildSchedulingConfig(db, options = {}) {
   const teacherRules = publicTeacherScheduleRules(db, division, subjects, term);
   const scopedRooms = schedulingRooms(db, division, classes, term);
   const roomResourceTypes = roomResourceTypesForScope(db, term, division, scopedRooms);
+  // 校历是学部级数据：同一个“上学期”在不同学部可以有不同的开、结课日。
+  // termId 仍是排课数据主键，因此前端继续只选择教学学期，寒暑假永不成为选项。
+  const calendarRange = termCalendarRangeForStage(db, term, division.stageId);
 
   return {
     divisionId: division.id,
     divisionName: division.name,
     termId: term.id,
     termName: term.name,
-    termStartDate: term.startDate,
-    termEndDate: term.endDate,
+    termStartDate: calendarRange.startDate,
+    termEndDate: calendarRange.endDate,
     termStatus: term.status,
     stageId: division.stageId,
     gradeId: grade.id,
     gradeName: grade.name,
     grade: grade.grade,
-    weekStart: String(options.weekStart || "").trim() || weekStartForDivision(term, division) || division.weekStart || "2026-06-15",
+    weekStart: String(options.weekStart || "").trim() || weekStartForDivision(term, division, db) || division.weekStart || "2026-06-15",
     classCount: classes.length,
     classStructure,
     roomResourceCounts: specialRoomCounts(scopedRooms),
@@ -969,6 +1034,7 @@ export function buildSchedulingConfig(db, options = {}) {
     changeRequests: publicScheduleChangeRequests(db, division, grade, term),
     subjects,
     teachers: schedulingTeacherRows(db, subjects),
+    nonRegularTeachers: schedulingNonRegularTeacherRows(db, division),
     divisions: DIVISIONS.map((item) => ({
       id: item.id,
       name: item.name,
@@ -1098,6 +1164,7 @@ function buildClassAndRoomRows(division, grade, options = {}) {
 }
 
 export function updateRoomResources(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1190,6 +1257,7 @@ function pruneTeacherAssignmentsForClassIds(db, division, grade, validClassIds, 
 }
 
 export function updateGradeClassStructure(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1260,6 +1328,7 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
 }
 
 export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1267,6 +1336,20 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
   const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "修改作息时间");
   const periods = normalizeSchedulePeriods(options.periods || [], { strict: true });
+  if (!regularSchedulePeriods(periods).length) {
+    const error = new Error("请至少保留 1 个正课节次用于自动排课");
+    error.statusCode = 400;
+    throw error;
+  }
+  const responsibleTeacherIds = new Set(schedulingNonRegularTeacherRows(db, division).map((teacher) => teacher.id));
+  periods.forEach((period) => {
+    if (period.type === "regular" || !period.responsibleTeacherId) return;
+    if (!responsibleTeacherIds.has(period.responsibleTeacherId)) {
+      const error = new Error("请选择当前学部在职老师作为非正课负责人");
+      error.statusCode = 400;
+      throw error;
+    }
+  });
   const now = new Date().toISOString();
 
   db.schedulePeriodTemplates = (db.schedulePeriodTemplates || []).filter(
@@ -1315,6 +1398,7 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
 }
 
 export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1431,6 +1515,7 @@ function upsertCourseRule(db, division, grade, subjectId, options = {}, actorAcc
 }
 
 export function createGradeCourse(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1506,6 +1591,7 @@ export function createGradeCourse(db, options = {}, actorAccount = null) {
 }
 
 export function deleteGradeCourse(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1579,6 +1665,7 @@ function normalizedConstraintNumbers(values, min, max) {
 }
 
 export function createScheduleConstraint(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const { division, grade } = schedulingScopeFromStageGrade(db, stageId, options.grade);
@@ -1635,6 +1722,7 @@ export function createScheduleConstraint(db, options = {}, actorAccount = null) 
 }
 
 export function deleteScheduleConstraint(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const constraintId = String(options.constraintId || "").trim();
   const term = currentTerm(db, options.termId);
@@ -1697,6 +1785,7 @@ function normalizeTeacherScheduleRuleInput(options = {}, maxPeriodCount = PERIOD
 }
 
 export function updateTeacherScheduleRule(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   ensureSchedulingStore(db);
   const stageId = String(options.stageId || "").trim();
   const division = divisionByStageId(stageId);
@@ -1765,7 +1854,7 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
 
 function schedulingSlots(config) {
   return Array.from({ length: 5 }, (_, dayIndex) => addDays(config.weekStart, dayIndex)).flatMap((date, dayIndex) =>
-    config.periods.map((period) => ({
+    regularSchedulePeriods(config.periods).map((period) => ({
       ...period,
       date,
       dayIndex,
@@ -1872,6 +1961,7 @@ function plannedTeacherLoadForTerm(db, term, options = {}) {
 // - 每次把班级分给“剩余容量足够且当前负载最小”的老师，超容量时仍分配但给出提醒；
 // - overwrite=false 时只补空缺格子，保留行政已手工指定的任课老师。
 export function autoAssignGradeTeachers(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "维护");
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "自动分配任课老师");
   const term = currentTerm(db, config.termId);
@@ -2369,13 +2459,16 @@ function draftAssignmentAsExternal(draft, assignment) {
   };
 }
 
-function globalTeacherBusyAssignments(db, config) {
+function globalTeacherBusyAssignments(db, config, { excludeLessonIds = [] } = {}) {
+  const excluded = new Set((excludeLessonIds || []).map(String));
   const weekDates = new Set(weekDateKeys(config));
   const publishedAssignments = (db.lessonInstances || [])
+    .filter((lesson) => !excluded.has(String(lesson.id)))
     .filter((lesson) => termScopeMatches(config, lesson))
     .filter((lesson) => weekDates.has(lesson.date))
     .filter((lesson) => !currentScope(config, lesson))
     .filter((lesson) => lesson.status !== "cancelled")
+    .filter((lesson) => lesson.scheduleImpact !== false)
     .map((lesson) => lessonAsExternalAssignment(db, lesson))
     .filter(Boolean);
 
@@ -4251,6 +4344,7 @@ export function findScheduleDraft(db, options = {}) {
 }
 
 export function generateScheduleDraft(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "生成");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "生成排课");
@@ -4345,6 +4439,48 @@ function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
     grade: draft.grade,
     period: assignment.period,
   };
+}
+
+function nonRegularLessonsFromPeriods(config, draft, scheduleVersionId = "") {
+  const className = `${draft.gradeName}全体班级`;
+  return (config.periods || [])
+    .filter((period) => period.type !== "regular" && period.active !== false)
+    .flatMap((period) =>
+      weekDateKeys(config).map((date, dayIndex) => ({
+        id: `NONREG-${draft.id}-${date}-${period.period}`,
+        teacherId: period.responsibleTeacherId || "",
+        responsibleTeacherId: period.responsibleTeacherId || "",
+        responsibleTeacherName: period.responsibleTeacherName || "",
+        classId: "",
+        className,
+        subjectId: "",
+        subjectName: period.content || nonRegularPeriodDefaultContent(period.type),
+        durationMinutes:
+          Math.max((timeToMinutes(period.endTime) || 0) - (timeToMinutes(period.startTime) || 0), 0) ||
+          DEFAULT_LESSON_DURATION_MINUTES,
+        roomId: "",
+        room: "",
+        date,
+        time: period.time,
+        type: period.type,
+        units: 0,
+        status: "scheduled",
+        source: "backend-nonregular",
+        nonPayable: true,
+        scheduleImpact: false,
+        nonRegular: true,
+        schedulingDraftId: draft.id,
+        scheduleVersionId,
+        termId: draft.termId,
+        termName: draft.termName,
+        divisionId: draft.divisionId,
+        gradeId: draft.gradeId,
+        stageId: draft.stageId,
+        grade: draft.grade,
+        period: period.period,
+        dayIndex,
+      })),
+    );
 }
 
 function assignmentVersionSignature(assignment) {
@@ -4473,6 +4609,7 @@ function createPublishedScheduleVersion(db, config, draft, lessons, actorAccount
 }
 
 export function publishScheduleDraft(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "发布");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "发布课表");
@@ -4521,12 +4658,14 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
 
   const now = formatDateTimeMinute();
   const scheduleVersionId = `SVER-${draftKey(config)}-${Date.now()}`;
-  const lessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
+  const regularLessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
+  const nonRegularLessons = nonRegularLessonsFromPeriods(config, draft, scheduleVersionId);
+  const lessons = [...regularLessons, ...nonRegularLessons];
   db.lessonInstances = db.lessonInstances
     .filter(
       (lesson) =>
         !(
-          lesson.source === "backend-scheduling" &&
+          ["backend-scheduling", "backend-nonregular"].includes(lesson.source) &&
           termScopeMatches(config, lesson) &&
           lesson.divisionId === draft.divisionId &&
           lesson.gradeId === draft.gradeId &&
@@ -4548,7 +4687,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   pushScheduleNotification(
     db,
     {
-      teacherIds: lessons.map((lesson) => lesson.teacherId),
+      teacherIds: regularLessons.map((lesson) => lesson.teacherId),
       title: `${draft.termName}${draft.divisionName}${draft.gradeName}课表已发布`,
       text: `${draft.termName}自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
       level: "info",
@@ -4575,6 +4714,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
 }
 
 export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "回滚");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "回滚课表");
@@ -4591,7 +4731,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   const now = formatDateTimeMinute();
   const lessons = clone(targetVersion.lessons || []).map((lesson) => ({
     ...lesson,
-    source: "backend-scheduling",
+    source: lesson.source === "backend-nonregular" ? "backend-nonregular" : "backend-scheduling",
     termId: targetVersion.termId,
     termName: targetVersion.termName,
     scheduleVersionId: targetVersion.id,
@@ -4601,7 +4741,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
     .filter(
       (lesson) =>
         !(
-          lesson.source === "backend-scheduling" &&
+          ["backend-scheduling", "backend-nonregular"].includes(lesson.source) &&
           termScopeMatches(config, lesson) &&
           lesson.divisionId === targetVersion.divisionId &&
           lesson.gradeId === targetVersion.gradeId &&
@@ -4663,7 +4803,7 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   pushScheduleNotification(
     db,
     {
-      teacherIds: lessons.map((lesson) => lesson.teacherId),
+      teacherIds: lessons.filter((lesson) => !lesson.nonPayable).map((lesson) => lesson.teacherId),
       title: `${targetVersion.termName || config.termName}${targetVersion.divisionName}${targetVersion.gradeName}课表已回滚`,
       text: `已回滚到 V${targetVersion.versionNumber}，老师端课表、签入签出和薪资工作量将按该版本执行。`,
       level: "warning",
@@ -4719,7 +4859,8 @@ function findPublishedLessonForChange(db, draft, assignmentId) {
   );
 }
 
-function validatePublishedLessonChange(db, config, lesson, next) {
+function validatePublishedLessonChange(db, config, lesson, next, { excludeLessonIds = [] } = {}) {
+  const excluded = new Set((excludeLessonIds || []).map(String));
   if (!lesson) {
     const error = new Error("课次不存在");
     error.statusCode = 404;
@@ -4757,6 +4898,11 @@ function validatePublishedLessonChange(db, config, lesson, next) {
     error.statusCode = 400;
     throw error;
   }
+  if (!isRegularSchedulePeriod(period)) {
+    const error = new Error("正课只能调整到正课节次");
+    error.statusCode = 400;
+    throw error;
+  }
   const room = roomById(config, next.roomId);
   if (!room) {
     const error = new Error("调课教室不在当前年级可用教室范围内");
@@ -4783,7 +4929,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
 
   const weekDates = new Set(weekDateKeys(config));
   const currentScopeLessons = (db.lessonInstances || [])
-    .filter((item) => item.id !== lesson.id)
+    .filter((item) => item.id !== lesson.id && !excluded.has(String(item.id)))
     .filter((item) => item.source === "backend-scheduling")
     .filter((item) => termScopeMatches(config, item))
     .filter((item) => item.divisionId === config.divisionId && item.gradeId === config.gradeId)
@@ -4821,7 +4967,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
   }
   const teacherDayItems = [
     ...currentScopeLessons,
-    ...globalTeacherBusyAssignments(db, config),
+    ...globalTeacherBusyAssignments(db, config, { excludeLessonIds }),
   ].filter((item) => item.teacherId === next.teacherId && item.date === next.date);
   const teacherRuleViolation = teacherHardRuleViolation(
     config,
@@ -4836,7 +4982,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
     throw error;
   }
   const conflicts = validateScheduleConflicts([...currentScopeLessons, proposed], {
-    externalAssignments: globalTeacherBusyAssignments(db, config),
+    externalAssignments: globalTeacherBusyAssignments(db, config, { excludeLessonIds }),
     config,
   });
   if (conflicts.length) {
@@ -4850,6 +4996,7 @@ function validatePublishedLessonChange(db, config, lesson, next) {
 }
 
 export function createScheduleChangeRequest(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "调整");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "发起调课");
@@ -4935,6 +5082,7 @@ export function createScheduleChangeRequest(db, options = {}, actorAccount = nul
 }
 
 export function approveScheduleChangeRequest(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "审批");
   ensureSchedulingStore(db);
   const requestId = String(options.requestId || "").trim();
   const request = (db.scheduleChangeRequests || []).find((item) => item.id === requestId);
@@ -5021,7 +5169,213 @@ export function approveScheduleChangeRequest(db, options = {}, actorAccount = nu
   return { config: buildSchedulingConfig(db, { termId: request.termId, divisionId: request.divisionId, gradeId: request.gradeId }), draft, request, lesson };
 }
 
+function isPublishedLessonAvailableForSwap(lesson, publishedDraftIds) {
+  return Boolean(
+    lesson &&
+      lesson.source === "backend-scheduling" &&
+      publishedDraftIds.has(lesson.schedulingDraftId) &&
+      lesson.status !== "cancelled" &&
+      lesson.type !== "substitute",
+  );
+}
+
+function lessonSwapOption(db, lesson) {
+  const period = lesson.period ? `第 ${lesson.period} 节` : lesson.time || "未设节次";
+  const teacherName = lesson.teacherName || teacherById(db, lesson.teacherId)?.name || "未命名老师";
+  return {
+    lessonId: lesson.id,
+    teacherId: lesson.teacherId,
+    teacherName,
+    termId: lesson.termId,
+    divisionId: lesson.divisionId,
+    stageId: lesson.stageId,
+    gradeId: lesson.gradeId,
+    date: lesson.date,
+    time: lesson.time,
+    period: lesson.period,
+    className: lesson.className || "未设班级",
+    subjectName: lesson.subjectName || "未设科目",
+    label: `${teacherName} · ${lesson.date || "未设日期"} · ${period} · ${lesson.className || "未设班级"} · ${lesson.subjectName || "未设科目"}`,
+  };
+}
+
+// 教师发起调课时，只能从自己已发布的课中选出一节，再从同学部、同学期的
+// 其他教师已发布课程中选出协商好的对应课次。课程 ID 而不是手填文本才是审批后
+// 可以安全落到课表的依据。
+export function listLessonSwapOptions(db, teacherId) {
+  ensureSchedulingStore(db);
+  const normalizedTeacherId = String(teacherId || "").trim();
+  if (!normalizedTeacherId) {
+    const error = new Error("当前账号未绑定教师档案，不能发起调课申请");
+    error.statusCode = 400;
+    throw error;
+  }
+  const publishedDraftIds = new Set(
+    (db.scheduleDrafts || []).filter((draft) => draft.status === "published").map((draft) => draft.id),
+  );
+  const lessons = (db.lessonInstances || []).filter((lesson) => isPublishedLessonAvailableForSwap(lesson, publishedDraftIds));
+  const sourceLessons = lessons.filter((lesson) => lesson.teacherId === normalizedTeacherId);
+  const allowedScopes = new Set(sourceLessons.map((lesson) => `${lesson.termId}::${lesson.divisionId}`));
+  const counterpartLessons = lessons.filter(
+    (lesson) => lesson.teacherId !== normalizedTeacherId && allowedScopes.has(`${lesson.termId}::${lesson.divisionId}`),
+  );
+  const sortByTime = (a, b) =>
+    String(a.date || "").localeCompare(String(b.date || "")) ||
+    Number(a.period || 0) - Number(b.period || 0) ||
+    String(a.className || "").localeCompare(String(b.className || ""), "zh-Hans-CN");
+  return {
+    sourceLessons: sourceLessons.sort(sortByTime).map((lesson) => lessonSwapOption(db, lesson)),
+    counterpartLessons: counterpartLessons.sort(sortByTime).map((lesson) => lessonSwapOption(db, lesson)),
+  };
+}
+
+function updateLessonAfterApprovedSwap(db, lesson, target, validated, requestId, now, actorAccount) {
+  Object.assign(lesson, {
+    date: target.date,
+    time: validated.period.time,
+    period: validated.period.period,
+    roomId: validated.room.id,
+    room: validated.room.name,
+    roomType: validated.room.roomType || "homeroom",
+    oaRequestId: requestId,
+    changedAt: now,
+    changedByAccountId: actorAccount?.id || "",
+  });
+  const draft = (db.scheduleDrafts || []).find((item) => item.id === lesson.schedulingDraftId);
+  const assignment = (draft?.assignments || []).find((item) => item.id === lesson.scheduleAssignmentId);
+  if (assignment) {
+    Object.assign(assignment, {
+      date: target.date,
+      dayIndex: validated.dayIndex,
+      period: validated.period.period,
+      time: validated.period.time,
+      roomId: validated.room.id,
+      room: validated.room.name,
+      roomType: validated.room.roomType || "homeroom",
+      oaRequestId: requestId,
+      changedAt: formatDateTimeMinute(),
+    });
+  }
+}
+
+// 审批中心调课的真正落地动作：双方课程互换时间，老师、班级、科目和各自教室不变。
+// 先同时校验两节课，再开始写入，任何一边冲突或锁薪都不会留下半次调课。
+export function applyApprovedLessonSwap(db, payload = {}, actorAccount = null) {
+  ensureSchedulingStore(db);
+  const formData = payload.formData || {};
+  const source = (db.lessonInstances || []).find((lesson) => lesson.id === String(formData.sourceLessonId || ""));
+  const counterpart = (db.lessonInstances || []).find((lesson) => lesson.id === String(formData.counterpartLessonId || ""));
+  const applicant = (db.accounts || []).find((account) => account.id === payload.applicantAccountId);
+  const applicantTeacherId = String(applicant?.teacherId || "").trim();
+  if (!source || !counterpart) {
+    const error = new Error("待调课程已不存在，请撤回后重新发起申请");
+    error.statusCode = 409;
+    throw error;
+  }
+  if (source.id === counterpart.id || source.teacherId === counterpart.teacherId) {
+    const error = new Error("调课必须选择两位不同老师的两节课程");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (source.teacherId !== applicantTeacherId) {
+    const error = new Error("申请人只能调整自己承担的课程");
+    error.statusCode = 403;
+    throw error;
+  }
+  if (source.termId !== counterpart.termId || source.divisionId !== counterpart.divisionId) {
+    const error = new Error("两节待交换课程必须属于同一学期、同一学部");
+    error.statusCode = 400;
+    throw error;
+  }
+  const publishedDraftIds = new Set(
+    (db.scheduleDrafts || []).filter((draft) => draft.status === "published").map((draft) => draft.id),
+  );
+  if (!isPublishedLessonAvailableForSwap(source, publishedDraftIds) || !isPublishedLessonAvailableForSwap(counterpart, publishedDraftIds)) {
+    const error = new Error("待调课程已取消、已改为代课或不再属于已发布课表，请重新发起申请");
+    error.statusCode = 409;
+    throw error;
+  }
+
+  const sourceScope = { termId: source.termId, divisionId: source.divisionId, gradeId: source.gradeId, stageId: source.stageId };
+  const counterpartScope = {
+    termId: counterpart.termId,
+    divisionId: counterpart.divisionId,
+    gradeId: counterpart.gradeId,
+    stageId: counterpart.stageId,
+  };
+  assertSchedulingAccess(db, actorAccount, sourceScope, "审批");
+  assertSchedulingAccess(db, actorAccount, counterpartScope, "审批");
+  const sourceConfig = buildSchedulingConfig(db, sourceScope);
+  const counterpartConfig = buildSchedulingConfig(db, counterpartScope);
+  assertEditableScheduleTerm(sourceConfig, "审批调课");
+  assertEditableScheduleTerm(counterpartConfig, "审批调课");
+
+  const excludedLessonIds = [source.id, counterpart.id];
+  // 记录换课前的月份：跨月调课会改变双方工资归属月，尚未锁定的明细必须作废重算。
+  const sourceOriginalDate = source.date;
+  const counterpartOriginalDate = counterpart.date;
+  const sourceTarget = {
+    teacherId: source.teacherId,
+    date: counterpart.date,
+    period: periodForLesson(counterpart),
+    roomId: source.roomId,
+  };
+  const counterpartTarget = {
+    teacherId: counterpart.teacherId,
+    date: source.date,
+    period: periodForLesson(source),
+    roomId: counterpart.roomId,
+  };
+  const sourceValidated = validatePublishedLessonChange(db, sourceConfig, source, sourceTarget, { excludeLessonIds: excludedLessonIds });
+  const counterpartValidated = validatePublishedLessonChange(db, counterpartConfig, counterpart, counterpartTarget, { excludeLessonIds: excludedLessonIds });
+
+  const now = new Date().toISOString();
+  updateLessonAfterApprovedSwap(db, source, sourceTarget, sourceValidated, payload.requestId, now, actorAccount);
+  updateLessonAfterApprovedSwap(db, counterpart, counterpartTarget, counterpartValidated, payload.requestId, now, actorAccount);
+  const affectedPayrolls = new Map();
+  [
+    [source.teacherId, sourceOriginalDate],
+    [source.teacherId, source.date],
+    [counterpart.teacherId, counterpartOriginalDate],
+    [counterpart.teacherId, counterpart.date],
+  ].forEach(([teacherId, date]) => {
+    const month = String(date || "").slice(0, 7);
+    if (teacherId && /^\d{4}-\d{2}$/.test(month)) affectedPayrolls.set(`${teacherId}:${month}`, { teacherId, month });
+  });
+  affectedPayrolls.forEach(({ teacherId, month }) => invalidateOpenPayrollDetailsForTeacher(db, teacherId, month));
+  pushScheduleNotification(
+    db,
+    {
+      teacherIds: [source.teacherId, counterpart.teacherId],
+      title: "调课审批已通过",
+      text: `已互换 ${source.className || ""}${source.subjectName || ""} 与 ${counterpart.className || ""}${counterpart.subjectName || ""} 的上课时间，请查看最新课表。`,
+      level: "warning",
+    },
+    actorAccount,
+  );
+  db.meta.updatedAt = now;
+  db.auditLogs.push({
+    id: `AUDIT-${Date.now()}`,
+    action: "oa_lesson_swap_apply",
+    actorAccountId: actorAccount?.id || "",
+    actorName: actorAccount?.name || payload.actorName || "",
+    requestId: payload.requestId || "",
+    sourceLessonId: source.id,
+    counterpartLessonId: counterpart.id,
+    termId: source.termId,
+    termName: sourceConfig.termName,
+    divisionId: source.divisionId,
+    createdAt: now,
+  });
+  return {
+    type: "lesson_swap",
+    source: lessonSwapOption(db, source),
+    counterpart: lessonSwapOption(db, counterpart),
+  };
+}
+
 export function adjustScheduleAssignment(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "调整");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "调整课表");
@@ -5065,6 +5419,11 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   const period = config.periods.find((item) => item.period === nextPeriod);
   if (!period) {
     const error = new Error("调整节次不在当前排课时段内");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!isRegularSchedulePeriod(period)) {
+    const error = new Error("正课只能调整到正课节次");
     error.statusCode = 400;
     throw error;
   }
@@ -5185,6 +5544,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
 }
 
 export function setScheduleAssignmentLock(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "锁定");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "修改课节锁定状态");
@@ -5291,6 +5651,7 @@ function restoreTemporaryReplanLocks(assignments = [], originalAssignments = [])
 }
 
 export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAccount = null) {
+  assertSchedulingAccess(db, actorAccount, options, "重排");
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "重排课程");
@@ -5389,6 +5750,7 @@ export function listTeacherLessonsInRange(db, teacherId, startDate, endDate) {
       (lesson) =>
         lesson.teacherId === teacherId &&
         lesson.source === "backend-scheduling" &&
+        lesson.nonPayable !== true &&
         lesson.date >= from &&
         lesson.date <= to,
     )
@@ -5487,10 +5849,22 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
     lessonInstances: db.lessonInstances || [],
     scheduleDrafts: db.scheduleDrafts || [],
     scheduleChangeRequests: db.scheduleChangeRequests || [],
+    notifications: db.notifications || [],
+    auditLogs: db.auditLogs || [],
+    meta: db.meta || {},
+    payrollDetails: db.payrollDetails || [],
   });
 
   const applied = [];
   const cancelled = [];
+  // 课表被改动后，相关教师已生成但尚未锁定的工资明细必须重新生成；
+  // 否则外出代课虽已生效，工资仍会沿用变更前的课表。
+  const affectedPayrolls = new Map();
+  const markPayrollAffected = (teacherId, date) => {
+    if (!teacherId || !date) return;
+    const month = monthKey(date);
+    affectedPayrolls.set(`${teacherId}::${month}`, { teacherId, month });
+  };
   try {
     list.forEach((item) => {
       const lesson = (db.lessonInstances || []).find((entry) => entry.id === item.lessonId);
@@ -5511,7 +5885,9 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
         // 取消课次：走请假停课，课次标记取消不再计薪，不产生代课记录
         lesson.status = "cancelled";
         lesson.cancelledAt = new Date().toISOString();
-        lesson.cancelReason = String(item.reason || "教师请假，课程取消");
+        lesson.cancelReason = String(
+          item.reason || (item.arrangementContext === "outbound" ? "教师外出，课程取消" : "教师请假，课程取消"),
+        );
         cancelled.push({
           lessonId: lesson.id,
           date: lesson.date,
@@ -5519,6 +5895,7 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
           className: lesson.className,
           subjectName: lesson.subjectName,
         });
+        markPayrollAffected(lesson.teacherId, lesson.date);
         return;
       }
 
@@ -5528,6 +5905,10 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
           statusCode: 400,
         });
       }
+      const originalTeacherId = lesson.teacherId;
+      const originalTeacherName = lesson.teacherName || teacherById(db, originalTeacherId)?.name || originalTeacherId;
+      const originalLessonType = lesson.type || "regular";
+      const preserveOriginalLessonPay = Boolean(item.preserveOriginalLessonPay);
       // 复用调课引擎：createScheduleChangeRequest 会做全部校验，approve 落到课表
       const { request } = createScheduleChangeRequest(
         db,
@@ -5540,6 +5921,24 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
         actorAccount,
       );
       approveScheduleChangeRequest(db, { ...scope, requestId: request.id }, actorAccount);
+      // 代课老师应按“代课／节”而不是原正课单价计薪。外出申请还要给原任课老师
+      // 保留一条正常课时的计薪投影；请假则不保留，原老师自然不再计该课。
+      lesson.type = "substitute";
+      lesson.substituteForTeacherId = originalTeacherId;
+      lesson.substituteContext = String(item.arrangementContext || "leave");
+      if (preserveOriginalLessonPay) {
+        lesson.outboundOriginalTeacherId = originalTeacherId;
+        lesson.outboundOriginalTeacherName = originalTeacherName;
+        lesson.outboundOriginalLessonType = originalLessonType;
+        lesson.outboundSubstituteTeacherId = substituteTeacherId;
+      } else {
+        delete lesson.outboundOriginalTeacherId;
+        delete lesson.outboundOriginalTeacherName;
+        delete lesson.outboundOriginalLessonType;
+        delete lesson.outboundSubstituteTeacherId;
+      }
+      markPayrollAffected(originalTeacherId, lesson.date);
+      markPayrollAffected(substituteTeacherId, lesson.date);
       applied.push({
         lessonId: lesson.id,
         date: lesson.date,
@@ -5548,6 +5947,7 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
         subjectName: lesson.subjectName,
         substituteTeacherId,
         substituteTeacherName: request.to.teacherName,
+        preserveOriginalLessonPay,
       });
     });
   } catch (error) {
@@ -5556,8 +5956,16 @@ export function applySubstituteArrangements(db, arrangements = [], actorAccount 
     db.lessonInstances = restored.lessonInstances;
     db.scheduleDrafts = restored.scheduleDrafts;
     db.scheduleChangeRequests = restored.scheduleChangeRequests;
+    db.notifications = restored.notifications;
+    db.auditLogs = restored.auditLogs;
+    db.meta = restored.meta;
+    db.payrollDetails = restored.payrollDetails;
     throw error;
   }
+
+  affectedPayrolls.forEach(({ teacherId, month }) => {
+    invalidateOpenPayrollDetailsForTeacher(db, teacherId, month);
+  });
 
   return { applied, cancelled };
 }

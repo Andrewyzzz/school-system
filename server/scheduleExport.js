@@ -34,6 +34,13 @@ function teacherNameOf(db, teacherId) {
   return (db.teachers || []).find((t) => t.id === teacherId)?.name || teacherId || "";
 }
 
+function nonRegularTypeLabel(type = "") {
+  if (type === "selfStudy") return "自习";
+  if (type === "activity") return "活动";
+  if (type === "evening") return "晚自习";
+  return "非正课";
+}
+
 /**
  * 组装二维课表。
  * dimension: teacher | class | grade
@@ -57,8 +64,13 @@ export function buildScheduleGrid(db, options = {}) {
     lessons = lessons.filter((l) => l.teacherId === targetId);
     title = `${teacherNameOf(db, targetId)} 课表`;
   } else if (dimension === "class" && targetId) {
-    lessons = lessons.filter((l) => l.classId === targetId);
-    title = `${lessons[0]?.className || targetId} 课表`;
+    const schoolClass = (db.classes || []).find((item) => item.id === targetId);
+    lessons = lessons.filter(
+      (l) =>
+        l.classId === targetId ||
+        (l.nonRegular && schoolClass && l.stageId === schoolClass.stageId && Number(l.grade) === Number(schoolClass.grade)),
+    );
+    title = `${schoolClass?.name || lessons.find((l) => l.classId === targetId)?.className || targetId} 课表`;
   } else if (dimension === "grade" && targetId) {
     lessons = lessons.filter((l) => String(l.gradeId) === String(targetId));
     title = `${targetId} 年级课表`;
@@ -75,10 +87,13 @@ export function buildScheduleGrid(db, options = {}) {
     cells[p][w].push({
       subjectName: lesson.subjectName || "",
       className: lesson.className || "",
-      teacherName: teacherNameOf(db, lesson.teacherId),
+      teacherName: teacherNameOf(db, lesson.teacherId) || lesson.responsibleTeacherName || "",
       room: lesson.room || "",
       status: lesson.status || "",
       date: lesson.date,
+      type: lesson.type || "regular",
+      typeName: nonRegularTypeLabel(lesson.type),
+      nonRegular: Boolean(lesson.nonRegular),
     });
   });
 
@@ -107,10 +122,10 @@ function cellText(entries, dimension) {
   return entries
     .map((e) => {
       const mark = STATUS_MARK[e.status] || "";
-      const parts = [mark + e.subjectName];
+      const parts = [mark + (e.nonRegular ? `【${e.typeName}】${e.subjectName}` : e.subjectName)];
       // 按教师看课表时，关心的是"给哪个班上课"；按班级看时，关心的是"谁来上"
       if (dimension === "teacher") parts.push(e.className);
-      else parts.push(e.teacherName);
+      else if (e.teacherName) parts.push(e.nonRegular ? `负责人：${e.teacherName}` : e.teacherName);
       if (e.room) parts.push(e.room);
       return parts.filter(Boolean).join(" ");
     })

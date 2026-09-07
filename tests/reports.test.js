@@ -24,10 +24,11 @@ normalizeDatabase(db);
 const term = db.terms.find((t) => t.current) || db.terms[0];
 
 const byStage = (stage) => db.teachers.filter((t) => t.stageId === stage);
+const kindergarten = byStage("kindergarten")[0];
 const primary = byStage("primary")[0];
 const middle = byStage("middle")[0];
 const high = byStage("high")[0];
-assert.ok(primary && middle && high, "三个学部都应有教师，否则隔离测不出来");
+assert.ok(kindergarten && primary && middle && high, "四个学部都应有教师，否则隔离测不出来");
 
 // 2026-06-15 是周一
 const lesson = (over) => ({
@@ -59,6 +60,7 @@ db.lessonInstances = [
   // 一节待上课
   lesson({ teacherId: primary.id, stageId: "primary", date: "2026-06-16", status: "scheduled" }),
   // 其他学部各 1 节，用于验证范围隔离
+  lesson({ teacherId: kindergarten.id, stageId: "kindergarten", date: "2026-06-16" }),
   lesson({ teacherId: middle.id, stageId: "middle", date: "2026-06-16" }),
   lesson({ teacherId: high.id, stageId: "high", date: "2026-06-16" }),
   // 落在下一周，不应进本周报表
@@ -124,7 +126,9 @@ db.lessonInstances = [
 {
   const full = buildWeeklyWorkload(db, { termId: term.id, weekStart: "2026-06-15" });
   assert.ok(
-    full.rows.some((x) => x.teacherId === middle.id) && full.rows.some((x) => x.teacherId === high.id),
+    full.rows.some((x) => x.teacherId === kindergarten.id)
+      && full.rows.some((x) => x.teacherId === middle.id)
+      && full.rows.some((x) => x.teacherId === high.id),
     "不加范围时应能看到各学部",
   );
 

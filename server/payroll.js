@@ -37,11 +37,13 @@ export const DEFAULT_PAYROLL_RULES = {
     },
     // 试用期工资（制度第六条）：转正后工资的 80%，不低于深圳市最低工资标准
     // scope 待学校确认（澄清项 C6）：all=全部薪酬项，fixed=仅固定项与津贴
-    // minimumWage 需按深圳市当年公布标准维护，逐年调整时改此处即可
+    // 兼容旧账套的兜底值；实际统一从下方 minimumWage 读取。
     probationRule: {
       scope: "all",
-      minimumWage: 2520,
+      minimumWage: 2700,
     },
+    // 全校统一维护的最低工资标准。当前由学校确认是 2700 元/月。
+    minimumWage: 2700,
     // 校龄津贴（制度第二章各岗位方案「校龄津贴」条）。校龄取实数：进校满一年才算一年。
     //   专任教师、校医：3 年及以内 校龄×100；3 年以上 300+(校龄-3)×50；封顶 500 元/月
     //   生活教师：      校龄×50，封顶 300 元/月
@@ -65,22 +67,24 @@ export const DEFAULT_PAYROLL_RULES = {
       otherAdmin: 2500,
     },
     assessmentSalary: {
+      kindergarten: 3130,
       high: 1480,
       middle: 3280,
       primaryCoreHigh: 3430,
       primaryCoreLow: 3330,
       primarySpecial: 3130,
     },
-    // 考核工资浮动规则（制度：考核工资须"根据表现拉开差距"，合格全额、优秀上浮、不合格梯度扣减）
-    // 月度考核结果录入后按此系数浮动；未录入时按 default 全额发放，与原固定档行为一致
-    assessmentGrades: {
-      excellent: { label: "优秀", rate: 1.2 },
-      good: { label: "良好", rate: 1.1 },
-      default: { label: "合格", rate: 1 },
-      warning: { label: "基本合格", rate: 0.8 },
-      unqualified: { label: "不合格", rate: 0.6 },
-    },
+    // 月度考核由工资核算员按分数录入：100 分即全额，分数直接就是百分比系数。
+    // 例如 120 分 = 120%，80 分 = 80%。不再使用优秀/合格等等级档。
     stageLessonRules: {
+      kindergarten: {
+        regularBaseRate: 19,
+        subjectCoefficients: { chinese: 1.2, math: 1.2, english: 1.2, default: 1 },
+        nonRegular: 9.5,
+        makeup: 30,
+        weekend: 30,
+        substitute: 19,
+      },
       high: {
         regularBaseRate: 80,
         // 0726 制度未设超课时加价档，置 0 表示不启用（保留配置能力以备学校恢复）
@@ -224,6 +228,29 @@ export const DEFAULT_PAYROLL_RULES = {
         busDuty: 0,
       },
     },
+    // 生活教师独立工资方案（0726 制度第二章·三）。
+    // 人事档案只维护谁是生活教师、负责学生人数和兼岗；标准金额统一由总校财务在
+    // 薪资配置维护，避免把制度金额散落在个人档案里。
+    lifeTeacher: {
+      baseSalary: 2520,
+      workloadByStage: {
+        primary: { perStudent: 10, cap: 600 },
+        middle: { perStudent: 14, cap: 1000 },
+        high: { perStudent: 18, cap: 1260 },
+      },
+      assessmentByStage: {
+        primary: { lower: 810, upper: 850, night: 1130 },
+        middle: { standard: 1610, night: 1440 },
+        high: { standard: 1810, night: 1530 },
+      },
+      postAllowancesByStage: {
+        primary: { lifeManager: 600, buildingLead: 300, nightShiftLead: 200, primaryDayShift: 300 },
+        middle: { lifeManager: 2390, buildingLead: 800, nightShiftLead: 0, primaryDayShift: 0 },
+        high: { lifeManager: 1000, buildingLead: 600, nightShiftLead: 0, primaryDayShift: 0 },
+      },
+      transportAllowance: { short: 80, medium: 100, long: 120, extraLong: 180, phone: 250 },
+      housingAllowance: 1000,
+    },
   },
 };
 
@@ -268,10 +295,10 @@ const POLICY_OWNED_KEYS = [
   "seniorityAllowance",
   "housingAllowance",
   "assessmentSalary",
-  "assessmentGrades",
   "probationRule",
   "stageLessonRules",
   "postAllowances",
+  "lifeTeacher",
 ];
 
 export function upgradeSchemeToCurrentPolicy(defaultScheme, storedScheme = {}) {
@@ -296,6 +323,20 @@ export function normalizePayrollRules(rules = {}) {
     defaults.teacherSalaryScheme,
     rules?.teacherSalaryScheme || {},
   );
+  // 兼容刚上线过的按年度配置：切换为单一标准时，优先沿用 2026 年的值；
+  // 如果库里没有 2026 年，再取最早一条有效值。归一化后会移除旧字段。
+  const storedScheme = rules?.teacherSalaryScheme || {};
+  const legacyByYear = storedScheme.minimumWageByYear || merged.teacherSalaryScheme.minimumWageByYear || {};
+  const legacyValues = Object.entries(legacyByYear)
+    .filter(([year, amount]) => /^\d{4}$/.test(String(year)) && Number(amount) > 0)
+    .sort(([left], [right]) => Number(left) - Number(right));
+  const configuredMinimumWage = Number(storedScheme.minimumWage);
+  const legacyMinimumWage = Number(legacyByYear["2026"] ?? legacyValues[0]?.[1]);
+  const probationMinimumWage = Number(merged.teacherSalaryScheme.probationRule?.minimumWage);
+  const minimumWage = [configuredMinimumWage, legacyMinimumWage, probationMinimumWage, defaults.teacherSalaryScheme.minimumWage]
+    .find((value) => Number.isFinite(value) && value > 0);
+  merged.teacherSalaryScheme.minimumWage = roundMoney(minimumWage);
+  delete merged.teacherSalaryScheme.minimumWageByYear;
   [
     "baseSalary",
     "positionSalary",
@@ -362,6 +403,7 @@ export const QUALIFICATION_GRADE_LABELS = {
 };
 
 export const ASSESSMENT_BAND_LABELS = {
+  kindergarten: "幼儿园专任",
   high: "高中专任",
   middle: "初中专任",
   primaryCoreHigh: "小学高段核心",
@@ -372,6 +414,7 @@ export const ASSESSMENT_BAND_LABELS = {
 // 考核档与学段绑定：小学老师不可能是"高中专任"，制度上考核工资标准本就按学段划分。
 // 前端下拉按此收敛可选项，后端保存时按此校验，避免把老师配成跨学段的档位。
 export const ASSESSMENT_BANDS_BY_STAGE = {
+  kindergarten: ["kindergarten"],
   high: ["high"],
   middle: ["middle"],
   primary: ["primaryCoreHigh", "primaryCoreLow", "primarySpecial"],
@@ -552,6 +595,33 @@ export function defaultTeacherSalaryProfile(teacher = {}, seedIndex = null) {
   };
 }
 
+// 生活老师不承担课表中的学科课，但仍进入同一套人员、工资确认和薪资台账链路。
+// 这里的 roles 是人事事实，由人员档案维护；人数与班主任人数同样由人事确认后带入工资。
+export function defaultLifeTeacherSalaryProfile(teacher = {}, seedIndex = null) {
+  const index = seedIndex || numberFromTeacherId(teacher);
+  const stageId = String(teacher.stageId || "");
+  const kind = stageId === "primary" ? "lower" : "standard";
+  return {
+    version: SCHEME_VERSION,
+    salaryCategory: "lifeTeacher",
+    seniorityCategory: "lifeTeacher",
+    schoolYears: schoolYearsFromHiredAt(teacher.hiredAt, (index % 6) + 1),
+    probationRate: 1,
+    roles: {
+      lifeTeacherKind: kind,
+      lifeTeacherStudentCount: 0,
+      lifeManager: false,
+      buildingLead: false,
+      nightShiftLead: false,
+      primaryDayShift: false,
+      // 接送次数是当月工作量，由财务在工资档案的补充项中据实录入；此处只保留
+      // 人事侧的长期任命事实，避免把月度数据写进档案。
+    },
+    manualItems: [],
+    attendanceDeduction: 0,
+  };
+}
+
 export function ensureTeacherSalaryProfile(teacher, seedIndex = null) {
   if (!teacher) return false;
   const defaults = defaultTeacherSalaryProfile(teacher, seedIndex);
@@ -595,7 +665,7 @@ function rateFromGradeMap(map = {}, grade = null, fallback = 0) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback;
 }
 
-const PAYROLL_STAGE_LABELS = { primary: "小学", middle: "初中", high: "高中" };
+const PAYROLL_STAGE_LABELS = { kindergarten: "幼儿园", primary: "小学", middle: "初中", high: "高中" };
 
 function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable = false }) {
   const stageId = lesson.stageId || teacher.stageId;
@@ -696,23 +766,16 @@ function degreeAllowanceComponent(profile, scheme) {
   };
 }
 
-// 考核工资 = 岗位标准额 × 月度考核系数
-// 制度要求考核工资"根据表现拉开差距"；未录入月度考核结果时按合格（系数 1）发放，
-// 与改造前的固定档行为一致，保证过渡期不产生金额跳变。
+// 考核工资 = 岗位标准额 × 月度考核分数 ÷ 100。
+// 未录入分数时按 100 分（全额）预览；保存考核时必须由核算员明确输入分数。
 function assessmentComponent(teacher, profile, scheme, monthlyAssessment = null) {
   const band = profile.assessmentBand || defaultAssessmentBand(teacher);
   const standard = Number(scheme.assessmentSalary?.[band] || 0);
-  const gradeKey = monthlyAssessment?.grade || "default";
-  const gradeCfg = scheme.assessmentGrades?.[gradeKey] || scheme.assessmentGrades?.default || { label: "合格", rate: 1 };
-  const rate = Number(gradeCfg.rate ?? 1);
-  // 允许直接核定金额，覆盖系数计算（用于制度中的区间制岗位，如幼儿园）。
-  // 注意 null/""/undefined 都表示"未核定"，不能用 Number() 判断——Number(null) 是 0。
-  const rawAmount = monthlyAssessment?.amount;
-  const hasOverride = rawAmount !== null && rawAmount !== undefined && rawAmount !== "" && Number.isFinite(Number(rawAmount));
-  const amount = hasOverride ? Number(rawAmount) : standard * rate;
-  const basis = hasOverride
-    ? `考核档 ${assessmentBandLabel(band)}，按考核结果核定金额`
-    : `考核档 ${assessmentBandLabel(band)}（标准 ${standard} 元）× ${gradeCfg.label} ${rate}`;
+  const rawScore = monthlyAssessment?.score;
+  const score = Number.isFinite(Number(rawScore)) && Number(rawScore) >= 0 ? Number(rawScore) : 100;
+  const rate = score / 100;
+  const amount = standard * rate;
+  const basis = `考核工资基准 ${assessmentBandLabel(band)}（标准 ${standard} 元）× 考核分数 ${score} 分（${score}%）`;
   return {
     name: "考核工资",
     basis,
@@ -855,7 +918,7 @@ export function applyProbationPolicy(components, profile = {}, scheme = {}) {
       basis: `${component.basis}；试用期按 ${percent}% 计发`,
     };
   });
-  const minimumWage = Number(rule.minimumWage || 0);
+  const minimumWage = minimumWageForScheme(scheme);
   if (!minimumWage) return adjusted;
   const total = adjusted.reduce((sum, item) => sum + item.amount, 0);
   if (total >= minimumWage) return adjusted;
@@ -868,6 +931,21 @@ export function applyProbationPolicy(components, profile = {}, scheme = {}) {
       category: "supplement",
     },
   ];
+}
+
+// 单一最低工资标准。probationRule.minimumWage 与 minimumWageByYear 只用于旧账套兼容，
+// 保存后会由 normalizePayrollRules 收敛为 scheme.minimumWage。
+export function minimumWageForScheme(scheme = {}) {
+  const configured = Number(scheme.minimumWage);
+  if (Number.isFinite(configured) && configured > 0) return roundMoney(configured);
+  const legacyByYear = scheme.minimumWageByYear || {};
+  const legacy = Object.entries(legacyByYear)
+    .filter(([year, amount]) => /^\d{4}$/.test(String(year)) && Number(amount) > 0)
+    .sort(([left], [right]) => Number(left) - Number(right))
+    .map(([, amount]) => Number(amount))[0];
+  if (Number.isFinite(legacy) && legacy > 0) return roundMoney(legacy);
+  const fallback = Number(scheme.probationRule?.minimumWage || 0);
+  return Number.isFinite(fallback) && fallback > 0 ? roundMoney(fallback) : 0;
 }
 
 // 兼岗津贴发放政策（0726 制度第三条原则 1 与原则 6，经学校澄清）：
@@ -916,6 +994,153 @@ function manualComponents(profile) {
   return components;
 }
 
+const LIFE_TEACHER_KIND_LABELS = {
+  lower: "低段生活老师",
+  upper: "高段生活老师",
+  standard: "生活老师",
+  night: "门岗／夜班生活老师",
+};
+
+function isLifeTeacherPayroll(teacher = {}, hrFacts = null) {
+  return String(hrFacts?.positionId || "") === "POS-LIFE-TEACHER" || String(teacher.salaryProfile?.salaryCategory || "") === "lifeTeacher";
+}
+
+function lifeTeacherAssessmentComponent(teacher, profile, scheme, monthlyAssessment = null) {
+  const stageId = String(teacher.stageId || "");
+  const kind = String(profile.roles?.lifeTeacherKind || (stageId === "primary" ? "lower" : "standard"));
+  const standard = Number(scheme.lifeTeacher?.assessmentByStage?.[stageId]?.[kind] || 0);
+  const score = Number.isFinite(Number(monthlyAssessment?.score)) && Number(monthlyAssessment.score) >= 0
+    ? Number(monthlyAssessment.score)
+    : 100;
+  return {
+    name: "考核工资",
+    basis: `${LIFE_TEACHER_KIND_LABELS[kind] || "生活老师"}基准 ${standard} 元 × 考核分数 ${score} 分（${score}%）`,
+    amount: roundMoney(standard * score / 100),
+    category: "fixed",
+  };
+}
+
+function lifeTeacherComponents(teacher, profile, scheme, monthlyAssessment = null) {
+  const stageId = String(teacher.stageId || "");
+  const lifeScheme = scheme.lifeTeacher || {};
+  const workloadRule = lifeScheme.workloadByStage?.[stageId] || {};
+  const roles = profile.roles || {};
+  const students = Math.max(0, Number(roles.lifeTeacherStudentCount || 0));
+  const perStudent = Math.max(0, Number(workloadRule.perStudent || 0));
+  const cap = Math.max(0, Number(workloadRule.cap || 0));
+  const rawWorkload = students * perStudent;
+  const workload = cap ? Math.min(rawWorkload, cap) : rawWorkload;
+  const components = [
+    { name: "基本工资", basis: `生活老师基本工资标准 ${Number(lifeScheme.baseSalary || 0)} 元／月`, amount: roundMoney(lifeScheme.baseSalary || 0), category: "fixed" },
+    { name: "工作量工资", basis: `${students} 人 × ${perStudent} 元${cap ? `，封顶 ${cap} 元` : ""}`, amount: roundMoney(workload), category: "allowance" },
+    lifeTeacherAssessmentComponent(teacher, profile, scheme, monthlyAssessment),
+    seniorityComponent(profile, scheme),
+    { name: "住房补贴", basis: `生活老师住房补贴标准 ${Number(lifeScheme.housingAllowance || 0)} 元／月`, amount: roundMoney(lifeScheme.housingAllowance || 0), category: "allowance" },
+  ];
+  const phoneAllowance = Number(lifeScheme.transportAllowance?.phone || 0);
+  if (phoneAllowance) components.push({ name: "话费补助", basis: "生活老师接送通讯补助", amount: roundMoney(phoneAllowance), category: "allowance" });
+  const postConfig = lifeScheme.postAllowancesByStage?.[stageId] || {};
+  [
+    ["lifeManager", "生活主管津贴"],
+    ["buildingLead", "栋长津贴"],
+    ["nightShiftLead", "夜班组长津贴"],
+    ["primaryDayShift", "一年级／六年级白班津贴"],
+  ].forEach(([key, name]) => {
+    const amount = Number(postConfig[key] || 0);
+    if (roles[key] && amount) components.push({ name, basis: `按${PAYROLL_STAGE_LABELS[stageId] || "学部"}生活老师兼岗标准`, amount: roundMoney(amount), category: "allowance" });
+  });
+  return [...components, ...manualComponents(profile)].filter((component) => component && component.amount);
+}
+
+function lifeTeacherTransportComponent(monthlyAssessment, scheme) {
+  const counts = monthlyAssessment?.lifeTeacherTransport || {};
+  const rates = scheme.lifeTeacher?.transportAllowance || {};
+  const lines = [
+    ["short", "短途"], ["medium", "中途"], ["long", "长途"], ["extraLong", "超长途"],
+  ]
+    .map(([key, label]) => ({ key, label, count: Math.max(0, Number(counts[key] || 0)), rate: Math.max(0, Number(rates[key] || 0)) }))
+    .filter((item) => item.count > 0 && item.rate > 0);
+  if (!lines.length) return null;
+  return {
+    name: "接送补助",
+    basis: lines.map((item) => `${item.label} ${item.count} 次 × ${item.rate} 元`).join("；"),
+    amount: roundMoney(lines.reduce((sum, item) => sum + item.count * item.rate, 0)),
+    category: "supplement",
+  };
+}
+
+function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrationFactor = 1, prorationNote = "", monthlyAssessment = null, hrFacts = null, calendarSettlement = null, leaveSettlement = null } = {}) {
+  const normalizedRules = normalizePayrollRules(payrollRules);
+  const scheme = normalizedRules.teacherSalaryScheme;
+  const defaults = defaultLifeTeacherSalaryProfile(teacher);
+  const profile = {
+    ...defaults,
+    ...(teacher.salaryProfile || {}),
+    salaryCategory: "lifeTeacher",
+    seniorityCategory: "lifeTeacher",
+    roles: { ...defaults.roles, ...(teacher.salaryProfile?.roles || {}), ...(hrFacts?.roles || {}) },
+  };
+  if (hrFacts?.hiredAt) profile.schoolYears = schoolYearsFromHiredAt(hrFacts.hiredAt, profile.schoolYears, referenceDateForMonth(month));
+  if (hrFacts?.status) profile.probationRate = hrFacts.status === "probation" ? 0.8 : 1;
+  const employmentType = hrFacts?.employmentType === "agreement" ? "agreement" : "normal";
+  const workStatus = hrFacts?.workStatus === "standby" ? "standby" : "employed";
+  const agreementMonthlySalary = Number(hrFacts?.agreementMonthlySalary || 0);
+  if (employmentType === "agreement" && agreementMonthlySalary <= 0) throw new Error("协议生活老师缺少有效的协议月薪，请由总校人事 + 行政在人事档案中维护");
+
+  const totalCalendarDays = Math.max(0, Number(calendarSettlement?.totalDays || 0));
+  const holidayDays = Math.min(totalCalendarDays, Math.max(0, Number(calendarSettlement?.holidayDays || 0)));
+  const teachingDays = Math.max(0, totalCalendarDays - holidayDays);
+  const hasHolidaySettlement = totalCalendarDays > 0 && holidayDays > 0;
+  const managementLevel = String(hrFacts?.managementLevel || "ordinary");
+  const holidayRate = managementLevel === "ordinary" ? 0.8 : 1;
+  const teachingFactor = hasHolidaySettlement ? teachingDays / totalCalendarDays : 1;
+  const holidayFactor = hasHolidaySettlement ? holidayDays / totalCalendarDays : 0;
+  const holidayNames = (calendarSettlement?.holidayEntries || []).map((item) => item.name).filter(Boolean).join("、") || "假期";
+  const prorate = Math.min(Math.max(Number(fixedProrationFactor) || 1, 0), 1);
+  const fullAssessmentAmount = lifeTeacherAssessmentComponent(teacher, profile, scheme, null).amount;
+  const fixedComponents = lifeTeacherComponents(teacher, profile, scheme, monthlyAssessment)
+    .map((component) => {
+      let adjusted = component;
+      if (hasHolidaySettlement && ["fixed", "allowance"].includes(component.category)) {
+        if (component.name === "考核工资") {
+          const amount = managementLevel === "ordinary" ? component.amount * teachingFactor : component.amount * teachingFactor + fullAssessmentAmount * holidayFactor;
+          adjusted = { ...component, amount: roundMoney(amount), basis: managementLevel === "ordinary" ? `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天不核算考核工资` : `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 100% 假期工资计` };
+        } else {
+          adjusted = { ...component, amount: roundMoney(component.amount * (teachingFactor + holidayFactor * holidayRate)), basis: `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 ${Math.round(holidayRate * 100)}% 假期工资计` };
+        }
+      }
+      if (prorate >= 1 || !["fixed", "allowance"].includes(adjusted.category)) return adjusted;
+      return { ...adjusted, amount: roundMoney(adjusted.amount * prorate), basis: `${adjusted.basis}；${prorationNote || `按在职天数折算 ${Math.round(prorate * 100)}%`}` };
+    })
+    .filter((component) => component && component.amount);
+  const normalComponents = applyProbationPolicy([...applyLeaveSettlementPolicy(fixedComponents, leaveSettlement), lifeTeacherTransportComponent(monthlyAssessment, scheme)].filter(Boolean), profile, scheme);
+  const agreementPeriodFactor = totalCalendarDays > 0 ? teachingFactor + holidayFactor * 0.8 : 1;
+  const agreementAmount = roundMoney(agreementMonthlySalary * agreementPeriodFactor * prorate);
+  const agreementBasis = hasHolidaySettlement
+    ? `协议月薪 ${agreementMonthlySalary} 元；正式学期 ${teachingDays}/${totalCalendarDays} 天按 100%，${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 80%`
+    : `协议月薪 ${agreementMonthlySalary} 元；正式学期按 100% 结算`;
+  const standbyHousing = Number(scheme.lifeTeacher?.housingAllowance || 0);
+  const standbyComponents = [
+    { name: "待岗工资", basis: `最低工资标准 ${minimumWageForScheme(scheme)} 元 × 80%`, amount: roundMoney(minimumWageForScheme(scheme) * 0.8), category: "fixed" },
+    ...(standbyHousing ? [{ name: "住房补贴", basis: "生活老师住房补贴；待岗人员全额保留", amount: roundMoney(standbyHousing), category: "allowance" }] : []),
+  ];
+  const components = workStatus === "standby" ? standbyComponents : employmentType === "agreement" ? [{ name: "协议工资", basis: agreementBasis, amount: agreementAmount, category: "fixed" }] : normalComponents;
+  const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
+  const tax = roundMoney(Math.max(grossPay - Number(normalizedRules.taxThreshold || 0), 0) * Number(normalizedRules.taxRate || 0));
+  const amountOf = (name) => roundMoney(components.find((item) => item.name === name)?.amount || 0);
+  return {
+    teacher, month, salarySchemeVersion: scheme.version, salaryProfile: profile,
+    baseSalary: amountOf("基本工资"), assessmentSalary: amountOf("考核工资"), senioritySalary: amountOf("校龄工资"), housingAllowance: amountOf("住房补贴"),
+    positionSalary: roundMoney(components.filter((item) => item.category === "allowance" && item.name !== "住房补贴").reduce((sum, item) => sum + item.amount, 0)),
+    supplementalAmount: roundMoney(components.filter((item) => item.category === "supplement").reduce((sum, item) => sum + item.amount, 0)),
+    deductionAmount: roundMoney(Math.abs(components.filter((item) => item.category === "deduction").reduce((sum, item) => sum + item.amount, 0))),
+    lessonAmount: 0, employmentType, workStatus, agreementMonthlySalary: employmentType === "agreement" ? agreementMonthlySalary : 0,
+    grossPay, tax, netPay: roundMoney(grossPay - tax), components, lines: [],
+    calendarSettlement: { tag: hasHolidaySettlement ? "holiday" : "teaching", totalDays: totalCalendarDays, teachingDays, holidayDays, holidayRate: hasHolidaySettlement ? (employmentType === "agreement" ? 0.8 : holidayRate) : 1, managementLevel, employmentType, holidayEntries: calendarSettlement?.holidayEntries || [] },
+    leaveSettlement: leaveSettlement ? { ...leaveSettlement, applied: employmentType === "normal" && Number(leaveSettlement.policyLeaveDays || 0) > 0 } : null,
+  };
+}
+
 export function calculateDedicatedTeacherPayroll({
   teacher,
   lessons = [],
@@ -925,15 +1150,33 @@ export function calculateDedicatedTeacherPayroll({
   // 人事联动（第二阶段 M4）：离职/入职当月固定项按在职天数折算，1 表示不折算
   fixedProrationFactor = 1,
   prorationNote = "",
-  // 月度考核结果（0726 制度：考核工资须按表现拉开差距）
-  // { grade: "excellent"|"good"|"default"|"warning"|"unqualified", amount?: number, note?: string }
+  // 月度考核结果：{ score: number, note?: string }；分数直接对应百分比系数。
   monthlyAssessment = null,
   // 人事档案事实：职称、学历、兼岗任命、入职日期。这些是人事维护的客观事实，
   // 薪资引擎只读取用于套标准，财务不可改（职责分离）。缺省时回落到工资档案，保证兼容。
   hrFacts = null,
+  // 校历结算事实：正式学期按原有课时/考核口径；假期按人员层级结算。
+  // 由 storage 根据教师所属学部的校历逐日统计后传入。
+  calendarSettlement = null,
+  // 已最终审批的请假，按该自然月内实际占用的上午／下午折算。
+  // 这里只接收已去重的结算事实，避免工资引擎再去依赖 OA 数据结构。
+  leaveSettlement = null,
 } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
+  if (isLifeTeacherPayroll(teacher, hrFacts)) {
+    return calculateLifeTeacherPayroll({
+      teacher,
+      month,
+      payrollRules,
+      fixedProrationFactor,
+      prorationNote,
+      monthlyAssessment,
+      hrFacts,
+      calendarSettlement,
+      leaveSettlement,
+    });
+  }
   const defaults = defaultTeacherSalaryProfile(teacher);
   const profile = {
     ...defaults,
@@ -960,6 +1203,14 @@ export function calculateDedicatedTeacherPayroll({
     // 试用期折算由人事状态推导：试用期 80%，其余全额
     if (hrFacts.status) profile.probationRate = hrFacts.status === "probation" ? 0.8 : 1;
   }
+  const employmentType = hrFacts?.employmentType === "agreement" ? "agreement" : "normal";
+  // “就业／待岗”是岗位安排状态，和“正常／协议”雇佣类型独立：
+  // 人员进入待岗后，以待岗公式替代其原有工资方案。
+  const workStatus = hrFacts?.workStatus === "standby" ? "standby" : "employed";
+  const agreementMonthlySalary = Number(hrFacts?.agreementMonthlySalary || 0);
+  if (employmentType === "agreement" && (!Number.isFinite(agreementMonthlySalary) || agreementMonthlySalary <= 0)) {
+    throw new Error("协议教师缺少有效的协议月薪，请由总校人事 + 行政在人事档案中维护");
+  }
   const sortedLessons = [...lessons].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const highRegularWeekUnits = new Map();
   const lines = sortedLessons.map((lesson) => {
@@ -969,9 +1220,10 @@ export function calculateDedicatedTeacherPayroll({
     // 而漏签的原因往往和上没上课无关（手机没电、二维码被挡住）。学校的规则是
     // 派了课就该上，于是签到只是在给一件本该确定的事引入不确定性。
     //
-    // 代课与请假不需要在这里另做处理，课表已经反映了：
-    //   代课  审批通过时课次的 teacherId 被改成代课教师，课就归代课老师了
-    //   请假  审批时逐节安排，未安排代课的课次标记 cancelled，谁也不计
+    // 代课、请假与外出不需要在这里额外查审批单：薪资侧读取的是课表投影。
+    //   代课  审批通过时课次改为 substitute 类型，代课老师按代课单价计
+    //   请假  未安排代课的课次标记 cancelled，谁也不计
+    //   外出  原老师还会收到一条正常课时的只读投影，体现“原课时工资照发”
     const payable = lesson.status !== "cancelled";
     const rule = lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable });
     return {
@@ -985,16 +1237,23 @@ export function calculateDedicatedTeacherPayroll({
       units: Number(lesson.units || 1),
       rate: rule.rate,
       ruleName: rule.ruleName,
-      basis: rule.basis,
+      basis:
+        workStatus === "standby"
+          ? `${rule.basis}；待岗期间课时不另计薪`
+          : employmentType === "agreement"
+            ? `${rule.basis}；协议教师课时不另计薪`
+            : lesson.outboundOriginalPay
+              ? `${rule.basis}；外出期间已安排代课，原任课老师课时工资照发`
+              : rule.basis,
       status: lesson.status,
-      amount: payable ? rule.amount : 0,
-      payable,
+      amount: employmentType === "agreement" || workStatus === "standby" ? 0 : payable ? rule.amount : 0,
+      payable: employmentType === "agreement" || workStatus === "standby" ? false : payable,
     };
   });
 
   const lessonAmount = roundMoney(lines.reduce((sum, line) => sum + line.amount, 0));
   const prorate = Math.min(Math.max(Number(fixedProrationFactor) || 1, 0), 1);
-  const fixedComponents = [
+  const rawFixedComponents = [
     baseSalaryComponent(profile, scheme),
     degreeAllowanceComponent(profile, scheme),
     assessmentComponent(teacher, profile, scheme, monthlyAssessment),
@@ -1002,24 +1261,107 @@ export function calculateDedicatedTeacherPayroll({
     housingComponent(profile, scheme),
     ...applyPostAllowancePolicy(roleComponents(teacher, profile, scheme), profile),
     ...manualComponents(profile),
-  ]
-    .filter((component) => component && component.amount)
+  ].filter((component) => component && component.amount);
+  const totalCalendarDays = Math.max(0, Number(calendarSettlement?.totalDays || 0));
+  const holidayDays = Math.min(totalCalendarDays, Math.max(0, Number(calendarSettlement?.holidayDays || 0)));
+  const teachingDays = Math.max(0, totalCalendarDays - holidayDays);
+  const hasHolidaySettlement = totalCalendarDays > 0 && holidayDays > 0;
+  const managementLevel = String(hrFacts?.managementLevel || "ordinary");
+  const holidayRate = managementLevel === "ordinary" ? 0.8 : 1;
+  const teachingFactor = hasHolidaySettlement ? teachingDays / totalCalendarDays : 1;
+  const holidayFactor = hasHolidaySettlement ? holidayDays / totalCalendarDays : 0;
+  const holidayNames = (calendarSettlement?.holidayEntries || []).map((item) => item.name).filter(Boolean).join("、") || "假期";
+  const fullAssessmentAmount = assessmentComponent(teacher, profile, scheme, null).amount;
+  const fixedComponents = rawFixedComponents
     .map((component) => {
+      let adjusted = component;
+      if (hasHolidaySettlement && ["fixed", "allowance"].includes(component.category)) {
+        if (component.name === "考核工资") {
+          const amount = managementLevel === "ordinary"
+            // 普通员工的假期没有考核；仅保留教学日对应的考核工资。
+            ? component.amount * teachingFactor
+            // 高层/中层的假期按 100% 标准额计，不受本月考核分数影响。
+            : component.amount * teachingFactor + fullAssessmentAmount * holidayFactor;
+          adjusted = {
+            ...component,
+            amount: roundMoney(amount),
+            basis: managementLevel === "ordinary"
+              ? `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天不核算考核工资`
+              : `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 100% 假期工资计`,
+          };
+        } else {
+          const amount = component.amount * (teachingFactor + holidayFactor * holidayRate);
+          adjusted = {
+            ...component,
+            amount: roundMoney(amount),
+            basis: `${component.basis}；${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 ${Math.round(holidayRate * 100)}% 假期工资计`,
+          };
+        }
+      }
       // 只折算固定月度项（fixed/allowance）：课时按实际完成结算、奖扣按实际录入不折算
-      if (prorate >= 1 || !["fixed", "allowance"].includes(component.category)) return component;
+      if (prorate >= 1 || !["fixed", "allowance"].includes(adjusted.category)) return adjusted;
       return {
-        ...component,
-        amount: roundMoney(component.amount * prorate),
-        basis: `${component.basis}；${prorationNote || `按在职天数折算 ${Math.round(prorate * 100)}%`}`,
+        ...adjusted,
+        amount: roundMoney(adjusted.amount * prorate),
+        basis: `${adjusted.basis}；${prorationNote || `按在职天数折算 ${Math.round(prorate * 100)}%`}`,
       };
-    });
+    })
+    // 假期普通人员的考核工资会被归零；与原有 0 分考核口径保持一致，不在工资单里显示 0 元行。
+    .filter((component) => component && component.amount);
+  // 请假按天折算，而不是把整个月当作请假月处理：
+  //   - 产假、病假：保留基本工资和住房补贴；其他固定项按请假天数扣减；
+  //   - 事假：只保留住房补贴；基本工资及其他固定项按请假天数扣减。
+  // 课时工资不在这里二次扣减，请假审批已将对应课次安排代课或取消，课表才是课时工资唯一口径。
+  const leaveAdjustedFixedComponents = employmentType === "normal"
+    ? applyLeaveSettlementPolicy(fixedComponents, leaveSettlement)
+    : fixedComponents;
   const lessonComponent = {
     name: "课时工资",
     basis: "按实际完成课次、课型、学段、学科系数和高中超课时规则汇总",
     amount: lessonAmount,
     category: "lesson",
   };
-  const components = applyProbationPolicy([...fixedComponents, lessonComponent], profile, scheme);
+  const standardComponents = applyProbationPolicy([...leaveAdjustedFixedComponents, lessonComponent], profile, scheme);
+  // 协议教师不再叠加课时、考核、职称、校龄或兼岗项目，工资单只保留协议价这一项。
+  // 学期内按 100%，假期按 80%；跨时段月份按各自覆盖天数折算。
+  const agreementPeriodFactor = totalCalendarDays > 0
+    ? teachingFactor + holidayFactor * 0.8
+    : 1;
+  const agreementAmount = employmentType === "agreement"
+    ? roundMoney(agreementMonthlySalary * agreementPeriodFactor * prorate)
+    : 0;
+  const agreementBasis = employmentType === "agreement"
+    ? [
+        `协议月薪 ${agreementMonthlySalary} 元`,
+        hasHolidaySettlement
+          ? `正式学期 ${teachingDays}/${totalCalendarDays} 天按 100%，${holidayNames} ${holidayDays}/${totalCalendarDays} 天按 80%`
+          : "正式学期按 100% 结算",
+        ...(prorate < 1 ? [prorationNote || `按在职天数折算 ${Math.round(prorate * 100)}%`] : []),
+      ].join("；")
+    : "";
+  const minimumWage = minimumWageForScheme(scheme);
+  const standbyHousing = housingComponent(profile, scheme);
+  const standbyComponents = [
+    {
+      name: "待岗工资",
+      basis: `最低工资标准 ${minimumWage} 元 × 80%`,
+      amount: roundMoney(minimumWage * 0.8),
+      category: "fixed",
+    },
+    ...(standbyHousing?.amount
+      ? [
+          {
+            ...standbyHousing,
+            basis: `${standbyHousing.basis}；待岗人员住房补贴全额保留`,
+          },
+        ]
+      : []),
+  ];
+  const components = workStatus === "standby"
+    ? standbyComponents
+    : employmentType === "agreement"
+      ? [{ name: "协议工资", basis: agreementBasis, amount: agreementAmount, category: "fixed" }]
+      : standardComponents;
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
   const tax = roundMoney(Math.max(grossPay - Number(normalizedRules.taxThreshold || 0), 0) * Number(normalizedRules.taxRate || 0));
   const netPay = roundMoney(grossPay - tax);
@@ -1047,11 +1389,73 @@ export function calculateDedicatedTeacherPayroll({
     positionSalary,
     supplementalAmount,
     deductionAmount,
-    lessonAmount,
+    lessonAmount: employmentType === "agreement" || workStatus === "standby" ? 0 : lessonAmount,
+    employmentType,
+    workStatus,
+    agreementMonthlySalary: employmentType === "agreement" ? agreementMonthlySalary : 0,
     grossPay,
     tax,
     netPay,
     components,
     lines,
+    calendarSettlement: {
+      tag: hasHolidaySettlement ? "holiday" : "teaching",
+      totalDays: totalCalendarDays,
+      teachingDays,
+      holidayDays,
+      holidayRate: hasHolidaySettlement ? (employmentType === "agreement" ? 0.8 : holidayRate) : 1,
+      managementLevel,
+      employmentType,
+      holidayEntries: calendarSettlement?.holidayEntries || [],
+    },
+    leaveSettlement: leaveSettlement
+      ? {
+          ...leaveSettlement,
+          applied: employmentType === "normal" && Number(leaveSettlement.policyLeaveDays || 0) > 0,
+        }
+      : null,
   };
+}
+
+function leaveSettlementSummary(leaveSettlement = {}) {
+  const parts = [];
+  const maternityDays = Number(leaveSettlement.maternityDays || 0);
+  const sickDays = Number(leaveSettlement.sickDays || 0);
+  const personalDays = Number(leaveSettlement.personalDays || 0);
+  if (maternityDays > 0) parts.push(`产假 ${maternityDays} 天（保留基本工资、住房补贴）`);
+  if (sickDays > 0) parts.push(`病假 ${sickDays} 天（保留基本工资、住房补贴）`);
+  if (personalDays > 0) parts.push(`事假 ${personalDays} 天（仅保留住房补贴）`);
+  return parts.join("；");
+}
+
+function applyLeaveSettlementPolicy(components = [], leaveSettlement = null) {
+  if (!leaveSettlement) return components;
+  const daysInMonth = Math.max(1, Number(leaveSettlement.daysInMonth || 0));
+  const maternityDays = Math.max(0, Number(leaveSettlement.maternityDays || 0));
+  const sickDays = Math.max(0, Number(leaveSettlement.sickDays || 0));
+  const personalDays = Math.max(0, Number(leaveSettlement.personalDays || 0));
+  const allPolicyDays = Math.min(daysInMonth, maternityDays + sickDays + personalDays);
+  if (allPolicyDays <= 0) return components;
+  const summary = leaveSettlementSummary({ maternityDays, sickDays, personalDays });
+  const regularFactor = Math.max(0, 1 - allPolicyDays / daysInMonth);
+  const baseSalaryFactor = Math.max(0, 1 - Math.min(daysInMonth, personalDays) / daysInMonth);
+
+  return components
+    .map((component) => {
+      if (!component || !["fixed", "allowance"].includes(component.category)) return component;
+      if (component.name === "住房补贴") {
+        return {
+          ...component,
+          basis: `${component.basis}；${summary}，住房补贴不扣减`,
+        };
+      }
+      const factor = component.name === "基本工资" ? baseSalaryFactor : regularFactor;
+      if (factor >= 1) return component;
+      return {
+        ...component,
+        amount: roundMoney(component.amount * factor),
+        basis: `${component.basis}；${summary}，按 ${daysInMonth} 个自然日折算 ${Math.round(factor * 10000) / 100}%`,
+      };
+    })
+    .filter((component) => component && component.amount);
 }

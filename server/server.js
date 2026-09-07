@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword, verifyPasswordAsync } from "./auth.js";
 import { assertConfigOrExit, inspectConfig } from "./config.js";
 import { parseMultipart } from "./multipart.js";
+import { canTeacherAccessPayrollMonth } from "./payrollVisibility.js";
 import {
   ATTACHMENT_CATEGORIES,
   MAX_ATTACHMENT_BYTES,
@@ -34,15 +35,18 @@ import {
   previewEntityImport,
 } from "./dataPorting.js";
 import {
+  canExportAllPayrollDetails,
   canFinanceActOnTeacher,
-  filterOrgUnitsByFinanceScope,
-  filterPayrollRulesByFinanceScope,
+  canFinanceReadTeacher,
   filterStageRowsByFinanceScope,
   filterTeachersByFinanceScope,
   financeScopeFor,
+  financeReadScopeFor,
   financeScopeLabel,
   payrollScopeOfTeacher,
 } from "./financeScope.js";
+import { accountStageScopeIds, assertSchedulingAccess, stageIdForDivision } from "./accessScope.js";
+import { accountHasRole, accountHasAnyRole } from "./accountRoles.js";
 import {
   cancelScheduleGenerationJob,
   getScheduleGenerationJob,
@@ -75,6 +79,8 @@ import {
   listTeacherLessonsInRange,
   listSubstituteCandidates,
   applySubstituteArrangements,
+  listLessonSwapOptions,
+  applyApprovedLessonSwap,
 } from "./scheduling.js";
 import {
   appendAuditLog,
@@ -102,6 +108,7 @@ import {
   queryNotifications,
   queryPayrollHistory,
   queryPersonnel,
+  queryAcademicCalendar,
   queryTeacherLessonRecords,
   queryTeacherAssignments,
   queryTerms,
@@ -111,6 +118,7 @@ import {
   revokeSession,
   reviewTeacherPayrollDetail,
   saveDatabase,
+  saveAcademicCalendarEntry,
   setCurrentAcademicTerm,
   setAccountStatus,
   teacherLessonsForWeek,
@@ -158,6 +166,7 @@ import {
   addSalaryTemplateVersion,
   applySalaryTemplate,
   createEmployee,
+  createPersonnelTag,
   createOrgUnit,
   createPosition,
   createProfileChangeRequest,
@@ -167,6 +176,7 @@ import {
   getEmployeeDetail,
   getMyHrProfile,
   queryEmployees,
+  queryPersonnelTags,
   queryHrAuditLogs,
   queryOrgUnits,
   queryPositions,
@@ -183,6 +193,7 @@ import {
   scanHrFlowTimeouts,
   withdrawHrFlow,
   setEmployeeStatus,
+  deletePersonnelTag,
   setOrgUnitStatus,
   updateEmployee,
   updateEmployeeContract,
@@ -191,7 +202,6 @@ import {
   withdrawProfileChangeRequest,
   queryMonthlyAssessments,
   upsertMonthlyAssessment,
-  ASSESSMENT_GRADES,
   TITLE_GRADES,
   DEGREE_OPTIONS,
   TEACHER_ROLE_FIELDS,
@@ -202,6 +212,7 @@ import {
   registerOaSideEffect,
   listTemplatesForRole,
   listAllTemplates,
+  listOaApproverAccounts,
   createOaTemplate,
   updateOaTemplate,
   setOaTemplateStatus,
@@ -210,7 +221,10 @@ import {
   OA_APPROVER_ROLES,
   OA_FIELD_TYPES,
   createOaRequest,
+  listPayrollApprovalOptions,
   actOnOaRequest,
+  addOaExecutionEvidence,
+  executeOaRequest,
   withdrawOaRequest,
   urgeOaRequest,
   queryOaRequests,
@@ -221,6 +235,7 @@ import {
 
 // 薪资审批表单里的「适用范围」存的是中文标签，锁定时要换回内部 scopeId
 const PAYROLL_SCOPE_BY_LABEL = {
+  幼儿园: "kindergarten",
   小学部: "primary",
   初中部: "middle",
   高中部: "high",
@@ -230,6 +245,21 @@ const PAYROLL_SCOPE_BY_LABEL = {
 const PORT = Number.parseInt(process.env.PORT || "4173", 10);
 const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const MAX_OA_ATTACHMENTS = 3;
+
+function oaAttachmentOwnerId(requestId) {
+  // 复用已通过加密、魔数校验和备份验证的附件存储，但用独立命名空间
+  // 隔离人员档案附件，避免 OA 单号与员工 ID 偶然重名。
+  return `OA:${requestId}`;
+}
+
+function lessonIsInLeaveHalfRange(lesson, formData = {}) {
+  const timeMatch = /^(\d{1,2}):/.exec(String(lesson.time || ""));
+  const isMorning = timeMatch ? Number(timeMatch[1]) < 12 : true;
+  if (lesson.date === formData.startDate && formData.startHalf === "下午" && isMorning) return false;
+  if (lesson.date === formData.endDate && formData.endHalf === "上午" && !isMorning) return false;
+  return true;
+}
 
 function addDays(dateKey, days) {
   const [year, month, day] = String(dateKey || "").split("-").map(Number);
@@ -255,6 +285,11 @@ function teacherDivisionId(teacher) {
 
 function preferredTeacherScheduleWeek(term, teacher, availableWeeks) {
   const weekStarts = new Set(availableWeeks.map((week) => week.weekStart));
+  // 生活老师的排班以当前自然周为首选，避免因教务的学部开课周设置而打开历史周。
+  if (teacher?.salaryProfile?.salaryCategory === "lifeTeacher") {
+    const currentWeek = startOfNaturalWeek(new Date().toISOString().slice(0, 10));
+    if (weekStarts.has(currentWeek)) return currentWeek;
+  }
   const divisionWeek = term?.divisionWeekStarts?.[teacherDivisionId(teacher)];
   if (divisionWeek && weekStarts.has(divisionWeek)) return divisionWeek;
   const settlementMonth = String(term?.settlementMonth || "").slice(0, 7);
@@ -509,7 +544,7 @@ function requireAuth(req, res, db, allowedRoles = []) {
     }
   }
 
-  if (allowedRoles.length && !allowedRoles.includes(account.role)) {
+  if (allowedRoles.length && !accountHasAnyRole(account, allowedRoles)) {
     sendError(res, 403, "当前账号无权访问该资源");
     return null;
   }
@@ -519,11 +554,36 @@ function requireAuth(req, res, db, allowedRoles = []) {
 
 function canReadTeacher(account, teacherId) {
   if (["finance", "system_admin"].includes(account.role)) return true;
-  return account.role === "teacher" && account.teacherId === teacherId;
+  return accountHasRole(account, "teacher") && account.teacherId === teacherId;
 }
 
 function teacherIdFromPath(parts) {
   return parts.length >= 3 ? parts[2] : "";
+}
+
+function assertScheduleQueryScope(db, account, params = {}) {
+  const scope = accountStageScopeIds(account);
+  if (!scope.length || account.role === "teacher") return;
+  const dimension = String(params.dimension || "class");
+  const targetId = String(params.targetId || "");
+  let stageId = "";
+  if (dimension === "class") {
+    stageId = String((db.classes || []).find((item) => item.id === targetId)?.stageId || "");
+  } else if (dimension === "teacher") {
+    stageId = String((db.teachers || []).find((item) => item.id === targetId)?.stageId || "");
+  } else if (dimension === "grade") {
+    stageId = stageIdForDivision(targetId.split("-g")[0]) || String(params.stageId || "");
+  }
+  if (stageId && scope.includes(stageId)) return;
+  const error = new Error("只能查看本学部课表");
+  error.statusCode = 403;
+  throw error;
+}
+
+function rejectScopedAdmin(res, account, message = "学部排课负责人无权执行总校级操作") {
+  if (account?.role !== "admin" || !accountStageScopeIds(account).length) return false;
+  sendError(res, 403, message);
+  return true;
 }
 
 function teacherIdentityOnly(teacher) {
@@ -589,11 +649,20 @@ function teacherPayrollForConfirmation(payroll) {
 	}
 
 function teacherVisiblePayroll(payroll) {
-  if (!payroll?.generated || payroll.generated.status !== "saved") return payroll;
-  return {
-    ...payroll,
-    generated: null,
-  };
+  // 财务预览和已保存草稿都不是发给老师的数据。之前这里只把 saved 的
+  // generated 标记抹掉，却仍把 grossPay/rows 一并返回，老师可以在财务
+  // 发布前看到试算金额。未发布时直接返回 null，金额和明细都不出服务端。
+  const status = payroll?.generated?.status || "";
+  if (!["generated", "teacher_confirmed", "disputed", "reviewed", "locked"].includes(status)) return null;
+  return payroll;
+}
+
+function requireTeacherPayrollMonth(res, db, account, month) {
+  if (!accountHasRole(account, "teacher")) return true;
+  const activeTerm = queryTerms(db).currentTerm;
+  if (canTeacherAccessPayrollMonth(month, activeTerm)) return true;
+  sendError(res, 403, "老师端仅可查看当前学期工资");
+  return false;
 }
 
 function teacherWorkloadWithoutSalaryDetails(workload) {
@@ -808,6 +877,7 @@ async function handleApi(req, res, db, url) {
     if (req.method === "POST" && url.pathname === "/api/notifications") {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
+      if (rejectScopedAdmin(res, auth.account, "学部排课负责人不能发布全校通知")) return;
       const body = await readJsonBody(req);
       const notification = createNotification(db, body, auth.account);
       await saveDatabase(db);
@@ -845,12 +915,49 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    // 校历读写与学期主键分开：/api/terms 只服务教学学期选择，
+    // 寒暑假通过本接口维护，不会被排课页误当成一个“学期”。
+    if (req.method === "GET" && url.pathname === "/api/academic-calendar") {
+      const auth = requireAuth(req, res, db, ["admin", "system_admin", "division_head", "principal", "finance", "hr"]);
+      if (!auth) return;
+      // 总校财务拥有跨学部工资查看权限，因此校历也必须完整可见；学部财务仍只读
+      // 自己负责的学部。其他没有显式学部范围的总校角色沿用全校只读。
+      const calendarStageScope = auth.account.role === "finance" && auth.account.financeReadAll
+        ? []
+        : accountStageScopeIds(auth.account);
+      sendJson(
+        res,
+        200,
+        queryAcademicCalendar(db, {
+          schoolYear: url.searchParams.get("schoolYear") || "",
+          allYears: url.searchParams.get("allYears") === "1",
+          stageIds: calendarStageScope,
+        }),
+      );
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/academic-calendar") {
+      const auth = requireAuth(req, res, db, ["division_head"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = saveAcademicCalendarEntry(db, body, auth.account);
+      await saveDatabase(db);
+      // 新建教学期或更新学部起止日后，排课、工资月份和在线页面都要重新读取。
+      broadcastEvent("academic-calendar");
+      broadcastEvent("term");
+      sendJson(res, 200, result);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/terms") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
+      if (rejectScopedAdmin(res, auth.account)) return;
       const body = await readJsonBody(req);
       const result = createAcademicTerm(db, body, auth.account);
       await saveDatabase(db);
+      broadcastEvent("term");
       sendJson(res, 200, result);
       return;
     }
@@ -864,8 +971,10 @@ async function handleApi(req, res, db, url) {
     ) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
+      if (rejectScopedAdmin(res, auth.account)) return;
       const result = setCurrentAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
       await saveDatabase(db);
+      broadcastEvent("term");
       sendJson(res, 200, result);
       return;
     }
@@ -879,8 +988,10 @@ async function handleApi(req, res, db, url) {
     ) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
+      if (rejectScopedAdmin(res, auth.account)) return;
       const result = archiveAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
       await saveDatabase(db);
+      broadcastEvent("term");
       sendJson(res, 200, result);
       return;
     }
@@ -894,6 +1005,7 @@ async function handleApi(req, res, db, url) {
     ) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
+      if (rejectScopedAdmin(res, auth.account)) return;
       const result = deleteAcademicTerm(db, decodeURIComponent(parts[2]), auth.account);
       await saveDatabase(db);
       sendJson(res, 200, result);
@@ -914,15 +1026,23 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll-rules") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
-      sendJson(res, 200, { payrollRules: filterPayrollRulesByFinanceScope(auth.account, db.payrollRules) });
+      if (!canExportAllPayrollDetails(auth.account)) {
+        sendError(res, 403, "仅总校财务可以查看薪资配置");
+        return;
+      }
+      sendJson(res, 200, { payrollRules: db.payrollRules });
       return;
     }
 
     if (req.method === "PATCH" && url.pathname === "/api/payroll-rules") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
+      if (!canExportAllPayrollDetails(auth.account)) {
+        sendError(res, 403, "仅总校财务可以维护薪资配置");
+        return;
+      }
       const body = await readJsonBody(req);
       const payrollRules = updatePayrollRules(db, body.payrollRules || body, auth.account);
       await saveDatabase(db);
@@ -953,7 +1073,9 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/scheduling/teacher-assignments") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
-      sendJson(res, 200, { assignments: queryTeacherAssignments(db, Object.fromEntries(url.searchParams)) });
+      const options = Object.fromEntries(url.searchParams);
+      assertSchedulingAccess(db, auth.account, options, "查看");
+      sendJson(res, 200, { assignments: queryTeacherAssignments(db, options) });
       return;
     }
 
@@ -961,6 +1083,7 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
+      assertSchedulingAccess(db, auth.account, body, "维护");
       const assignment = updateTeacherAssignment(db, body, auth.account);
       await saveDatabase(db);
       sendJson(res, 200, { assignment });
@@ -1049,9 +1172,10 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/scheduling/config") {
-      const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["admin", "system_admin", "division_head", "principal"]);
       if (!auth) return;
       const options = Object.fromEntries(url.searchParams);
+      assertSchedulingAccess(db, auth.account, options, "查看");
       const precheckResult = previewSchedulePrecheck(db, options);
       sendJson(res, 200, {
         config: precheckResult.config,
@@ -1128,6 +1252,7 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const body = await readJsonBody(req);
+      assertSchedulingAccess(db, auth.account, body, "生成");
       const { job, reused } = startScheduleGenerationJob(db, body, auth.account, {
         saveDatabase: () => saveDatabase(db),
       });
@@ -1247,16 +1372,21 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "finance", "system_admin"]);
       if (!auth) return;
       sendJson(res, 200, queryTeachers(db, Object.fromEntries(url.searchParams), {
-        includeFinance: ["finance", "system_admin"].includes(auth.account.role),
-        financeScope: financeScopeFor(auth.account),
+        // 人事行政需要教师名册，但不应借名册读取工资试算、工资状态或工资档案。
+        includeFinance: auth.account.role === "finance",
+        financeScope: financeReadScopeFor(auth.account),
+        stageScopeIds: accountStageScopeIds(auth.account),
       }));
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/personnel") {
-      const auth = requireAuth(req, res, db, ["system_admin"]);
+      const auth = requireAuth(req, res, db, ["system_admin", "division_head", "principal"]);
       if (!auth) return;
-      sendJson(res, 200, queryPersonnel(db, Object.fromEntries(url.searchParams)));
+      sendJson(res, 200, queryPersonnel(db, Object.fromEntries(url.searchParams), {
+        teachersOnly: ["division_head", "principal"].includes(auth.account.role),
+        stageScopeIds: accountStageScopeIds(auth.account),
+      }));
       return;
     }
 
@@ -1302,7 +1432,10 @@ async function handleApi(req, res, db, url) {
 
       // 财务分权：学部财务只能碰本学部任课老师，总校财务只能碰行政后勤人员。
       // 放在教师子路由的唯一入口处，读和写一并拦住，避免逐个分支各写一遍。
-      if (!canFinanceActOnTeacher(db, auth.account, teacherId)) {
+      const financeCanAccessTeacher = req.method === "GET"
+        ? canFinanceReadTeacher(db, auth.account, teacherId)
+        : canFinanceActOnTeacher(db, auth.account, teacherId);
+      if (!financeCanAccessTeacher) {
         sendError(res, 403, `只能处理${financeScopeLabel(financeScopeFor(auth.account))}的薪资数据`);
         return;
       }
@@ -1314,7 +1447,11 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts.length === 3) {
-        sendJson(res, 200, { teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher });
+        sendJson(res, 200, {
+          teacher: (accountHasRole(auth.account, "teacher") || auth.account.role === "system_admin")
+            ? teacherIdentityOnly(teacher)
+            : teacher,
+        });
         return;
       }
 
@@ -1329,7 +1466,9 @@ async function handleApi(req, res, db, url) {
             ? requestedWeekStart
             : preferredTeacherScheduleWeek(termContext.currentTerm, teacher, availableWeeks);
         sendJson(res, 200, {
-          teacher: auth.account.role === "teacher" ? teacherIdentityOnly(teacher) : teacher,
+          teacher: (accountHasRole(auth.account, "teacher") || auth.account.role === "system_admin")
+            ? teacherIdentityOnly(teacher)
+            : teacher,
           currentTerm: termContext.currentTerm,
           weekStart,
           availableWeeks,
@@ -1352,13 +1491,15 @@ async function handleApi(req, res, db, url) {
         sendJson(
           res,
           200,
-          auth.account.role === "teacher" ? teacherWorkloadWithoutSalaryDetails(workload) : workload,
+          (accountHasRole(auth.account, "teacher") || auth.account.role === "system_admin")
+            ? teacherWorkloadWithoutSalaryDetails(workload)
+            : workload,
         );
         return;
       }
 
       if (req.method === "POST" && parts[3] === "workload" && parts[4] === "confirm") {
-        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+        if (!accountHasRole(auth.account, "teacher") || auth.account.teacherId !== teacherId) {
           sendError(res, 403, "只能由老师本人确认月度工作量");
           return;
         }
@@ -1380,13 +1521,13 @@ async function handleApi(req, res, db, url) {
         const step = String(body.step || "academic");
         const result = approveMonthlyWorkload(db, teacherId, month, step, auth.account);
         await saveDatabase(db);
-        sendJson(res, 200, result);
+        sendJson(res, 200, auth.account.role === "system_admin" ? teacherWorkloadWithoutSalaryDetails(result) : result);
         return;
       }
 
       if (req.method === "PATCH" && parts[3] === "salary-profile") {
-        if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或行政管理可以维护教师工资档案");
+        if (auth.account.role !== "finance") {
+          sendError(res, 403, "只有财务可以维护教师工资档案");
           return;
         }
         const body = await readJsonBody(req);
@@ -1399,14 +1540,20 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && parts[3] === "payroll") {
+        if (!["finance", "teacher"].includes(auth.account.role)) {
+          sendError(res, 403, "当前账号无权查看工资数据");
+          return;
+        }
         const month = url.searchParams.get("month") || "2026-06";
+	        if (!requireTeacherPayrollMonth(res, db, auth.account, month)) return;
 	        const payroll = teacherPayrollDetail(db, teacherId, month) || teacherPayrollPreview(db, teacherId, month);
-	        const visiblePayroll = auth.account.role === "teacher" ? teacherVisiblePayroll(payroll) : payroll;
+	        const teacherPersonalView = accountHasRole(auth.account, "teacher") && auth.account.teacherId === teacherId;
+	        const visiblePayroll = teacherPersonalView ? teacherVisiblePayroll(payroll) : payroll;
 	        const wantsConfirmationDetail = url.searchParams.get("detail") === "confirmation";
 	        sendJson(
 	          res,
 	          200,
-	          auth.account.role === "teacher"
+	          teacherPersonalView
 	            ? wantsConfirmationDetail
 	              ? teacherPayrollForConfirmation(visiblePayroll)
 	              : teacherPayrollSummaryOnly(visiblePayroll)
@@ -1416,8 +1563,8 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "generate") {
-        if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或行政管理可以生成薪资明细");
+        if (auth.account.role !== "finance") {
+          sendError(res, 403, "只有财务可以生成薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1429,8 +1576,8 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "review") {
-        if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或行政管理可以复核薪资明细");
+        if (auth.account.role !== "finance") {
+          sendError(res, 403, "只有财务可以复核薪资明细");
           return;
         }
         const body = await readJsonBody(req);
@@ -1442,12 +1589,13 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "teacher-confirm") {
-        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+        if (!accountHasRole(auth.account, "teacher") || auth.account.teacherId !== teacherId) {
           sendError(res, 403, "只能由老师本人确认工资明细");
           return;
         }
         const body = await readJsonBody(req);
         const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        if (!requireTeacherPayrollMonth(res, db, auth.account, month)) return;
         const result = confirmTeacherPayrollDetail(db, teacherId, month, auth.account);
         await saveDatabase(db);
         sendJson(res, 200, teacherPayrollForConfirmation(result));
@@ -1455,12 +1603,13 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "dispute") {
-        if (auth.account.role !== "teacher" || auth.account.teacherId !== teacherId) {
+        if (!accountHasRole(auth.account, "teacher") || auth.account.teacherId !== teacherId) {
           sendError(res, 403, "只能由老师本人提出工资异议");
           return;
         }
         const body = await readJsonBody(req);
         const month = String(body.month || url.searchParams.get("month") || "2026-06");
+        if (!requireTeacherPayrollMonth(res, db, auth.account, month)) return;
         const reason = String(body.reason || "").trim();
         const result = disputeTeacherPayrollDetail(db, teacherId, month, reason, auth.account);
         await saveDatabase(db);
@@ -1469,21 +1618,17 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "lock") {
-        if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或行政管理可以锁定薪资明细");
+        if (auth.account.role !== "finance") {
+          sendError(res, 403, "只有财务可以锁定薪资明细");
           return;
         }
-        const body = await readJsonBody(req);
-        const month = String(body.month || url.searchParams.get("month") || "2026-06");
-        const result = lockTeacherPayrollDetail(db, teacherId, month, auth.account);
-        await saveDatabase(db);
-        sendJson(res, 200, result);
+        sendError(res, 409, "工资需经学部主任、校长确认后，由总校财务在执行环节锁定发放");
         return;
       }
 
       if (req.method === "POST" && parts[3] === "payroll" && parts[4] === "unlock") {
-        if (!["finance", "system_admin"].includes(auth.account.role)) {
-          sendError(res, 403, "只有财务或行政管理可以解锁薪资");
+        if (auth.account.role !== "finance") {
+          sendError(res, 403, "只有财务可以解锁薪资");
           return;
         }
         const body = await readJsonBody(req);
@@ -1491,13 +1636,15 @@ async function handleApi(req, res, db, url) {
         const reason = String(body.reason || "").trim();
         const result = unlockTeacherPayrollDetail(db, teacherId, month, reason, auth.account);
         await saveDatabase(db);
+        broadcastEvent("payroll");
+        broadcastEvent("term-budget");
         sendJson(res, 200, result);
         return;
       }
     }
 
     if (req.method === "POST" && url.pathname === "/api/payroll/batch-generate") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
       const body = await readJsonBody(req);
       const result = generatePayrollBatch(db, body, auth.account);
@@ -1509,20 +1656,20 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "POST" && url.pathname === "/api/payroll/batch-lock") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
-      const body = await readJsonBody(req);
-      const result = lockPayrollBatch(db, body, auth.account);
-      await saveDatabase(db);
-      broadcastEvent("payroll");
-      sendJson(res, 200, result);
+      sendError(res, 409, "批量锁定已纳入月度工资确认流程，请提交学部工资确认并等待总校财务执行");
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/export") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
-      const scope = financeScopeFor(auth.account);
+      if (!canExportAllPayrollDetails(auth.account)) {
+        sendError(res, 403, "仅总校财务可以导出全校工资明细");
+        return;
+      }
+      const scope = financeReadScopeFor(auth.account);
       const options = { ...Object.fromEntries(url.searchParams), financeScope: scope };
       // Excel 版是给财务归档与线下办税用的（验收 3.15）：带表头、合计行与签字栏；
       // CSV 版保留给需要机器导入的场景。
@@ -1546,6 +1693,7 @@ async function handleApi(req, res, db, url) {
         params.dimension = "teacher";
         params.targetId = auth.account.teacherId || "";
       }
+      assertScheduleQueryScope(db, auth.account, params);
       sendJson(res, 200, {
         grid: buildScheduleGrid(db, {
           termId: params.termId || queryTerms(db).currentTerm.id,
@@ -1573,6 +1721,7 @@ async function handleApi(req, res, db, url) {
         params.dimension = "teacher";
         params.targetId = auth.account.teacherId || "";
       }
+      assertScheduleQueryScope(db, auth.account, params);
       const scopedDb = await withLessonsOf(params.termId || queryTerms(db).currentTerm.id);
       const result = exportSchedule(scopedDb, {
         termId: params.termId || queryTerms(db).currentTerm.id,
@@ -1619,6 +1768,7 @@ async function handleApi(req, res, db, url) {
       if (req.method === "POST" && (action === "preview" || action === "commit")) {
         const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
         if (!auth) return;
+        if (rejectScopedAdmin(res, auth.account, "学部排课负责人不能批量改动全校基础数据")) return;
         const body = await readJsonBody(req);
         const options = {
           termId: body.termId || queryTerms(db).currentTerm.id,
@@ -1669,9 +1819,9 @@ async function handleApi(req, res, db, url) {
       const period = parts[3] ? decodeURIComponent(parts[3]) : "";
       const action = parts[4] || "";
 
-      // 清单与详情：教务、人事、财务、校领导都要能看数据边界（8.1）
+      // 账套统一由总校人事行政维护。不能只在前端隐藏菜单；所有直连接口也要收口。
       if (req.method === "GET" && !type) {
-        const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "finance", "division_head", "principal"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         sendJson(res, 200, {
           types: Object.entries(LEDGER_TYPES).map(([key, spec]) => ({ key, label: spec.label, period: spec.period })),
@@ -1684,7 +1834,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && type && period && !action) {
-        const auth = requireAuth(req, res, db, ["admin", "system_admin", "hr", "finance", "division_head", "principal"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         sendJson(res, 200, { ledger: ledgerDetail(db, type, period) });
         return;
@@ -1692,7 +1842,7 @@ async function handleApi(req, res, db, url) {
 
       // 单账套备份下载（8.2 / 8.17）
       if (req.method === "GET" && type && period && action === "backup") {
-        const auth = requireAuth(req, res, db, ["system_admin", "admin"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         const backup = buildLedgerBackup(db, type, period);
         sendJson(res, 200, {
@@ -1706,7 +1856,7 @@ async function handleApi(req, res, db, url) {
 
       // 初始化（8.3）
       if (req.method === "POST" && type && period && !action) {
-        const auth = requireAuth(req, res, db, ["system_admin", "admin", "finance", "hr"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const result = initializeLedger(db, { type, period, carryOver: body.carryOver !== false }, auth.account);
@@ -1719,7 +1869,7 @@ async function handleApi(req, res, db, url) {
 
       // 状态流转：锁定 / 归档（8.9 / 8.11）
       if (req.method === "POST" && type && period && action === "transition") {
-        const auth = requireAuth(req, res, db, ["system_admin", "admin", "finance"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const ledger = transitionLedger(
@@ -1736,7 +1886,7 @@ async function handleApi(req, res, db, url) {
 
       // 结转（8.4 / 8.6）
       if (req.method === "POST" && type && period && action === "carry-over") {
-        const auth = requireAuth(req, res, db, ["system_admin", "hr", "finance"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         const roster = carryOverRoster(db, type, period, auth.account);
         await saveDatabase(db);
@@ -1818,7 +1968,7 @@ async function handleApi(req, res, db, url) {
 
     // 对账（验收 8.12 / 8.13 / 8.14）
     if (url.pathname === "/api/reconciliation") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin", "admin", "hr", "principal"]);
+      const auth = requireAuth(req, res, db, ["system_admin"]);
       if (!auth) return;
       const month = url.searchParams.get("month") || new Date().toISOString().slice(0, 7);
       if (req.method === "GET") {
@@ -1863,6 +2013,10 @@ async function handleApi(req, res, db, url) {
       };
       const workloadDb = await withLessonsOf(options.termId);
       if (params.format === "excel") {
+        if (auth.account.role === "finance" && !canExportAllPayrollDetails(auth.account)) {
+          sendError(res, 403, "学部财务只能查看工作量台账，不能导出");
+          return;
+        }
         const result = exportWeeklyWorkload(workloadDb, options);
         sendJson(res, 200, {
           filename: result.filename,
@@ -1876,10 +2030,11 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
-    // 年度薪资汇总（验收 3.19）。教师可查本人，其余角色受财务/学部范围约束。
+    // 年度薪资汇总（验收 3.19）属于管理报表。老师端只允许查看当前学期，
+    // 因此不能从年度报表接口绕过当前学期的可见窗口。
     if (req.method === "GET" && url.pathname === "/api/reports/annual-salary") {
       const auth = requireAuth(req, res, db, [
-        "admin", "system_admin", "finance", "hr", "division_head", "teacher",
+        "admin", "finance", "hr", "division_head",
       ]);
       if (!auth) return;
       const params = Object.fromEntries(url.searchParams);
@@ -1890,6 +2045,10 @@ async function handleApi(req, res, db, url) {
         account: auth.account,
       };
       if (params.format === "excel") {
+        if (!canExportAllPayrollDetails(auth.account)) {
+          sendError(res, 403, "仅总校财务可以导出薪资报表");
+          return;
+        }
         const result = exportAnnualSalary(db, options);
         sendJson(res, 200, {
           filename: result.filename,
@@ -1905,19 +2064,21 @@ async function handleApi(req, res, db, url) {
 
     // 学期薪酬预算：仅展示，不对发放做限制。财务只看本人口径，行政管理看全部四个。
     if (req.method === "GET" && url.pathname === "/api/payroll/budget") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin", "admin", "hr"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin", "admin", "hr", "division_head", "principal"]);
       if (!auth) return;
       const termId = String(url.searchParams.get("termId") || queryTerms(db).currentTerm.id);
-      sendJson(res, 200, queryTermBudget(db, termId, financeScopeFor(auth.account) || ""));
+      const stageScope = accountStageScopeIds(auth.account);
+      const budgetScope = stageScope.length === 1 ? stageScope[0] : financeReadScopeFor(auth.account) || "";
+      sendJson(res, 200, queryTermBudget(db, termId, budgetScope));
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/history") {
-      const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+      const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
       sendJson(res, 200, queryPayrollHistory(db, {
         ...Object.fromEntries(url.searchParams),
-        financeScope: financeScopeFor(auth.account),
+        financeScope: financeReadScopeFor(auth.account),
       }));
       return;
     }
@@ -1930,7 +2091,11 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/hr/org-units") {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
         if (!auth) return;
-        sendJson(res, 200, { units: filterOrgUnitsByFinanceScope(auth.account, queryOrgUnits(db)) });
+        if (auth.account.role === "finance" && !canExportAllPayrollDetails(auth.account)) {
+          sendError(res, 403, "仅总校财务可以查看组织与岗位");
+          return;
+        }
+        sendJson(res, 200, { units: queryOrgUnits(db) });
         return;
       }
 
@@ -1966,6 +2131,10 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/hr/positions") {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
         if (!auth) return;
+        if (auth.account.role === "finance" && !canExportAllPayrollDetails(auth.account)) {
+          sendError(res, 403, "仅总校财务可以查看组织与岗位");
+          return;
+        }
         sendJson(res, 200, { positions: queryPositions(db, Object.fromEntries(url.searchParams)) });
         return;
       }
@@ -1988,6 +2157,35 @@ async function handleApi(req, res, db, url) {
         const position = updatePosition(db, positionMatch[1], body, auth.account, hrContext);
         await saveDatabase(db);
         sendJson(res, 200, { position });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/hr/personnel-tags") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        sendJson(res, 200, { tags: queryPersonnelTags(db) });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/hr/personnel-tags") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        const body = await readJsonBody(req);
+        const tag = createPersonnelTag(db, body, auth.account, hrContext);
+        await saveDatabase(db);
+        broadcastEvent("hr-employee");
+        sendJson(res, 200, { tag });
+        return;
+      }
+
+      const personnelTagMatch = url.pathname.match(/^\/api\/hr\/personnel-tags\/([^/]+)$/);
+      if (personnelTagMatch && req.method === "DELETE") {
+        const auth = requireAuth(req, res, db, ["system_admin"]);
+        if (!auth) return;
+        const result = deletePersonnelTag(db, personnelTagMatch[1], auth.account, hrContext);
+        await saveDatabase(db);
+        broadcastEvent("hr-employee");
+        sendJson(res, 200, result);
         return;
       }
 
@@ -2124,7 +2322,9 @@ async function handleApi(req, res, db, url) {
         if (req.method === "GET" && !subPath) {
           const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
           if (!auth) return;
-          const detail = getEmployeeDetail(db, employeeId);
+          const detail = getEmployeeDetail(db, employeeId, {
+            includeAgreementMonthlySalary: auth.account.role === "system_admin",
+          });
           assertEmployeeInScope(db, auth.account, db.employees.find((item) => item.id === employeeId));
           sendJson(res, 200, detail);
           return;
@@ -2133,13 +2333,20 @@ async function handleApi(req, res, db, url) {
         if (!auth) return;
         const body = await readJsonBody(req);
         if (req.method === "PATCH" && !subPath) {
+          const existing = (db.employees || []).find((item) => item.id === employeeId);
+          const workStatusChanged =
+            body.workStatus !== undefined && String(body.workStatus || "") !== String(existing?.workStatus || "employed");
           const employee = updateEmployee(db, employeeId, body, auth.account, hrContext);
+          const invalidatedCount = workStatusChanged && employee.teacherId
+            ? invalidateOpenPayrollDetailsForTeacher(db, employee.teacherId)
+            : 0;
           await saveDatabase(db);
           // 人事档案是跨模块共享的主数据：改了职称、任教科目，排课与工资侧
           // 立刻就跟着变（验收 4.1/4.3）。不广播的话，别的角色要刷新页面才看得到，
           // 而 4.5 要的是「实时推送」。
           broadcastEvent("hr-employee");
-          sendJson(res, 200, { employee });
+          if (workStatusChanged) broadcastEvent("payroll");
+          sendJson(res, 200, { employee, invalidatedCount });
           return;
         }
         if (req.method === "POST" && subPath === "status") {
@@ -2175,40 +2382,49 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
-      // ---- 月度考核（学部负责人/人事录入，财务只读）----
+      // ---- 月度考核分数（对应范围的工资核算员录入）----
       if (req.method === "GET" && url.pathname === "/api/hr/assessments") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "finance"]);
+        const auth = requireAuth(req, res, db, ["finance"]);
         if (!auth) return;
         sendJson(res, 200, {
           assessments: queryMonthlyAssessments(db, Object.fromEntries(url.searchParams), auth.account),
-          grades: ASSESSMENT_GRADES,
         });
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/api/hr/assessments") {
-        // 财务不在此列：财务不掌握教师日常表现，不应决定考核等级
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["finance"]);
         if (!auth) return;
         const body = await readJsonBody(req);
+        const teacherId = String(body.teacherId || "");
+        const month = String(body.month || "");
+        if (teacherId && /^\d{4}-\d{2}$/.test(month)) {
+          const currentPayroll = teacherPayrollDetail(db, teacherId, month);
+          if (currentPayroll?.generated?.status === "locked") {
+            sendError(res, 409, "本月工资已锁定，请先解锁后再修改考核分数");
+            return;
+          }
+        }
         const assessment = upsertMonthlyAssessment(db, body, auth.account);
         invalidateOpenPayrollDetailsForTeacher(db, assessment.teacherId, assessment.month);
         await saveDatabase(db);
+        // 考核分数会改变未锁定工资的试算金额，在线财务与老师端都应立即刷新。
+        broadcastEvent("payroll");
         sendJson(res, 200, { assessment });
         return;
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/salary-templates") {
-        const auth = requireAuth(req, res, db, ["hr", "finance", "system_admin"]);
+        const auth = requireAuth(req, res, db, ["hr", "finance"]);
         if (!auth) return;
-        // 金额权限：hr 只能看到绑定关系与版本号，payload 只发给财务与总校
-        const includePayload = auth.account.role === "finance" || auth.account.role === "system_admin";
+        // 人事只看绑定关系与版本号；薪资规则的金额仅发给财务。
+        const includePayload = auth.account.role === "finance";
         sendJson(res, 200, { templates: querySalaryTemplates(db, { includePayload }) });
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/api/hr/salary-templates") {
-        const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+        const auth = requireAuth(req, res, db, ["finance"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const result = createSalaryTemplate(db, body, auth.account, hrContext);
@@ -2219,7 +2435,7 @@ async function handleApi(req, res, db, url) {
 
       const templateMatch = url.pathname.match(/^\/api\/hr\/salary-templates\/([^/]+)\/(versions|apply)$/);
       if (templateMatch && req.method === "POST") {
-        const auth = requireAuth(req, res, db, ["finance", "system_admin"]);
+        const auth = requireAuth(req, res, db, ["finance"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         if (templateMatch[2] === "versions") {
@@ -2284,7 +2500,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/audit-logs") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["system_admin"]);
         if (!auth) return;
         sendJson(res, 200, queryHrAuditLogs(db, Object.fromEntries(url.searchParams), hrScopeFor(db, auth.account)));
         return;
@@ -2344,7 +2560,16 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/oa/templates") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
         if (!auth) return;
-        sendJson(res, 200, { templates: listTemplatesForRole(db, auth.account.role) });
+        sendJson(res, 200, { templates: listTemplatesForRole(db, auth.account) });
+        return;
+      }
+
+      // 学部财务发起月度工资确认时，只能选择“本学部、已完成复核”的工资期间。
+      // 人数和应发金额由服务端从工资快照回填，避免手填金额与实际明细不一致。
+      if (req.method === "GET" && url.pathname === "/api/oa/payroll-approval-options") {
+        const auth = requireAuth(req, res, db, ["finance"]);
+        if (!auth) return;
+        sendJson(res, 200, listPayrollApprovalOptions(db, auth.account));
         return;
       }
 
@@ -2355,6 +2580,7 @@ async function handleApi(req, res, db, url) {
         sendJson(res, 200, {
           templates: listAllTemplates(db),
           approverRoles: OA_APPROVER_ROLES,
+          approverAccounts: listOaApproverAccounts(db),
           fieldTypes: OA_FIELD_TYPES,
         });
         return;
@@ -2404,16 +2630,31 @@ async function handleApi(req, res, db, url) {
         const teacherId = applicantAccount?.teacherId || "";
         const startDate = request.formData?.startDate || "";
         const endDate = request.formData?.endDate || startDate;
-        const lessons = teacherId ? listTeacherLessonsInRange(db, teacherId, startDate, endDate) : [];
+        const lessons = teacherId
+          ? listTeacherLessonsInRange(db, teacherId, startDate, endDate).filter((lesson) =>
+              lessonIsInLeaveHalfRange(lesson, request.formData),
+            )
+          : [];
         sendJson(res, 200, {
           teacherId,
           startDate,
           endDate,
+          startHalf: request.formData?.startHalf || "",
+          endHalf: request.formData?.endHalf || "",
           lessons: lessons.map((lesson) => ({
             ...lesson,
             candidates: lesson.changeable ? listSubstituteCandidates(db, lesson.lessonId) : [],
           })),
         });
+        return;
+      }
+
+      // 调课申请用：老师选择自己的已发布课程，以及线下协商好的另一位老师的课程。
+      // 返回课程主键而非让老师手输日期/节次，审批通过时才能可靠地修改真实课表。
+      if (req.method === "GET" && url.pathname === "/api/oa/lesson-swap-options") {
+        const auth = requireAuth(req, res, db, ["teacher", "division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, listLessonSwapOptions(db, auth.account.teacherId));
         return;
       }
 
@@ -2437,12 +2678,75 @@ async function handleApi(req, res, db, url) {
       if (req.method === "POST" && url.pathname === "/api/oa/requests") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
         if (!auth) return;
-        const body = await readJsonBody(req);
-        const request = createOaRequest(db, auth.account, body);
-        await saveDatabase(db);
-        broadcastEvent("oa-request");
-        broadcastEvent("notification");
-        sendJson(res, 200, { request });
+        const isMultipart = String(req.headers["content-type"] || "").toLowerCase().includes("multipart/form-data");
+        let body;
+        let files = [];
+        if (isMultipart) {
+          const parsed = await parseMultipart(req, {
+            maxBytes: MAX_ATTACHMENT_BYTES * MAX_OA_ATTACHMENTS + 1024 * 1024,
+            maxFiles: MAX_OA_ATTACHMENTS,
+          });
+          files = parsed.files;
+          try {
+            body = JSON.parse(parsed.fields.payload || "{}");
+          } catch {
+            sendError(res, 400, "申请数据格式错误");
+            return;
+          }
+          body.formData = body.formData && typeof body.formData === "object" ? body.formData : {};
+          // 先把文件名写进对应表单字段，使必传附件模板也能通过表单校验；
+          // 文件本体随后经魔数识别、加密落盘，不能只相信这个文件名。
+          const namesByField = new Map();
+          files.forEach((file) => {
+            const key = String(file.name || "attachment");
+            namesByField.set(key, [...(namesByField.get(key) || []), file.filename]);
+          });
+          namesByField.forEach((names, key) => {
+            body.formData[key] = names.join("、");
+          });
+        } else {
+          body = await readJsonBody(req);
+        }
+
+        // createOaRequest 会同时产生审批通知；若任一附件保存失败，内存里的
+        // 申请、通知和附件元数据都必须回滚，不能留下“申请成功但材料丢了”的半成品。
+        const requestCount = (db.oaRequests || []).length;
+        const notificationCount = (db.notifications || []).length;
+        const attachmentCount = (db.hrAttachments || []).length;
+        try {
+          const request = createOaRequest(db, auth.account, body);
+          const allowedFileFields = new Set(
+            getOaRequestDetail(db, request.id, auth.account)
+              .formFields.filter((field) => field.type === "file")
+              .map((field) => field.key),
+          );
+          const invalidFile = files.find((file) => !allowedFileFields.has(String(file.name || "")));
+          if (invalidFile) {
+            const error = new Error("该审批类型不接受此附件字段");
+            error.statusCode = 400;
+            throw error;
+          }
+          for (const file of files) {
+            await saveAttachment(db, {
+              employeeId: oaAttachmentOwnerId(request.id),
+              category: "other",
+              filename: file.filename,
+              contentType: file.contentType,
+              data: file.data,
+              actorAccount: auth.account,
+            });
+          }
+          const attachments = listAttachments(db, oaAttachmentOwnerId(request.id));
+          await saveDatabase(db);
+          broadcastEvent("oa-request");
+          broadcastEvent("notification");
+          sendJson(res, 200, { request: { ...request, attachments } });
+        } catch (error) {
+          if (Array.isArray(db.oaRequests)) db.oaRequests.splice(requestCount);
+          if (Array.isArray(db.notifications)) db.notifications.splice(notificationCount);
+          if (Array.isArray(db.hrAttachments)) db.hrAttachments.splice(attachmentCount);
+          throw error;
+        }
         return;
       }
 
@@ -2475,8 +2779,61 @@ async function handleApi(req, res, db, url) {
         return;
       }
 
-      // 审批动作：approve / reject / withdraw / urge
-      const actionMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)\/(approve|reject|withdraw|urge)$/);
+      // 执行环节凭证：审批人和执行人完全分离。只有审批全部通过后被指定的
+      // 执行人才可以上传拨款回单、截图等，并由下一个 execute 动作正式办结。
+      const executionEvidenceMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)\/execution\/evidence$/);
+      if (executionEvidenceMatch && req.method === "POST") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        const parsed = await parseMultipart(req, {
+          maxBytes: MAX_ATTACHMENT_BYTES * MAX_OA_ATTACHMENTS + 1024 * 1024,
+          maxFiles: MAX_OA_ATTACHMENTS,
+        });
+        if (!parsed.files.length) {
+          sendError(res, 400, "请至少选择一份执行凭证");
+          return;
+        }
+        const requestId = executionEvidenceMatch[1];
+        const request = db.oaRequests?.find((item) => item.id === requestId);
+        const attachmentCount = (db.hrAttachments || []).length;
+        const beforeExecution = request?.execution ? JSON.parse(JSON.stringify(request.execution)) : null;
+        const beforeTimelineLength = request?.timeline?.length || 0;
+        const beforeUpdatedAt = request?.updatedAt || "";
+        try {
+          const saved = [];
+          for (const file of parsed.files) {
+            saved.push(
+              await saveAttachment(db, {
+                employeeId: oaAttachmentOwnerId(requestId),
+                category: "other",
+                filename: file.filename,
+                contentType: file.contentType,
+                data: file.data,
+                actorAccount: auth.account,
+              }),
+            );
+          }
+          const updated = addOaExecutionEvidence(db, requestId, saved, auth.account);
+          await saveDatabase(db);
+          broadcastEvent("oa-request");
+          sendJson(res, 200, {
+            request: {
+              ...updated,
+              attachments: listAttachments(db, oaAttachmentOwnerId(requestId)),
+            },
+          });
+        } catch (error) {
+          if (Array.isArray(db.hrAttachments)) db.hrAttachments.splice(attachmentCount);
+          if (request?.execution && beforeExecution) request.execution = beforeExecution;
+          if (Array.isArray(request?.timeline)) request.timeline.splice(beforeTimelineLength);
+          if (request) request.updatedAt = beforeUpdatedAt;
+          throw error;
+        }
+        return;
+      }
+
+      // 审批动作：approve / reject / withdraw / urge；execute 仅执行人可操作。
+      const actionMatch = url.pathname.match(/^\/api\/oa\/requests\/([^/]+)\/(approve|reject|withdraw|urge|execute)$/);
       if (actionMatch && req.method === "POST") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
         if (!auth) return;
@@ -2485,11 +2842,46 @@ async function handleApi(req, res, db, url) {
         let request;
         if (action === "withdraw") request = withdrawOaRequest(db, requestId, auth.account);
         else if (action === "urge") request = urgeOaRequest(db, requestId, auth.account);
+        else if (action === "execute") request = executeOaRequest(db, requestId, auth.account, body);
         else request = actOnOaRequest(db, requestId, action, auth.account, body);
         await saveDatabase(db);
         broadcastEvent("oa-request");
         broadcastEvent("notification");
+        // 薪酬预算确认、学部预算使用申请办结后会改写预算台账；主任和财务
+        // 正在查看的同一 termId 面板必须自动失效重载，不能还停留在旧余额。
+        if (["term_budget", "division_budget_usage", "payroll_ledger"].includes(request?.appliedResult?.type)) {
+          broadcastEvent("term-budget");
+        }
+        if (["leave_payroll", "payroll_ledger"].includes(request?.appliedResult?.type)) broadcastEvent("payroll");
         sendJson(res, 200, { request });
+        return;
+      }
+
+      // OA 证明材料下载：先用审批详情的同一套规则验证“与该单相关”，
+      // 再核对附件所有者，防止拿别人的附件 ID 越权下载。
+      const oaAttachmentMatch = url.pathname.match(
+        /^\/api\/oa\/requests\/([^/]+)\/attachments\/([^/]+)\/content$/,
+      );
+      if (oaAttachmentMatch && req.method === "GET") {
+        const auth = requireAuth(req, res, db, ALL_ROLES);
+        if (!auth) return;
+        const [, requestId, attachmentId] = oaAttachmentMatch;
+        getOaRequestDetail(db, requestId, auth.account);
+        const { record, data } = await readAttachment(db, attachmentId);
+        if (record.employeeId !== oaAttachmentOwnerId(requestId)) {
+          sendError(res, 404, "附件不存在");
+          return;
+        }
+        res.writeHead(
+          200,
+          securityHeaders({
+            "Content-Type": record.mimeType,
+            "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`,
+            "Content-Length": data.length,
+            "Cache-Control": "no-store",
+          }),
+        );
+        res.end(data);
         return;
       }
 
@@ -2498,7 +2890,13 @@ async function handleApi(req, res, db, url) {
       if (detailMatch && req.method === "GET") {
         const auth = requireAuth(req, res, db, ALL_ROLES);
         if (!auth) return;
-        sendJson(res, 200, { request: getOaRequestDetail(db, detailMatch[1], auth.account) });
+        const request = getOaRequestDetail(db, detailMatch[1], auth.account);
+        sendJson(res, 200, {
+          request: {
+            ...request,
+            attachments: listAttachments(db, oaAttachmentOwnerId(detailMatch[1])),
+          },
+        });
         return;
       }
     }
@@ -2605,11 +3003,64 @@ async function serveStatic(req, res, url) {
  * 于是测试往往退而求其次，在测试里自己注册一份一模一样的 handler——
  * 那验证的是测试自己写的副本，生产代码里那份错了也照样通过。
  */
+function monthsBetween(startMonth, endMonth) {
+  const start = /^(\d{4})-(\d{2})$/.exec(String(startMonth || ""));
+  const end = /^(\d{4})-(\d{2})$/.exec(String(endMonth || ""));
+  if (!start || !end) return [];
+  const startIndex = Number(start[1]) * 12 + Number(start[2]) - 1;
+  const endIndex = Number(end[1]) * 12 + Number(end[2]) - 1;
+  if (
+    startIndex > endIndex ||
+    Number(start[2]) < 1 ||
+    Number(start[2]) > 12 ||
+    Number(end[2]) < 1 ||
+    Number(end[2]) > 12
+  ) return [];
+  const months = [];
+  for (let index = startIndex; index <= endIndex; index += 1) {
+    const year = Math.floor(index / 12);
+    const month = (index % 12) + 1;
+    months.push(`${year}-${String(month).padStart(2, "0")}`);
+  }
+  return months;
+}
+
 export function registerApprovalSideEffects() {
   // 请假审批通过后由调课引擎真正更新课表（含全部冲突与锁定校验）
   registerOaSideEffect("applySubstitutes", (database, arrangements, account) =>
     applySubstituteArrangements(database, arrangements, account),
   );
+
+  // 调课审批通过后，双方已协商的两节课程原子地互换上课时间。
+  registerOaSideEffect("applyLessonSwap", (database, payload, account) =>
+    applyApprovedLessonSwap(database, payload, account),
+  );
+
+  // 请假最终备案后，已生成但尚未锁定的工资单必须丢弃并按实际请假日重算。
+  // 锁定工资不会被这一动作改写，仍须按账套解锁/更正的受控流程处理。
+  registerOaSideEffect("invalidateLeavePayroll", (database, payload) => {
+    const applicant = (database.accounts || []).find((item) => item.id === payload.applicantAccountId);
+    const teacherId = applicant?.teacherId || "";
+    const startMonth = String(payload.formData?.startDate || "").slice(0, 7);
+    const endMonth = String(payload.formData?.endDate || "").slice(0, 7);
+    const months = monthsBetween(startMonth, endMonth);
+    const invalidated = teacherId
+      ? months.map((month) => ({ month, count: invalidateOpenPayrollDetailsForTeacher(database, teacherId, month) }))
+      : [];
+    return {
+      type: "leave_payroll",
+      teacherId,
+      months,
+      invalidatedCount: invalidated.reduce((sum, item) => sum + item.count, 0),
+      lockedMonths: teacherId
+        ? months.filter((month) =>
+            (database.payrollDetails || []).some(
+              (item) => item.teacherId === teacherId && item.month === month && item.status === "locked",
+            ),
+          )
+        : [],
+    };
+  });
 
   // 账套解锁三级通过后才真的解锁（验收 8.10）。
   //
@@ -2679,6 +3130,67 @@ export function registerApprovalSideEffects() {
       totalAmount: batch.results
         .filter((item) => item.ok)
         .reduce((sum, item) => sum + Number(item.grossPay || 0), 0),
+    };
+  });
+
+  // 新版“月度工资确认”不在校长签字时锁定，而是在总校财务上传发放凭证并确认
+  // 执行时锁定。先预检所有人员，确保不会出现“一半已发、一半失败”的半完成状态。
+  // 这里刻意不锁全校的 payroll 账套：四个学部会分别走确认流程，先完成的小学部
+  // 不能把同月其他学部的正常核算一并封死；每一份工资明细本身仍会锁定且不可改写。
+  registerOaSideEffect("executeApprovedPayroll", (database, payload) => {
+    const scopeId = String(payload.scopeId || "").trim();
+    const month = String(payload.month || "").trim();
+    const termId = String(payload.termId || "").trim();
+    const expectedCount = Number(payload.headcount || 0);
+    const scoped = (database.payrollDetails || []).filter(
+      (detail) =>
+        detail.month === month &&
+        detail.termId === termId &&
+        payrollScopeOfTeacher(database, detail.teacherId) === scopeId,
+    );
+    if (!scoped.length || scoped.length !== expectedCount) {
+      const error = new Error("本学部工资明细数量与审批快照不一致，请重新核算后发起确认");
+      error.statusCode = 409;
+      throw error;
+    }
+    const notReviewable = scoped.filter((detail) => detail.status !== "reviewed");
+    if (notReviewable.length) {
+      const error = new Error(`仍有 ${notReviewable.length} 人工资未保持“财务已复核”状态，不能执行发放`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const withPendingLessons = scoped
+      .map((detail) => ({ detail, blockers: teacherPayrollDetail(database, detail.teacherId, month)?.lockBlockers || [] }))
+      .filter((item) => item.blockers.length);
+    if (withPendingLessons.length) {
+      const error = new Error(`仍有 ${withPendingLessons.length} 人存在未上课但已计薪的课程，不能执行发放`);
+      error.statusCode = 409;
+      throw error;
+    }
+    const batch = lockPayrollBatch(
+      database,
+      { month, teacherIds: scoped.map((detail) => detail.teacherId) },
+      {
+        id: "SYSTEM-OA",
+        role: "finance",
+        financeScope: scopeId,
+        name: `${payload.actorName}（工资确认 ${payload.requestId}）`,
+      },
+    );
+    if (batch.failedCount) {
+      // 正常情况下上方预检已经覆盖所有失败条件；保留这道防线，避免业务规则日后
+      // 新增后悄悄出现部分锁定。当前请求会报错，需由管理员按解锁流程更正。
+      const error = new Error(`工资锁定未完成：${batch.results.filter((item) => !item.ok).map((item) => item.error).filter(Boolean).join("；")}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    return {
+      month,
+      scopeId,
+      scopeName: String(payload.scopeName || financeScopeLabel(scopeId)),
+      lockedCount: batch.successCount,
+      ledgerStatus: "学部工资已锁定",
+      totalAmount: batch.results.reduce((sum, item) => sum + Number(item.grossPay || 0), 0),
     };
   });
 }

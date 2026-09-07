@@ -1,11 +1,12 @@
-// 财务分权：四个财务账号各管一摊
-//   小学部/初中部/高中部财务 —— 各自学部的任课老师薪资
+// 财务分权：总校 + 四个学部各管一摊
+//   幼儿园/小学部/初中部/高中部财务 —— 各自学部的任课老师薪资
 //   总校财务               —— 行政、后勤等非任课人员薪资
 //
 // 归属判定的唯一依据放在这里，避免各处接口各写一份口径导致边界不一致。
 // system_admin 不受范围限制（返回 null 表示全校）。
 
 export const FINANCE_SCOPES = [
+  { id: "kindergarten", name: "幼儿园", type: "division", stageId: "kindergarten" },
   { id: "primary", name: "小学部", type: "division", stageId: "primary" },
   { id: "middle", name: "初中部", type: "division", stageId: "middle" },
   { id: "high", name: "高中部", type: "division", stageId: "high" },
@@ -57,6 +58,32 @@ export function financeScopeFor(account) {
   return normalizeFinanceScope(account.financeScope) || HEADQUARTERS_SCOPE;
 }
 
+/** 总校财务读全校、写总校；学部财务的读写范围相同。 */
+export function financeReadScopeFor(account) {
+  const writeScope = financeScopeFor(account);
+  if (!writeScope) return null;
+  if (writeScope === HEADQUARTERS_SCOPE && account?.financeReadAll) return null;
+  return writeScope;
+}
+
+/**
+ * 工资明细可离线留存、传播范围更广，导出权限比“查看”更严格：仅总校财务可导出。
+ * 学部财务仍可在本学部核算和查看，但不能导出。
+ */
+export function canExportAllPayrollDetails(account) {
+  return Boolean(
+    account?.role === "finance" &&
+      financeScopeFor(account) === HEADQUARTERS_SCOPE &&
+      account.financeReadAll,
+  );
+}
+
+export function canFinanceReadTeacher(db, account, teacherId) {
+  const scope = financeReadScopeFor(account);
+  if (!scope) return true;
+  return payrollScopeOfTeacher(db, teacherId) === scope;
+}
+
 export function canFinanceActOnTeacher(db, account, teacherId) {
   const scope = financeScopeFor(account);
   if (!scope) return true;
@@ -73,7 +100,7 @@ export function assertTeacherInFinanceScope(db, account, teacherId) {
 
 /** 按账号范围过滤老师列表；不受限时原样返回。 */
 export function filterTeachersByFinanceScope(db, account, teachers) {
-  const scope = financeScopeFor(account);
+  const scope = financeReadScopeFor(account);
   if (!scope) return teachers;
   return teachers.filter((teacher) => payrollScopeOfTeacher(db, teacher.id) === scope);
 }
@@ -85,7 +112,7 @@ export function filterTeachersByFinanceScope(db, account, teachers) {
 
 /** 带 stageId 的行按范围过滤（教室、班级等）。总校财务不持有学部资源，返回空。 */
 export function filterStageRowsByFinanceScope(account, rows, stageKey = "stageId") {
-  const scope = financeScopeFor(account);
+  const scope = financeReadScopeFor(account);
   if (!scope) return rows;
   if (scope === HEADQUARTERS_SCOPE) return [];
   return (rows || []).filter((row) => String(row?.[stageKey] || "") === scope);
@@ -96,7 +123,7 @@ export function filterStageRowsByFinanceScope(account, rows, stageKey = "stageId
  * 总校财务只看到总校根节点 + 非学部的职能部门（行政后勤、财务处等）。
  */
 export function filterOrgUnitsByFinanceScope(account, units) {
-  const scope = financeScopeFor(account);
+  const scope = financeReadScopeFor(account);
   if (!scope) return units;
   const list = units || [];
   const divisionStageIds = new Set(
@@ -134,7 +161,7 @@ export function filterOrgUnitsByFinanceScope(account, units) {
  * 只裁剪键名恰好是学段 id 的对象，其余结构原样保留。
  */
 export function filterPayrollRulesByFinanceScope(account, rules) {
-  const scope = financeScopeFor(account);
+  const scope = financeReadScopeFor(account);
   if (!scope) return rules;
   const divisionIds = FINANCE_SCOPES.filter((item) => item.type === "division").map((item) => item.id);
   // 总校财务管行政后勤，没有教学课时档位，三个学段的分档一并摘掉

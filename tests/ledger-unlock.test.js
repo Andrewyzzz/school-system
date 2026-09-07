@@ -56,8 +56,18 @@ function seed() {
     "最终应由校领导拍板——已锁定意味着钱已经发了",
   );
 
-  // 教师不能发起
-  assert.ok(!template.applicantRoles.includes("teacher"), "普通教师不应能发起账套解锁");
+  assert.deepEqual(template.applicantRoles, ["system_admin"], "账套解锁只能由总校人事行政发起");
+}
+
+// 已运行环境里保存的是旧模板，服务重启时也要把发起权限迁移到行政；
+// 只改内置种子会让老数据库继续放行财务和排课账号。
+{
+  const db = seed();
+  const template = findTemplate(db, "ledger_unlock");
+  template.applicantRoles = ["finance", "admin", "system_admin"];
+  delete template.accessVersion;
+  assert.equal(ensureOaTemplates(db), true, "旧模板权限应触发迁移");
+  assert.deepEqual(findTemplate(db, "ledger_unlock").applicantRoles, ["system_admin"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +80,7 @@ function seed() {
   const db = seed();
   assert.equal(findLedger(db, "payroll", "2026-06").status, "locked", "前置：账套应是已锁定");
 
-  const request = createOaRequest(db, account("finance", "陈财务"), {
+  const request = createOaRequest(db, account("system_admin", "周行政"), {
     templateKey: "ledger_unlock",
     formData: {
       ledgerType: "薪资财务账套",
@@ -119,7 +129,7 @@ function seed() {
   const db = seed();
   assert.throws(
     () =>
-      createOaRequest(db, account("finance", "陈财务"), {
+      createOaRequest(db, account("system_admin", "周行政"), {
         templateKey: "ledger_unlock",
         formData: { ledgerType: "薪资财务账套", period: "2026-6", reason: "x", impact: "y" },
       }),
@@ -128,7 +138,7 @@ function seed() {
   );
   assert.throws(
     () =>
-      createOaRequest(db, account("finance", "陈财务"), {
+      createOaRequest(db, account("system_admin", "周行政"), {
         templateKey: "ledger_unlock",
         formData: { ledgerType: "人事账套", period: "2026-06", reason: "x", impact: "y" },
       }),

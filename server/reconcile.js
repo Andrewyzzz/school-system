@@ -95,7 +95,7 @@ export function reconcileWorkload(db, month, options = {}) {
   const { lessons: providedLessons } = options;
   const monthPrefix = `${month}-`;
   const lessons = (providedLessons || db.lessonInstances || []).filter(
-    (l) => String(l.date || "").startsWith(monthPrefix),
+    (l) => String(l.date || "").startsWith(monthPrefix) && !l.nonPayable,
   );
 
   // 排课侧：排给教师的课都算工作量，只有取消的不算——

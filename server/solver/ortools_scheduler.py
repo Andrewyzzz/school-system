@@ -151,6 +151,8 @@ def build_slots(config):
     for day_index in range(5):
         date = add_days(config["weekStart"], day_index)
         for period in config.get("periods") or []:
+            if period.get("type") != "regular" or period.get("active") is False:
+                continue
             slots.append(
                 {
                     **period,

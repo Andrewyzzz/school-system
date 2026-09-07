@@ -210,9 +210,9 @@ ensureOaTemplates(db);
 const teacherAccount = { ...actor("teacher", "演示教师"), id: (db.accounts.find((a) => a.role === "teacher") || {}).id || "DEMO-teacher" };
 
 const leaveRequests = [
-  { leaveType: "事假", startDate: "2026-09-03", endDate: "2026-09-04", days: 2, reason: "家中有事" },
-  { leaveType: "病假", startDate: "2026-09-10", endDate: "2026-09-10", days: 1, reason: "感冒发烧" },
-  { leaveType: "年假", startDate: "2026-09-20", endDate: "2026-09-24", days: 5, reason: "年假休息" },
+  { leaveType: "事假", startDate: "2026-09-03", startHalf: "上午", endDate: "2026-09-04", endHalf: "下午", days: 2, reason: "家中有事" },
+  { leaveType: "病假", startDate: "2026-09-10", startHalf: "上午", endDate: "2026-09-10", endHalf: "下午", days: 1, reason: "感冒发烧" },
+  { leaveType: "年假", startDate: "2026-09-20", startHalf: "上午", endDate: "2026-09-24", endHalf: "下午", days: 5, reason: "年假休息" },
 ];
 let created = 0;
 leaveRequests.forEach((formData, i) => {

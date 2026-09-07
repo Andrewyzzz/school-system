@@ -26,7 +26,8 @@ import { SENSITIVE_COLLECTIONS, APPEND_ONLY_COLLECTIONS } from "./roles.js";
 
 export const COLLECTION_NOTES = {
   // 人事域
-  employees: { domain: "人事", label: "教职工档案", note: "全校教职工的主档案，含基础信息、组织归属、岗位、证件与银行卡（加密存储）" },
+  employees: { domain: "人事", label: "教职工档案", note: "全校教职工的主档案，含基础信息、组织归属、岗位、证件与银行卡（加密存储）；教师以 teacherId 关联，行政/财务等人员以 accountId 关联" },
+  personnelTags: { domain: "人事", label: "人员自定义标签", note: "由总校人事 + 行政统一配置的人员辅助标签；档案通过 tagIds 多选关联，删除标签会同步解除全部人员关联" },
   employeeContracts: { domain: "人事", label: "劳动合同", note: "合同期限、类型与续签记录，一名员工可有多份" },
   hrFlows: { domain: "人事", label: "人事异动流程", note: "入职、调岗、离职等异动的审批实例" },
   hrFlowSteps: { domain: "人事", label: "异动流程节点", note: "异动流程的各审批环节与处理结果" },
@@ -46,6 +47,7 @@ export const COLLECTION_NOTES = {
   subjects: { domain: "排课", label: "科目", note: "全校共用，不按学期划分" },
   stages: { domain: "排课", label: "学部", note: "小学部/初中部/高中部，是权限与薪资口径的划分依据" },
   terms: { domain: "排课", label: "学期", note: "学期起止与状态，是排课账套的期间标识" },
+  academicCalendarPeriods: { domain: "排课", label: "学部校历区间", note: "按学年和学部分别维护教学期、寒假、暑假；寒暑假不生成排课学期，仅供排课边界和假期薪资识别使用" },
   lessonInstances: { domain: "排课", label: "课次", note: "每一节课的实例，含签到签退与状态；按年无界增长，是数据量最大的表" },
   scheduleDrafts: { domain: "排课", label: "排课草稿", note: "求解器生成的候选课表，确认后才发布" },
   scheduleVersions: { domain: "排课", label: "课表版本", note: "已发布课表的快照，支持回滚" },
@@ -63,7 +65,8 @@ export const COLLECTION_NOTES = {
   payrollDetails: { domain: "薪资", label: "工资单", note: "每人每月一条；金额字段加密存储，数据库中不可明文读取" },
   payrollBatches: { domain: "薪资", label: "批量操作记录", note: "批量生成与批量锁定的执行结果" },
   workloadConfirmations: { domain: "薪资", label: "工作量确认", note: "教师对月度课时的确认与异议" },
-  termBudgets: { domain: "薪资", label: "学期薪酬预算", note: "由「薪酬总额预算确认」审批落地，按四个财务口径分列；仅作展示，不限制实际发放" },
+  termBudgets: { domain: "薪资", label: "学期薪酬预算", note: "由「学部薪酬预算确认」审批逐笔落地，按幼儿园、小学、初中、高中四个学部分列；每笔先由对应学部主任复核，再由校长审批；仅作展示，不限制实际发放" },
+  termBudgetUsageEntries: { domain: "薪资", label: "学部预算使用台账", note: "学部主任发起的预算使用申请经校长批准后写入；与锁定工资单共同构成已使用预算" },
 
   // 系统域
   accounts: { domain: "系统", label: "账号", note: "登录账号与角色，口令为散列存储" },
@@ -81,10 +84,13 @@ export const COLLECTION_NOTES = {
 // 那些当前没出现的合法值，而验收要的正是「标注约束条件」。
 export const KNOWN_ENUMS = {
   "employees.status": "active 在职 / probation 试用 / left 离职",
+  "employees.employmentType": "normal 正常雇佣 / agreement 协议雇佣（agreementMonthlySalary 为每月协议工资）",
+  "employees.workStatus": "employed 就业 / standby 待岗（待岗工资按全校统一最低工资标准的 80% 加住房补贴结算）",
   "teachers.status": "active 在职 / archived 已归档",
   "accounts.status": "active 启用 / disabled 停用",
   "accounts.role": "teacher 教师 / admin 教务 / hr 人事 / finance 财务 / division_head 学部负责人 / principal 校领导 / system_admin 行政管理 / classroom 教室屏",
   "terms.status": "active 进行中 / archived 已归档",
+  "academicCalendarPeriods.type": "teaching 教学学期 / winter_break 寒假 / summer_break 暑假",
   "lessonInstances.status": "scheduled 待上课 / cancelled 已取消（请假未安排代课，不计薪）",
   "lessonInstances.type": "regular 正常课时 / morning 早自习 / evening 晚自习 / weekend 周末补课 / makeup 补课",
   "payrollDetails.status": "generated 待教师确认 / teacher_confirmed 已确认 / disputed 有异议 / reviewed 已复核 / locked 已结算",
@@ -104,6 +110,7 @@ export const FIELD_NOTES = {
   termId: "所属学期，排课账套的期间标识",
   termName: "学期名称（冗余，便于导出时免联表）",
   teacherId: "教师主键，人事/排课/薪资三域的统一关联键（验收 7.5）",
+  accountId: "人员账号主键，行政、财务、排课等非教师人员与账号的统一关联键",
   employeeId: "人事档案主键",
   month: "结算月份 YYYY-MM，薪资账套的期间标识",
   stageId: "学部：primary 小学 / middle 初中 / high 高中",

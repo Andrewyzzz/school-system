@@ -5,7 +5,9 @@ import {
   maskIdCard,
   maskPhone,
 } from "./security/pii.js";
-import { deepMerge, defaultTeacherSalaryProfile } from "./payroll.js";
+import { deepMerge, defaultLifeTeacherSalaryProfile, defaultTeacherSalaryProfile } from "./payroll.js";
+import { assertTeacherInFinanceScope, canFinanceReadTeacher } from "./financeScope.js";
+import { accountHasRole } from "./accountRoles.js";
 
 // 第二阶段 M2：人事管控域逻辑（组织架构、岗位、全员档案、合同、薪资模板、档案变更申请、人事审计）。
 //
@@ -34,6 +36,36 @@ export const EMPLOYEE_STATUS_LABELS = {
   left: "已离职",
   suspended: "停用",
 };
+
+// 人员层级是组织治理标签；在正式学期不影响薪资或审批链路，
+// 仅在校历标记为假期时供薪资引擎应用假期结算口径。
+// 默认普通；高层和中层由总校人事 + 行政逐人维护。
+export const MANAGEMENT_LEVELS = ["senior", "middle", "ordinary"];
+export const MANAGEMENT_LEVEL_LABELS = {
+  senior: "高层",
+  middle: "中层",
+  ordinary: "普通",
+};
+
+// 教师雇佣口径由总校人事 + 行政维护。协议教师不再套用常规教师薪资方案，
+// 而是按协议月薪和校历时间段结算。
+export const EMPLOYMENT_TYPES = ["normal", "agreement"];
+export const EMPLOYMENT_TYPE_LABELS = {
+  normal: "正常",
+  agreement: "协议",
+};
+
+// 工作安排状态与雇佣类型分开维护：正常／协议回答“按哪种合同计薪”，
+// 就业／待岗回答“当前是否在岗位上”。待岗会触发独立的最低工资结算口径。
+export const WORK_STATUSES = ["employed", "standby"];
+export const WORK_STATUS_LABELS = {
+  employed: "就业",
+  standby: "待岗",
+};
+
+// 自定义标签只是人事辅助标识，不参与薪资、排课或审批计算。
+// 色值使用受控枚举，前端无需接收或渲染任意 CSS。
+export const PERSONNEL_TAG_COLORS = ["blue", "green", "orange", "purple", "gray"];
 
 export const ORG_UNIT_TYPES = ["school", "division", "department", "grade_group"];
 export const POSITION_SERIES = [
@@ -73,6 +105,10 @@ const EMPLOYEE_EDITABLE_FIELDS = [
   // 财务不能改（否则改一下职称就等于直接改基本工资档，失去制衡）
   "titleGrade",
   "degree",
+  "managementLevel",
+  "employmentType",
+  "agreementMonthlySalary",
+  "workStatus",
 ];
 
 // 职称档（对应薪资方案 baseSalaryByQualification 的键）
@@ -95,9 +131,9 @@ export const DEGREE_OPTIONS = [
 // 兼岗任命：属于"这个人担任什么职务"的人事事实，由人事维护，财务只读
 export const TEACHER_ROLE_FIELDS = [
   { key: "homeroom", label: "班主任", type: "boolean" },
-  { key: "homeroomStudentCount", label: "班级学生数", type: "number" },
+  { key: "homeroomStudentCount", label: "班主任负责学生总数", type: "number" },
   { key: "gradeHead", label: "年级主任", type: "boolean" },
-  { key: "gradeClassCount", label: "年级管辖班级数", type: "number" },
+  { key: "gradeClassCount", label: "年级主任负责班级数", type: "number" },
   { key: "teachingResearchLeader", label: "教研组长", type: "boolean" },
   { key: "teachingResearchDeputy", label: "教研副组长", type: "boolean" },
   { key: "lessonPrepLeader", label: "备课组长", type: "boolean" },
@@ -111,6 +147,14 @@ export const TEACHER_ROLE_FIELDS = [
   { key: "standardizedExam", label: "统考科目", type: "boolean" },
   { key: "olympiadHomeroom", label: "奥数班主任", type: "boolean" },
   { key: "busDuty", label: "跟车老师", type: "boolean" },
+  // 生活老师专属的人事事实。只在岗位为“生活老师”时展示；学生人数与班主任相同，
+  // 由总校人事 + 行政确认后才进入工资计算。
+  { key: "lifeTeacherKind", label: "生活老师类别", type: "select", options: ["lower", "upper", "standard", "night"] },
+  { key: "lifeTeacherStudentCount", label: "生活老师负责学生总数", type: "number" },
+  { key: "lifeManager", label: "生活主管", type: "boolean" },
+  { key: "buildingLead", label: "栋长", type: "boolean" },
+  { key: "nightShiftLead", label: "夜班组长", type: "boolean" },
+  { key: "primaryDayShift", label: "一年级／六年级白班", type: "boolean" },
 ];
 
 // 兼岗任命归一化：布尔项转布尔、数量项转非负整数，未知键忽略
@@ -122,11 +166,90 @@ export function normalizeTeacherRoles(input = {}) {
     if (field.type === "number") {
       const value = Number(raw);
       roles[field.key] = Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+    } else if (field.type === "select") {
+      roles[field.key] = field.options?.includes(String(raw || "")) ? String(raw) : "";
     } else {
       roles[field.key] = Boolean(raw);
     }
   });
   return roles;
+}
+
+function managementLevelOf(value) {
+  const level = String(value || "").trim();
+  return MANAGEMENT_LEVELS.includes(level) ? level : "ordinary";
+}
+
+function validatedManagementLevel(value) {
+  const level = String(value || "").trim();
+  if (!MANAGEMENT_LEVELS.includes(level)) {
+    throw httpError(400, "人员层级只能选择高层、中层或普通");
+  }
+  return level;
+}
+
+function employmentTypeOf(value) {
+  const type = String(value || "").trim();
+  return EMPLOYMENT_TYPES.includes(type) ? type : "normal";
+}
+
+function validatedEmploymentType(value) {
+  const type = String(value || "").trim();
+  if (!EMPLOYMENT_TYPES.includes(type)) {
+    throw httpError(400, "雇佣类型只能选择正常或协议");
+  }
+  return type;
+}
+
+function validatedAgreementMonthlySalary(value) {
+  const salary = Number(value);
+  if (!Number.isFinite(salary) || salary < 0) {
+    throw httpError(400, "协议月薪必须是大于或等于 0 的金额");
+  }
+  return Math.round(salary * 100) / 100;
+}
+
+function workStatusOf(value) {
+  const status = String(value || "").trim();
+  return WORK_STATUSES.includes(status) ? status : "employed";
+}
+
+function validatedWorkStatus(value) {
+  const status = String(value || "").trim();
+  if (!WORK_STATUSES.includes(status)) {
+    throw httpError(400, "工作状态只能选择就业或待岗");
+  }
+  return status;
+}
+
+function normalizedPersonnelTagName(value) {
+  const name = String(value || "").trim().replace(/\s+/g, " ");
+  if (!name) throw httpError(400, "标签名称不能为空");
+  if (name.length > 20) throw httpError(400, "标签名称不能超过 20 个字");
+  return name;
+}
+
+function personnelTagColorOf(value) {
+  const color = String(value || "").trim();
+  return PERSONNEL_TAG_COLORS.includes(color) ? color : "blue";
+}
+
+function findPersonnelTag(db, tagId) {
+  return db.personnelTags.find((tag) => tag.id === tagId) || null;
+}
+
+function normalizedPersonnelTagIds(db, value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw httpError(400, "人员标签格式无效");
+  const tagIds = Array.from(new Set(value.map((item) => String(item || "").trim()).filter(Boolean)));
+  if (tagIds.length > 12) throw httpError(400, "每人最多选择 12 个自定义标签");
+  const missing = tagIds.filter((tagId) => !findPersonnelTag(db, tagId));
+  if (missing.length) throw httpError(400, "包含已删除或不存在的人员标签");
+  return tagIds;
+}
+
+function publicPersonnelTag(tag) {
+  return { id: tag.id, name: tag.name, color: personnelTagColorOf(tag.color) };
 }
 
 function httpError(statusCode, message, details = null) {
@@ -151,6 +274,7 @@ function ensureCollections(db) {
     "orgUnits",
     "positions",
     "employees",
+    "personnelTags",
     "employeeContracts",
     "salaryTemplates",
     "salaryTemplateVersions",
@@ -545,7 +669,7 @@ function findTeacherRow(db, teacherId) {
 }
 
 // 对外输出的掩码视图：结构上不含加密密文，也不含任何薪资字段
-export function publicEmployee(db, employee) {
+export function publicEmployee(db, employee, options = {}) {
   if (!employee) return null;
   const orgUnit = findOrgUnit(db, employee.orgUnitId);
   const position = findPosition(db, employee.positionId);
@@ -564,13 +688,27 @@ export function publicEmployee(db, employee) {
     emergencyPhone: employee.emergencyPhone || "",
     orgUnitId: employee.orgUnitId || "",
     orgUnitName: orgUnit?.name || "",
+    stageId: orgUnitStageId(db, employee.orgUnitId || ""),
     positionId: employee.positionId || "",
     positionName: position?.name || "",
     positionSeries: position?.series || "",
+    isLifeTeacher: isLifeTeacherPosition(position),
     reportsTo: employee.reportsTo || "",
     teacherId: employee.teacherId || "",
+    accountId: employee.accountId || "",
     status: employee.status,
     statusLabel: EMPLOYEE_STATUS_LABELS[employee.status] || employee.status,
+    managementLevel: managementLevelOf(employee.managementLevel),
+    managementLevelLabel: MANAGEMENT_LEVEL_LABELS[managementLevelOf(employee.managementLevel)],
+    employmentType: employmentTypeOf(employee.employmentType),
+    employmentTypeLabel: EMPLOYMENT_TYPE_LABELS[employmentTypeOf(employee.employmentType)],
+    workStatus: workStatusOf(employee.workStatus),
+    workStatusLabel: WORK_STATUS_LABELS[workStatusOf(employee.workStatus)],
+    tagIds: normalizedPersonnelTagIds(db, employee.tagIds),
+    tags: normalizedPersonnelTagIds(db, employee.tagIds)
+      .map((tagId) => findPersonnelTag(db, tagId))
+      .filter(Boolean)
+      .map(publicPersonnelTag),
     hiredAt: employee.hiredAt || "",
     regularizedAt: employee.regularizedAt || "",
     leftAt: employee.leftAt || "",
@@ -584,7 +722,82 @@ export function publicEmployee(db, employee) {
     teacherRoles: employee.teacherRoles || normalizeTeacherRoles({}),
     createdAt: employee.createdAt,
     updatedAt: employee.updatedAt,
+    // 协议具体金额仅由总校人事 + 行政在档案详情中读取；列表只展示雇佣类型。
+    ...(options.includeAgreementMonthlySalary
+      ? { agreementMonthlySalary: validatedAgreementMonthlySalary(employee.agreementMonthlySalary || 0) }
+      : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// 自定义人员标签
+// ---------------------------------------------------------------------------
+
+export function queryPersonnelTags(db) {
+  ensureCollections(db);
+  return db.personnelTags
+    .slice()
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.name).localeCompare(String(b.name), "zh-CN"))
+    .map(publicPersonnelTag);
+}
+
+export function createPersonnelTag(db, input = {}, actorAccount = null, context = {}) {
+  ensureCollections(db);
+  if (actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以配置人员标签");
+  }
+  const name = normalizedPersonnelTagName(input.name);
+  if (db.personnelTags.some((tag) => tag.name.toLocaleLowerCase("zh-CN") === name.toLocaleLowerCase("zh-CN"))) {
+    throw httpError(409, "已存在同名人员标签");
+  }
+  const now = nowIso();
+  const tag = { id: nextId("PTAG"), name, color: personnelTagColorOf(input.color), createdAt: now, updatedAt: now };
+  db.personnelTags.push(tag);
+  appendHrAuditLog(db, {
+    actorAccount,
+    action: "personnel_tag_create",
+    targetType: "personnel_tag",
+    targetId: tag.id,
+    fieldDiffs: [
+      { field: "名称", before: "", after: tag.name },
+      { field: "颜色", before: "", after: tag.color },
+    ],
+    reason: String(input.reason || "").trim() || `新增人员标签：${tag.name}`,
+    context,
+  });
+  return publicPersonnelTag(tag);
+}
+
+export function deletePersonnelTag(db, tagId, actorAccount = null, context = {}) {
+  ensureCollections(db);
+  if (actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以配置人员标签");
+  }
+  const tag = findPersonnelTag(db, String(tagId || "").trim());
+  if (!tag) throw httpError(404, "人员标签不存在或已删除");
+  let affectedEmployeeCount = 0;
+  db.employees.forEach((employee) => {
+    const before = Array.isArray(employee.tagIds) ? employee.tagIds : [];
+    const after = before.filter((id) => id !== tag.id);
+    if (after.length === before.length) return;
+    employee.tagIds = after;
+    employee.updatedAt = nowIso();
+    affectedEmployeeCount += 1;
+  });
+  db.personnelTags = db.personnelTags.filter((item) => item.id !== tag.id);
+  appendHrAuditLog(db, {
+    actorAccount,
+    action: "personnel_tag_delete",
+    targetType: "personnel_tag",
+    targetId: tag.id,
+    fieldDiffs: [
+      { field: "名称", before: tag.name, after: "（已删除）" },
+      { field: "已分配人员", before: String(affectedEmployeeCount), after: "0" },
+    ],
+    reason: `删除人员标签：${tag.name}`,
+    context,
+  });
+  return { tag: publicPersonnelTag(tag), affectedEmployeeCount };
 }
 
 export function queryEmployees(db, query = {}, scope = null) {
@@ -610,7 +823,10 @@ export function queryEmployees(db, query = {}, scope = null) {
     if (status && employee.status !== status) return false;
     if (series && positionsById.get(employee.positionId)?.series !== series) return false;
     if (!search) return true;
-    return `${employee.personName} ${employee.employeeNo} ${employee.phone || ""}`
+    const tagText = normalizedPersonnelTagIds(db, employee.tagIds)
+      .map((tagId) => findPersonnelTag(db, tagId)?.name || "")
+      .join(" ");
+    return `${employee.personName} ${employee.employeeNo} ${employee.phone || ""} ${tagText}`
       .toLowerCase()
       .includes(search);
   });
@@ -671,6 +887,7 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
   const position = findPosition(db, String(input.positionId || "").trim());
   if (!position) throw httpError(400, "必须选择岗位");
   if (position.status !== "active") throw httpError(409, "停用岗位不能任职");
+  assertLifeTeacherPlacement(db, position, orgUnit);
 
   const employeeNo = String(input.employeeNo || "").trim() || nextEmployeeNo(db);
   if (db.employees.some((employee) => employee.employeeNo === employeeNo)) {
@@ -678,6 +895,31 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
   }
   const status = String(input.status || "probation");
   if (!EMPLOYEE_STATUSES.includes(status)) throw httpError(400, `人事状态无效：${status}`);
+  if (input.managementLevel !== undefined && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护人员层级");
+  }
+  const managementLevel = input.managementLevel === undefined
+    ? "ordinary"
+    : validatedManagementLevel(input.managementLevel);
+  if ((input.employmentType !== undefined || input.agreementMonthlySalary !== undefined) && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护教师雇佣类型和协议月薪");
+  }
+  if (input.workStatus !== undefined && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护就业／待岗状态");
+  }
+  const employmentType = input.employmentType === undefined ? "normal" : validatedEmploymentType(input.employmentType);
+  const agreementMonthlySalary = validatedAgreementMonthlySalary(input.agreementMonthlySalary || 0);
+  const workStatus = input.workStatus === undefined ? "employed" : validatedWorkStatus(input.workStatus);
+  if (input.tagIds !== undefined && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护人员标签");
+  }
+  const tagIds = normalizedPersonnelTagIds(db, input.tagIds);
+  if (employmentType === "agreement" && !String(input.teacherId || "")) {
+    throw httpError(400, "协议雇佣类型仅适用于任课教师");
+  }
+  if (employmentType === "agreement" && agreementMonthlySalary <= 0) {
+    throw httpError(400, "协议教师必须填写大于 0 的协议月薪");
+  }
 
   const now = nowIso();
   const employee = {
@@ -697,7 +939,13 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
     positionId: position.id,
     reportsTo: String(input.reportsTo || ""),
     teacherId: String(input.teacherId || ""),
+    accountId: String(input.accountId || ""),
     status,
+    managementLevel,
+    employmentType,
+    agreementMonthlySalary: employmentType === "agreement" ? agreementMonthlySalary : 0,
+    workStatus,
+    tagIds,
     hiredAt: String(input.hiredAt || ""),
     regularizedAt: String(input.regularizedAt || ""),
     leftAt: "",
@@ -728,7 +976,7 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
   return publicEmployee(db, employee);
 }
 
-export function getEmployeeDetail(db, employeeId) {
+export function getEmployeeDetail(db, employeeId, options = {}) {
   ensureCollections(db);
   const employee = findEmployee(db, employeeId);
   if (!employee) throw httpError(404, "档案不存在");
@@ -739,7 +987,7 @@ export function getEmployeeDetail(db, employeeId) {
     (flow) => flow.flowType === "profile_update" && flow.employeeId === employee.id && flow.status === "pending",
   );
   return {
-    employee: publicEmployee(db, employee),
+    employee: publicEmployee(db, employee, options),
     contracts,
     pendingChangeRequests,
   };
@@ -750,9 +998,35 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
   ensureCollections(db);
   const employee = findEmployee(db, employeeId);
   if (!employee) throw httpError(404, "档案不存在");
-  const reason = requireReason(patch.reason, "修改档案");
+  // 常规档案维护不再要求人事逐人填写原因；审计仍会完整记录修改人、时间和字段前后值。
+  // 保留调用方显式传入的说明，以兼容审批流等需要呈现业务缘由的入口。
+  const reason = String(patch.reason || "").trim() || "常规档案维护（系统自动留痕）";
 
   const before = { ...employee };
+  const changesEmployment = patch.employmentType !== undefined || patch.agreementMonthlySalary !== undefined;
+  const changesWorkStatus = patch.workStatus !== undefined;
+  const changesPersonnelTags = patch.tagIds !== undefined;
+  if (changesEmployment && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护教师雇佣类型和协议月薪");
+  }
+  if (changesWorkStatus && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护就业／待岗状态");
+  }
+  if (changesPersonnelTags && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护人员标签");
+  }
+  const nextEmploymentType = patch.employmentType === undefined
+    ? employmentTypeOf(employee.employmentType)
+    : validatedEmploymentType(patch.employmentType);
+  const nextAgreementMonthlySalary = patch.agreementMonthlySalary === undefined
+    ? validatedAgreementMonthlySalary(employee.agreementMonthlySalary || 0)
+    : validatedAgreementMonthlySalary(patch.agreementMonthlySalary);
+  if (nextEmploymentType === "agreement" && !employee.teacherId) {
+    throw httpError(400, "协议雇佣类型仅适用于任课教师");
+  }
+  if (nextEmploymentType === "agreement" && nextAgreementMonthlySalary <= 0) {
+    throw httpError(400, "协议教师必须填写大于 0 的协议月薪");
+  }
 
   EMPLOYEE_EDITABLE_FIELDS.forEach((field) => {
     if (patch[field] === undefined) return;
@@ -792,27 +1066,58 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
       employee.degree = value;
       return;
     }
+    if (field === "managementLevel") {
+      if (actorAccount?.role !== "system_admin") {
+        throw httpError(403, "仅总校人事 + 行政可以维护人员层级");
+      }
+      employee.managementLevel = validatedManagementLevel(patch.managementLevel);
+      return;
+    }
+    if (field === "employmentType") {
+      employee.employmentType = nextEmploymentType;
+      return;
+    }
+    if (field === "agreementMonthlySalary") {
+      employee.agreementMonthlySalary = nextAgreementMonthlySalary;
+      return;
+    }
+    if (field === "workStatus") {
+      employee.workStatus = validatedWorkStatus(patch.workStatus);
+      return;
+    }
     employee[field] = String(patch[field] ?? "");
   });
+
+  // 切回正常雇佣时清空旧协议金额，避免以后再次切换时误用历史协议价。
+  if (changesEmployment && nextEmploymentType === "normal") employee.agreementMonthlySalary = 0;
+
+  if (changesPersonnelTags) employee.tagIds = normalizedPersonnelTagIds(db, patch.tagIds);
 
   // 兼岗任命整体替换（前端按勾选提交全量）
   if (patch.teacherRoles !== undefined) {
     employee.teacherRoles = normalizeTeacherRoles(patch.teacherRoles);
   }
 
+  // 岗位或组织调整后重新校验。这样不能借由“先建小学生活老师，再调到幼儿园”绕过规则。
+  assertLifeTeacherPlacement(db, findPosition(db, employee.positionId), findOrgUnit(db, employee.orgUnitId));
+
   if (patch.idCard !== undefined) applySensitiveField(employee, "idCard", patch.idCard);
   if (patch.bankCard !== undefined) applySensitiveField(employee, "bankCard", patch.bankCard);
 
-  const diffs = computeFieldDiffs(before, employee, [...EMPLOYEE_EDITABLE_FIELDS, "idCard", "bankCard"]);
+  const diffs = computeFieldDiffs(before, employee, [...EMPLOYEE_EDITABLE_FIELDS, "tagIds", "idCard", "bankCard"]);
   if (!diffs.length) throw httpError(400, "没有任何变化，无需保存");
 
-  // 镜像同步：教学侧姓名/电话以档案为准
+  // 镜像同步：教学侧和关联账号的姓名/电话以档案为准。
   if (employee.teacherId) {
     const teacher = findTeacherRow(db, employee.teacherId);
     if (teacher) {
       if (patch.personName !== undefined) teacher.name = employee.personName;
       if (patch.phone !== undefined) teacher.phone = employee.phone;
     }
+  }
+  if (employee.accountId) {
+    const account = (db.accounts || []).find((item) => item.id === employee.accountId);
+    if (account && patch.personName !== undefined) account.name = employee.personName;
   }
 
   employee.updatedAt = nowIso();
@@ -847,8 +1152,8 @@ export function setEmployeeStatus(db, employeeId, status, reason, actorAccount =
     employee.leftAt = "";
   }
 
+  const frozen = status === "left" || status === "suspended";
   if (employee.teacherId) {
-    const frozen = status === "left" || status === "suspended";
     const teacher = findTeacherRow(db, employee.teacherId);
     if (teacher) {
       teacher.status = frozen ? "disabled" : "active";
@@ -859,6 +1164,10 @@ export function setEmployeeStatus(db, employeeId, status, reason, actorAccount =
       .forEach((account) => {
         account.status = frozen ? "disabled" : "active";
       });
+  }
+  if (employee.accountId) {
+    const account = (db.accounts || []).find((item) => item.id === employee.accountId);
+    if (account) account.status = frozen ? "disabled" : "active";
   }
 
   employee.updatedAt = nowIso();
@@ -1202,8 +1511,12 @@ export function applySalaryTemplate(db, templateId, options = {}, actorAccount =
 // ---------------------------------------------------------------------------
 
 function employeeForAccount(db, account) {
-  if (!account?.teacherId) return null;
-  return db.employees.find((employee) => employee.teacherId === account.teacherId) || null;
+  if (!account) return null;
+  return (
+    db.employees.find((employee) => employee.accountId === account.id) ||
+    (account.teacherId ? db.employees.find((employee) => employee.teacherId === account.teacherId) : null) ||
+    null
+  );
 }
 
 export function createProfileChangeRequest(db, account, changes = {}, reason = "") {
@@ -1270,7 +1583,7 @@ export function createProfileChangeRequest(db, account, changes = {}, reason = "
 export function queryProfileChangeRequests(db, query = {}, account = null) {
   ensureCollections(db);
   const status = String(query.status || "").trim();
-  const mineOnly = account?.role === "teacher";
+  const mineOnly = accountHasRole(account, "teacher");
   const myEmployee = mineOnly ? employeeForAccount(db, account) : null;
   const employeesById = new Map(db.employees.map((employee) => [employee.id, employee]));
 
@@ -1381,6 +1694,8 @@ const DEFAULT_POSITIONS = [
   { id: "POS-TEACHER", code: "TCH-01", name: "任课教师", series: "teacher" },
   { id: "POS-TEACHER-LEAD", code: "TCH-02", name: "教研组长", series: "teacher" },
   { id: "POS-GRADE-LEAD", code: "TCH-03", name: "年级组长", series: "teacher" },
+  // 生活老师按制度属于教学系列，需进入学部工资结算；但不进入学科排课池。
+  { id: "POS-LIFE-TEACHER", code: "TCH-LIFE-01", name: "生活老师", series: "teacher", lifeTeacher: true },
   { id: "POS-ADMIN-STAFF", code: "ADM-01", name: "行政专员", series: "admin" },
   { id: "POS-FINANCE-STAFF", code: "ADM-02", name: "会计", series: "admin" },
   { id: "POS-HR-STAFF", code: "ADM-03", name: "人事专员", series: "admin" },
@@ -1389,7 +1704,21 @@ const DEFAULT_POSITIONS = [
   { id: "POS-LOGISTICS-STAFF", code: "LOG-01", name: "后勤员工", series: "logistics" },
 ];
 
-// 幂等回填：组织树、岗位、默认模板、teachers → employees。返回是否有变化。
+const LIFE_TEACHER_STAGE_IDS = new Set(["primary", "middle", "high"]);
+
+function isLifeTeacherPosition(position = null) {
+  return Boolean(position && (position.id === "POS-LIFE-TEACHER" || position.code === "TCH-LIFE-01" || position.lifeTeacher));
+}
+
+function assertLifeTeacherPlacement(db, position, orgUnit) {
+  if (!isLifeTeacherPosition(position)) return;
+  const stageId = orgUnitStageId(db, orgUnit?.id || "");
+  if (!LIFE_TEACHER_STAGE_IDS.has(stageId)) {
+    throw httpError(400, "生活老师仅可归属小学、初中或高中学部；幼儿园不设置生活老师岗位");
+  }
+}
+
+// 幂等回填：组织树、岗位、默认模板，以及教师与非教师人员账号 → employees。返回是否有变化。
 export function ensureHrData(db) {
   ensureCollections(db);
   let changed = false;
@@ -1477,6 +1806,7 @@ export function ensureHrData(db) {
   );
   (db.teachers || []).forEach((teacher) => {
     if (employeesByTeacherId.has(teacher.id)) return;
+    const isLifeTeacher = teacher.salaryProfile?.salaryCategory === "lifeTeacher";
     db.employees.push({
       id: `EMP-${teacher.id}`,
       employeeNo: teacher.employeeNo || `EMP-${teacher.id}`,
@@ -1491,10 +1821,13 @@ export function ensureHrData(db) {
       bankCardEncrypted: "",
       bankCardMasked: "",
       orgUnitId: divisionByStageId.get(teacher.stageId) || "ORG-ROOT",
-      positionId: "POS-TEACHER",
+      positionId: isLifeTeacher ? "POS-LIFE-TEACHER" : "POS-TEACHER",
       reportsTo: "",
       teacherId: teacher.id,
       status: teacher.status === "active" ? "active" : "suspended",
+      managementLevel: "ordinary",
+      employmentType: "normal",
+      agreementMonthlySalary: 0,
       hiredAt: teacher.hiredAt || "",
       regularizedAt: "",
       leftAt: "",
@@ -1510,10 +1843,74 @@ export function ensureHrData(db) {
     changed = true;
   });
 
+  // 行政、财务、排课和管理账号同样是学校人员，应纳入档案以维护人员层级。
+  // 教室屏等设备账号不属于人员，不建立人员档案。
+  const personnelAccountRoles = new Set(["system_admin", "admin", "finance", "hr", "division_head", "principal"]);
+  const employeesByAccountId = new Set(db.employees.map((employee) => employee.accountId).filter(Boolean));
+  (db.accounts || [])
+    .filter((account) => !account.teacherId && personnelAccountRoles.has(account.role))
+    .forEach((account) => {
+      if (employeesByAccountId.has(account.id)) return;
+      const scopedStageId = Array.isArray(account.scopeStageIds) ? account.scopeStageIds[0] : "";
+      const inferredStageId = scopedStageId || (db.stages || []).find((stage) =>
+        String(account.department || "").includes(stage.name),
+      )?.id;
+      const orgUnitId =
+        account.role === "finance"
+          ? "ORG-FINANCE"
+          : account.role === "system_admin" || account.role === "hr"
+            ? "ORG-HR"
+            : divisionByStageId.get(inferredStageId) || "ORG-ADMIN";
+      const positionId =
+        account.role === "finance"
+          ? "POS-FINANCE-STAFF"
+          : account.role === "system_admin" || account.role === "hr"
+            ? "POS-HR-STAFF"
+            : "POS-ADMIN-STAFF";
+      db.employees.push({
+        id: `EMP-ACCOUNT-${account.id}`,
+        employeeNo: account.id,
+        personName: account.name || account.username,
+        gender: "",
+        birthDate: "",
+        idCardEncrypted: "",
+        idCardMasked: "",
+        phone: "",
+        emergencyContact: "",
+        emergencyPhone: "",
+        bankCardEncrypted: "",
+        bankCardMasked: "",
+        orgUnitId,
+        positionId,
+        reportsTo: "",
+        teacherId: "",
+        accountId: account.id,
+        status: account.status === "disabled" ? "suspended" : "active",
+        managementLevel: "ordinary",
+        employmentType: "normal",
+        agreementMonthlySalary: 0,
+        workStatus: "employed",
+        hiredAt: String(account.createdAt || "").slice(0, 10),
+        regularizedAt: "",
+        leftAt: "",
+        salaryTemplateId: "",
+        salaryTemplateVer: 0,
+        titleGrade: "",
+        degree: "",
+        teacherRoles: normalizeTeacherRoles({}),
+        createdAt: now,
+        updatedAt: now,
+      });
+      changed = true;
+    });
+
   // 存量档案补齐新增字段：首次升级时把工资档案里的人事事实搬到人事档案
   (db.employees || []).forEach((employee) => {
-    if (employee.titleGrade !== undefined && employee.teacherRoles) return;
     const teacher = (db.teachers || []).find((item) => item.id === employee.teacherId);
+    if (teacher?.salaryProfile?.salaryCategory === "lifeTeacher" && employee.positionId !== "POS-LIFE-TEACHER") {
+      employee.positionId = "POS-LIFE-TEACHER";
+      changed = true;
+    }
     if (employee.titleGrade === undefined) {
       employee.titleGrade = teacher ? titleGradeFromProfile(teacher) : "";
       changed = true;
@@ -1524,6 +1921,26 @@ export function ensureHrData(db) {
     }
     if (!employee.teacherRoles) {
       employee.teacherRoles = normalizeTeacherRoles(teacher?.salaryProfile?.roles);
+      changed = true;
+    }
+    if (employee.employmentType === undefined) {
+      employee.employmentType = "normal";
+      changed = true;
+    }
+    if (employee.agreementMonthlySalary === undefined) {
+      employee.agreementMonthlySalary = 0;
+      changed = true;
+    }
+    if (employee.workStatus === undefined) {
+      employee.workStatus = "employed";
+      changed = true;
+    }
+    if (!Array.isArray(employee.tagIds)) {
+      employee.tagIds = [];
+      changed = true;
+    }
+    if (employee.accountId === undefined) {
+      employee.accountId = "";
       changed = true;
     }
   });
@@ -1730,10 +2147,14 @@ export function createHrFlow(db, account, input = {}, context = {}) {
         throw httpError(403, "学部负责人只能为本学部发起入职");
       }
     }
+    const lifeTeacherPosition = isLifeTeacherPosition(position);
     if (position.series === "teacher") {
       if (!stageId) throw httpError(400, "教师岗位必须挂在教学学部下");
-      const subject = (db.subjects || []).find((item) => item.id === String(input.primarySubjectId || ""));
-      if (!subject) throw httpError(400, "教师岗位必须指定任教学科");
+      assertLifeTeacherPlacement(db, position, orgUnit);
+      if (!lifeTeacherPosition) {
+        const subject = (db.subjects || []).find((item) => item.id === String(input.primarySubjectId || ""));
+        if (!subject) throw httpError(400, "教师岗位必须指定任教学科");
+      }
     }
     payload = {
       ...payload,
@@ -1773,6 +2194,7 @@ export function createHrFlow(db, account, input = {}, context = {}) {
       if (targetUnit.id === employee.orgUnitId) throw httpError(400, "目标节点与当前相同");
       const targetPosition = findPosition(db, String(input.targetPositionId || employee.positionId));
       if (!targetPosition || targetPosition.status !== "active") throw httpError(400, "目标岗位无效");
+      assertLifeTeacherPlacement(db, targetPosition, targetUnit);
       payload = {
         ...payload,
         employeeName: employee.personName,
@@ -1891,6 +2313,7 @@ function executeOnboard(db, flow, account, context) {
           .filter((item) => item.templateId === template.id)
           .sort((a, b) => b.version - a.version)[0]
       : null;
+    const lifeTeacherPosition = payload.positionId === "POS-LIFE-TEACHER";
     const teacher = {
       id: teacherId,
       employeeNo: payload.employeeNo || `FY${String(nextNumber).padStart(4, "0")}`,
@@ -1900,11 +2323,13 @@ function executeOnboard(db, flow, account, context) {
       department: stage?.name || payload.orgUnitName,
       primarySubjectId: payload.primarySubjectId,
       primarySubjectName: subject?.name || "",
-      title: payload.positionName || "任课教师",
+      title: payload.positionName || (lifeTeacherPosition ? "生活老师" : "任课教师"),
       phone: payload.phone,
       status: "active",
       hiredAt: payload.hiredAt,
-      salaryProfile: deepMerge(defaultTeacherSalaryProfile({}), templateVersion?.payload || {}),
+      salaryProfile: lifeTeacherPosition
+        ? deepMerge(defaultLifeTeacherSalaryProfile({ stageId: payload.toStageId, hiredAt: payload.hiredAt }), templateVersion?.payload || {})
+        : deepMerge(defaultTeacherSalaryProfile({}), templateVersion?.payload || {}),
       source: "hr-onboard",
       createdAt: now,
     };
@@ -1918,6 +2343,7 @@ function executeOnboard(db, flow, account, context) {
       username,
       passwordHash: hashPassword("123456"),
       role: "teacher",
+      ...(lifeTeacherPosition ? { roles: ["teacher", "life_teacher"], title: "生活老师" } : {}),
       teacherId,
       name: payload.personName,
       department: teacher.department,
@@ -1984,11 +2410,46 @@ function executeTransfer(db, flow, account, context) {
   let handover = null;
   if (employee.teacherId) {
     const teacher = findTeacherRow(db, employee.teacherId);
+    const sourcePosition = findPosition(db, before.positionId);
+    const targetPosition = findPosition(db, payload.targetPositionId);
     if (teacher && payload.toStageId && payload.toStageId !== payload.fromStageId) {
       const stage = (db.stages || []).find((item) => item.id === payload.toStageId);
       teacher.stageId = payload.toStageId;
       teacher.stageName = stage?.name || teacher.stageName;
       teacher.department = stage?.name || teacher.department;
+    }
+    if (teacher && isLifeTeacherPosition(targetPosition)) {
+      // 转入生活老师后清空学科任教事实，工资档案切到生活老师独立方案。
+      // 人事可在档案页再确认类别、负责学生数和兼岗，不自动沿用原教师兼岗。
+      const defaults = defaultLifeTeacherSalaryProfile({ stageId: teacher.stageId, hiredAt: teacher.hiredAt });
+      const profile = deepMerge(defaults, teacher.salaryProfile || {});
+      profile.salaryCategory = "lifeTeacher";
+      profile.seniorityCategory = "lifeTeacher";
+      profile.roles = { ...defaults.roles, ...(profile.roles || {}) };
+      const allowedKinds = teacher.stageId === "primary" ? ["lower", "upper", "night"] : ["standard", "night"];
+      if (!allowedKinds.includes(profile.roles.lifeTeacherKind)) profile.roles.lifeTeacherKind = defaults.roles.lifeTeacherKind;
+      teacher.primarySubjectId = "";
+      teacher.primarySubjectName = "";
+      teacher.title = targetPosition?.name || "生活老师";
+      teacher.salaryProfile = profile;
+      (db.accounts || [])
+        .filter((item) => item.teacherId === employee.teacherId)
+        .forEach((item) => {
+          item.roles = Array.from(new Set([...(item.roles || ["teacher"]), "teacher", "life_teacher"]));
+          item.title = "生活老师";
+        });
+    } else if (teacher && isLifeTeacherPosition(sourcePosition)) {
+      // 转出生活老师岗位时恢复专任教师工资档案，避免旧的 salaryCategory 继续触发
+      // 生活老师计薪分支。任教学科仍由人事在后续档案维护中补全。
+      const { salaryCategory, seniorityCategory, ...previousProfile } = teacher.salaryProfile || {};
+      teacher.salaryProfile = deepMerge(defaultTeacherSalaryProfile(teacher), previousProfile);
+      teacher.title = targetPosition?.name || teacher.title;
+      (db.accounts || [])
+        .filter((item) => item.teacherId === employee.teacherId)
+        .forEach((item) => {
+          item.roles = (item.roles || ["teacher"]).filter((role) => role !== "life_teacher");
+          item.title = targetPosition?.name || item.title || "任课教师";
+        });
     }
     const futureLessons = (db.lessonInstances || []).filter(
       (lesson) =>
@@ -2318,23 +2779,34 @@ export function teacherEligibility(db, teacherId) {
 // ===========================================================================
 // 月度考核记录
 //
-// 考核是线下评审的结果，由学部负责人/人事按月录入，财务只读——财务不掌握教师
-// 日常表现，不应由其决定考核等级。考核结果驱动考核工资浮动（见 payroll.js）。
+// 考核由对应范围的工资核算员按月录入分数。考核工资按分数直接换算系数（见 payroll.js）。
 // 按「教师 + 月份」唯一，重复录入即更新并留痕。
 // ===========================================================================
 
-export const ASSESSMENT_GRADES = [
-  { value: "excellent", label: "优秀" },
-  { value: "good", label: "良好" },
-  { value: "default", label: "合格" },
-  { value: "warning", label: "基本合格" },
-  { value: "unqualified", label: "不合格" },
-];
+const LEGACY_ASSESSMENT_SCORE_BY_GRADE = {
+  excellent: 120,
+  good: 110,
+  default: 100,
+  warning: 80,
+  unqualified: 60,
+};
+
+// 兼容历史等级记录，但不在服务启动时改写数据库。历史记录在界面/API 中以等价分数
+// 展示，实际保存某位老师时才写入新的 score 字段，避免规则升级造成批量数据变更。
+function assessmentRecordWithScore(record) {
+  if (!record) return null;
+  const rawScore = Number(record.score);
+  const score = Number.isFinite(rawScore) && rawScore >= 0
+    ? rawScore
+    : LEGACY_ASSESSMENT_SCORE_BY_GRADE[record.grade] ?? 100;
+  const { grade, amount, ...publicRecord } = record;
+  return { ...publicRecord, score };
+}
 
 export function findMonthlyAssessment(db, teacherId, month) {
   ensureCollections(db);
-  return (
-    db.monthlyAssessments.find((item) => item.teacherId === teacherId && item.month === month) || null
+  return assessmentRecordWithScore(
+    db.monthlyAssessments.find((item) => item.teacherId === teacherId && item.month === month) || null,
   );
 }
 
@@ -2345,15 +2817,13 @@ export function queryMonthlyAssessments(db, query = {}, account = null) {
   let items = [...db.monthlyAssessments];
   if (month) items = items.filter((item) => item.month === month);
   if (teacherId) items = items.filter((item) => item.teacherId === teacherId);
-  // 学部负责人只看本学部
-  if (account?.role === "division_head") {
-    const scope = hrScopeFor(db, account);
-    items = items.filter((item) => {
-      const teacher = (db.teachers || []).find((entry) => entry.id === item.teacherId);
-      return teacher && scope.stageIds.has(teacher.stageId);
-    });
+  // 财务读取遵循薪资范围：总校财务可只读查看全校，学部财务只看本学部。
+  if (account?.role === "finance") {
+    items = items.filter((item) => canFinanceReadTeacher(db, account, item.teacherId));
   }
-  return items.sort((a, b) => `${b.month} ${a.teacherName}`.localeCompare(`${a.month} ${b.teacherName}`));
+  return items
+    .map(assessmentRecordWithScore)
+    .sort((a, b) => `${b.month} ${a.teacherName}`.localeCompare(`${a.month} ${b.teacherName}`));
 }
 
 export function upsertMonthlyAssessment(db, input = {}, account = null) {
@@ -2364,23 +2834,37 @@ export function upsertMonthlyAssessment(db, input = {}, account = null) {
   if (!/^\d{4}-\d{2}$/.test(month)) throw httpError(400, "月份格式应为 YYYY-MM");
   const teacher = (db.teachers || []).find((item) => item.id === teacherId);
   if (!teacher) throw httpError(404, "教师不存在");
-  if (account?.role === "division_head") {
-    const scope = hrScopeFor(db, account);
-    if (!scope.stageIds.has(teacher.stageId)) throw httpError(403, "只能录入本学部教师的考核");
+  if (account?.role === "finance") assertTeacherInFinanceScope(db, account, teacherId);
+  const rawScore = input.score;
+  if (rawScore === "" || rawScore === undefined || rawScore === null) {
+    throw httpError(400, "请输入考核分数");
   }
-  const grade = String(input.grade || "default");
-  if (!ASSESSMENT_GRADES.some((item) => item.value === grade)) throw httpError(400, `考核等级无效：${grade}`);
+  const score = Number(rawScore);
+  if (!Number.isFinite(score) || score < 0) throw httpError(400, "考核分数必须是非负数字");
 
-  // 区间制岗位（如幼儿园）可直接核定金额，留空则按等级系数浮动
-  const rawAmount = input.amount;
-  const amount = rawAmount === "" || rawAmount === undefined || rawAmount === null ? null : Number(rawAmount);
-  if (amount !== null && (!Number.isFinite(amount) || amount < 0)) {
-    throw httpError(400, "考核工资金额必须是非负数字");
+  // 生活老师的交通补贴按当月实际次数核算。仅当调用方明确传入时更新，
+  // 避免普通教师保存考核分时无意覆盖历史记录。
+  const rawTransport = input.lifeTeacherTransport;
+  let lifeTeacherTransport = null;
+  if (rawTransport !== undefined) {
+    if (!rawTransport || typeof rawTransport !== "object" || Array.isArray(rawTransport)) {
+      throw httpError(400, "交通补贴次数格式不正确");
+    }
+    lifeTeacherTransport = {};
+    for (const key of ["short", "medium", "long", "extraLong"]) {
+      const value = Number(rawTransport[key] ?? 0);
+      if (!Number.isInteger(value) || value < 0) {
+        throw httpError(400, "交通补贴次数应为非负整数");
+      }
+      lifeTeacherTransport[key] = value;
+    }
   }
 
   const now = nowIso();
-  const existing = findMonthlyAssessment(db, teacherId, month);
-  const before = existing ? { grade: existing.grade, amount: existing.amount } : null;
+  const existing = db.monthlyAssessments.find((item) => item.teacherId === teacherId && item.month === month) || null;
+  const before = existing
+    ? { score: assessmentRecordWithScore(existing).score, lifeTeacherTransport: existing.lifeTeacherTransport || {} }
+    : null;
   const record = existing || {
     id: nextId("ASSESS"),
     teacherId,
@@ -2390,9 +2874,9 @@ export function upsertMonthlyAssessment(db, input = {}, account = null) {
   Object.assign(record, {
     teacherName: teacher.name,
     stageId: teacher.stageId || "",
-    grade,
-    amount,
+    score,
     note: String(input.note || "").trim(),
+    ...(lifeTeacherTransport ? { lifeTeacherTransport } : {}),
     updatedAt: now,
     updatedByAccountId: account?.id || "",
     updatedByName: account?.displayName || account?.username || "",
@@ -2408,8 +2892,15 @@ export function upsertMonthlyAssessment(db, input = {}, account = null) {
     actorName: account?.displayName || account?.username || "",
     reason: `${month} 月度考核`,
     fieldDiffs: existing
-      ? computeFieldDiffs(before, { grade, amount }, ["grade", "amount"])
-      : [{ field: "grade", before: "", after: grade }],
+      ? computeFieldDiffs(
+          before,
+          { score, ...(lifeTeacherTransport ? { lifeTeacherTransport } : {}) },
+          lifeTeacherTransport ? ["score", "lifeTeacherTransport"] : ["score"],
+        )
+      : [
+          { field: "score", before: "", after: String(score) },
+          ...(lifeTeacherTransport ? [{ field: "lifeTeacherTransport", before: "", after: JSON.stringify(lifeTeacherTransport) }] : []),
+        ],
   });
-  return record;
+  return assessmentRecordWithScore(record);
 }
