@@ -149,6 +149,14 @@ db.lessonInstances = [
   );
   assert.match(finance.scopeNote, /小学部/, "副标题必须写明范围，否则会被当成全校数据");
 
+  const kindergartenFinance = buildWeeklyWorkload(db, {
+    termId: term.id,
+    weekStart: "2026-06-15",
+    account: { role: "finance", financeScope: "kindergarten" },
+  });
+  assert.match(kindergartenFinance.scopeNote, /幼儿园/, "幼儿园报表不能泄露内部 kindergarten 标识");
+  assert.doesNotMatch(kindergartenFinance.scopeNote, /kindergarten/, "报表页面应只显示中文学部名");
+
   // 总校财务管行政后勤，他们不上课——表应为空，而不是回落成全校
   const hq = buildWeeklyWorkload(db, {
     termId: term.id,

@@ -190,6 +190,21 @@ const lines = app.split("\n");
   );
   assert.match(app, /event\.altKey[\s\S]{0,180}event\.code !== "KeyT"/, "应监听 Alt\/Option + T");
   assert.match(app, /quickLoginDemo\("teacher_primary"\)/, "快捷键应登录演示老师账号");
+  assert.match(
+    app,
+    /username === "finance"[\s\S]{0,250}fy260907-0019[\s\S]{0,250}本人当前密码/,
+    "总校财务接管后快捷入口只能填正式用户名，不能再用旧 Demo 凭据假登录",
+  );
+  assert.doesNotMatch(
+    app,
+    /const demoAccepted = authenticateDemo\(/,
+    "服务端拒绝登录后不得静默切回浏览器 Demo 数据",
+  );
+  assert.doesNotMatch(
+    app,
+    /\^\(10\\\.\|192\\\.168\\\.|172\\\./,
+    "校内私有网段不能被判定为本地开发，否则会暴露 Demo 快捷账号和重置按钮",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +587,80 @@ const lines = app.split("\n");
   assert.match(scheduling, /lesson\.type = "substitute"/, "代课老师的课次应标记为代课课型");
   assert.match(scheduling, /outboundOriginalTeacherId/, "课表应保留外出原任课老师的计薪归属");
   assert.match(storage, /outboundOriginalPay: true/, "薪资读取时应为外出原老师建立正常课时的计薪投影");
+}
+
+// ---------------------------------------------------------------------------
+// 26. 教学期由学部主任维护；排课负责人只能选择已有正式学期
+// ---------------------------------------------------------------------------
+{
+  const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
+  const server = await fs.readFile(new URL("../server/server.js", import.meta.url), "utf-8");
+  const styles = await fs.readFile(new URL("../styles.css", import.meta.url), "utf-8");
+  assert.match(html, /id="adminSchedulingTermSelect"/, "排课页应提供已有正式学期的选择器");
+  assert.match(html, /id="termManagementPanel" hidden/, "排课页不应展示旧的教学学期创建入口");
+  assert.match(app, /\(panel\) => !panel\.hidden && panel\.querySelector/, "排课分节导航也不应保留已隐藏的教学学期假入口");
+  assert.match(app, /function selectableSchedulingTerms\(/, "排课学期应统一过滤为可排课的已有学期");
+  assert.match(app, /term\.status !== "archived" && term\.datePhase !== "ended"/, "已归档或已完成学期不应进入排课选择");
+  assert.match(app, /function renderSchedulingTermSelector\(/, "排课页应渲染学期下拉选择");
+  assert.doesNotMatch(app, /formatTermLabel\(/, "排课页不能调用未定义的学期格式化函数");
+  assert.match(styles, /\.nav-item #scheduleNavLabel/, "动态课表标签不能继承导航图标的固定尺寸");
+  assert.match(server, /教学学期由学部主任在“学部校历”统一创建；排课负责人只能选择已有正式学期/, "后端应明确拒绝排课负责人新建教学期");
+  assert.match(
+    server,
+    /"admin", "system_admin", "finance", "hr", "division_head", "teacher", "payroll_exporter"/,
+    "唯一获准导出的薪资专员账号也应能访问周工作量导出接口",
+  );
+  assert.doesNotMatch(app, /label: "已完成", value: t\.completed/, "工作量报表不能读取已取消的 completed 旧字段并显示 undefined");
+  assert.match(app, /function reportStageOptionsForAccount\(/, "学部报表筛选不应展示账号权限外的学部");
+  assert.match(app, /value: "kindergarten", label: "幼儿园"/, "报表学部筛选不能漏掉幼儿园");
+}
+
+// ---------------------------------------------------------------------------
+// 27. 月度教师考勤由学部主任上传；小学、初中、高中按已确认制度进入工资重算
+// ---------------------------------------------------------------------------
+{
+  const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
+  const server = await fs.readFile(new URL("../server/server.js", import.meta.url), "utf-8");
+  const attendance = await fs.readFile(new URL("../server/attendance.js", import.meta.url), "utf-8");
+  const storage = await fs.readFile(new URL("../server/storage.js", import.meta.url), "utf-8");
+  const payroll = await fs.readFile(new URL("../server/payroll.js", import.meta.url), "utf-8");
+  const styles = await fs.readFile(new URL("../styles.css", import.meta.url), "utf-8");
+  assert.match(html, /data-view="attendanceManagement" data-role="division_head,system_admin,principal"/, "考勤入口应给学部主任上传、校长与行政查看");
+  assert.match(html, /id="attendanceTemplateDownload"/, "考勤页应提供模板下载入口");
+  assert.match(html, /id="attendanceUploadFile"/, "考勤页应提供 .xlsx 上传控件");
+  assert.match(html, /按各学部已确认的考勤规则纳入未锁定工资核算/, "考勤页说明不应再误称所有学部都只留存、不影响工资");
+  assert.doesNotMatch(html, /上传本学部老师的四次打卡记录。系统先校验和留存，暂不自动影响工资核算/, "考勤页不应保留已过时的四次打卡说明");
+  assert.match(app, /function uploadAttendanceWorkbook\(/, "前端应提交月度考勤表");
+  assert.match(app, /小学部已启用考勤扣款/, "小学部入口应明确已启用考勤扣款规则");
+  assert.match(app, /初中部已启用迟到／早退、旷工考勤规则/, "初中部入口应明确已启用考勤规则");
+  assert.match(app, /高中部请使用专用考勤结果表/, "高中部入口应提示使用专用结果表");
+  assert.match(app, /attendanceTemplateForStage/, "考勤模板应随学部自动切换");
+  assert.match(server, /url\.pathname === "\/api\/attendance\/uploads"/, "服务端应提供考勤上传与读取接口");
+  assert.match(server, /requireAuth\(req, res, db, \["division_head", "system_admin"\]\)/, "上传接口只允许学部主任或行政管理账号");
+  assert.match(attendance, /只能\$\{action\}本学部考勤数据/, "后端必须按学部收敛考勤访问范围");
+  assert.match(attendance, /PRIMARY_ATTENDANCE_POLICY/, "考勤模块应声明小学部已确认制度");
+  assert.match(attendance, /limit: "07:45"/, "小学部上午迟到阈值应为 7:45");
+  assert.match(attendance, /limit: "14:15"/, "小学部下午迟到阈值应为 14:15");
+  assert.match(attendance, /lateRate: 30/, "小学部迟到应按 30 元／次处理");
+  assert.match(attendance, /missingPunchRate: 50/, "小学部未补卡应按 50 元／次处理");
+  assert.match(attendance, /absenceRate: 200/, "小学部旷工应按 200 元／天处理");
+  assert.match(attendance, /PRIMARY_MAKEUP_HEADERS/, "小学部模板应要求逐次明确补卡状态");
+  assert.match(attendance, /MIDDLE_ATTENDANCE_POLICY/, "考勤模块应保留初中部已确认制度");
+  assert.match(attendance, /limit: "07:50"/, "初中部上午迟到阈值应来自打卡通知");
+  assert.match(attendance, /limit: "17:25"/, "初中部下午早退阈值应来自打卡通知");
+  assert.match(attendance, /absenceRate: 300/, "初中部旷工应按 300 元／天处理");
+  assert.match(attendance, /HIGH_ATTENDANCE_POLICY/, "考勤模块应声明高中部已确认制度");
+  assert.match(attendance, /minorOccurrenceRate: 0\.02/, "高中部轻微迟到／未签退应从第三次起按考核工资 2% 处理");
+  assert.match(attendance, /seriousOccurrenceRate: 0\.03/, "高中部超时迟到／早退应按考核工资 3% 处理");
+  assert.match(attendance, /multipleMissedClassRate: 0\.15/, "高中部两节及以上旷课应按考核工资 15% 处理");
+  assert.match(attendance, /absenceWorkDailyFraction: 1 \/ 22/, "高中部旷工应按当月工资总额 1/22 处理");
+  assert.match(payroll, /当月工资总额 1\/22/, "工资单应展示高中部旷工的日工资口径");
+  assert.match(payroll, /componentName/, "工资单应按学部单列对应的考勤扣款");
+  assert.match(payroll, /未补卡/, "工资单应在考勤扣款中列出未补卡扣款");
+  assert.match(storage, /attendanceSettlementForTeacher/, "工资预览应读取当前版本考勤结算事实");
+  assert.match(storage, /attendanceUploads: \[\]/, "数据库应保存考勤上传版本");
+  assert.match(storage, /attendancePunchRecords: \[\]/, "数据库应保存标准化打卡明细");
+  assert.match(styles, /\.attendance-management-toolbar/, "考勤上传区域应有独立布局样式");
 }
 
 console.log("frontend static checks passed");

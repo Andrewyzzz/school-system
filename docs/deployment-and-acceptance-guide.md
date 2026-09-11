@@ -1,8 +1,33 @@
-# 部署与验收总手册（第一阶段 + 第二阶段）
+# 部署与验收总手册
 
-- 更新时间：2026-07-08
-- 适用版本：`main` 分支 `da1c025` 及之后
+- 更新时间：2026-09-11
+- 适用版本：`uat-2026-09-11` 及之后
 - 定位：**一份文档走完从裸服务器到两阶段验收签字的全过程**。日常代码更新流程见 `docs/system-update-process.md`；本手册只覆盖部署、迁移、验收与回滚。
+
+---
+
+## 0. 本次学校测试环境部署口径
+
+本次测试统一使用 PostgreSQL，不再使用 JSON 数据层。代码与真实数据分开交付：GitHub 只放程序，真实名册、账号、工资与小学任课关系通过加密迁移包单独交给学校 IT。
+
+```bash
+# 代码
+git clone git@github.com:Andrewyzzz/school-system.git
+cd school-system
+git checkout uat-2026-09-11
+sudo bash deploy/install.sh
+
+# 放入并解开迁移包后，停止服务再恢复
+sudo systemctl stop school-system
+sudo -u school node --env-file=config/production.env scripts/restore-db.js <备份文件名> --force
+sudo -u postgres env DATABASE_URL=postgresql:///school_system \
+  node scripts/provision-db-roles.js
+sudo systemctl start school-system
+```
+
+恢复脚本会同时恢复数据库与上传附件。完成后必须核对：健康检查中的 `storage.driver=postgres`、数据库连接正常、排课求解器为 `ortools-cp-sat`，并以小学部负责人和任课教师各登录一次确认真实任课关系。
+
+学校需提前准备的服务器、域名、证书、访问和备份条件见 `docs/学校测试环境部署交接清单.md`。
 
 ---
 

@@ -34,6 +34,13 @@ const SPEC = [
   },
   { key: "HOST", label: "监听地址", default: "0.0.0.0" },
   {
+    key: "DB_DRIVER",
+    label: "数据层驱动",
+    default: "json",
+    required: ["production"],
+    validate: (v) => (["json", "postgres", "dual"].includes(v) ? "" : "只能是 json / postgres / dual"),
+  },
+  {
     key: "DATABASE_URL",
     label: "数据库连接串",
     required: ["production"],
@@ -142,6 +149,9 @@ export function inspectConfig(env = process.env) {
 
   // 跨项检查：单项都合法、组合起来却是错的
   if (profile === "production") {
+    if (env.DB_DRIVER !== "postgres") {
+      errors.push("生产环境 DB_DRIVER 必须为 postgres，禁止把正式数据写入本地 JSON 文件");
+    }
     if (env.TRUST_PROXY !== "1" && env.FORCE_HTTPS === "1") {
       warnings.push(
         "已启用 HTTPS 但 TRUST_PROXY 不为 1：反向代理后拿到的都是代理 IP，登录限流会把全校算成同一个来源",

@@ -36,7 +36,7 @@ const LESSON_STATUS_LABELS = {
   cancelled: "已取消",
 };
 
-const STAGE_LABELS = { primary: "小学部", middle: "初中部", high: "高中部" };
+const STAGE_LABELS = { kindergarten: "幼儿园", primary: "小学部", middle: "初中部", high: "高中部" };
 
 // 工资已发放的月份状态；结算中的月份也要出现在报表里，但要能与已结算区分
 const LOCKED_STATUS = "locked";

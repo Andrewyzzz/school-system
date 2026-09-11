@@ -10,7 +10,13 @@
 // 是真实会发生的事——多花一分钟备份，好过丢一天的数据。
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { backupDatabase, listBackups, readManifest, restoreDatabase } from "../server/db/backup.js";
+import {
+  backupDatabase,
+  listBackups,
+  readManifest,
+  restoreAttachments,
+  restoreDatabase,
+} from "../server/db/backup.js";
 
 const CONN =
   process.env.DATABASE_URL ||
@@ -19,6 +25,7 @@ const CONN =
 
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const OUT_DIR = process.env.BACKUP_DIR || path.join(ROOT, "backups");
+const ATTACHMENT_DIR = process.env.ATTACHMENT_DIR || path.join(ROOT, "server", "data", "attachments");
 
 const args = process.argv.slice(2);
 const force = args.includes("--force");
@@ -68,6 +75,12 @@ try {
     ignoreKeyMismatch: ignoreKey,
   });
   console.log(`✓ 已恢复 ${result.tableCount} 张表（${(result.durationMs / 1000).toFixed(1)}s）`);
+  const attachmentResult = await restoreAttachments(chosen.file, ATTACHMENT_DIR);
+  if (attachmentResult.restored) {
+    console.log(`✓ 已恢复 ${attachmentResult.files} 个附件到 ${ATTACHMENT_DIR}`);
+  } else {
+    console.log(`（附件未恢复：${attachmentResult.reason}）`);
+  }
   if (result.keyMismatch) {
     console.warn("  ⚠ 密钥与备份时不一致：工资与人事的加密字段将无法解密");
   }

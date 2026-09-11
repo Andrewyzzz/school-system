@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>学校管理系统</title>
-    <link rel="stylesheet" href="styles.css?v=20260905-personnel-tags-1" />
+    <link rel="stylesheet" href="styles.css?v=20260910-attendance-6" />
   </head>
   <body>
     <section class="login-screen" id="loginScreen" aria-labelledby="loginTitle">
@@ -30,14 +30,15 @@
         <div class="demo-account-panel" aria-label="Demo 快捷账号">
           <div class="demo-account-heading">
             <strong>Demo 快捷账号</strong>
-            <span>默认密码 123456，点击即登录</span>
+            <span>未接管账号点击即登录；已接管账号需输入本人当前密码</span>
           </div>
           <section class="demo-account-group">
             <h2>总校</h2>
             <div class="demo-login-grid demo-login-grid-headquarters">
               <button class="ghost-button" data-demo-login="principal" type="button">校长（总校领导）</button>
-              <button class="ghost-button" data-demo-login="finance" type="button">总校财务</button>
+              <button class="ghost-button" data-demo-login="finance" type="button">总校财务（已接管）</button>
               <button class="ghost-button" data-demo-login="sysadmin" type="button">总校人事 + 行政</button>
+              <button class="ghost-button" data-demo-login="security_manager" type="button">安全部主管</button>
             </div>
           </section>
           <div class="demo-division-grid">
@@ -111,6 +112,10 @@
             <span aria-hidden="true">▦</span>
             <span id="scheduleNavLabel">我的课表</span>
           </button>
+          <button class="nav-item" data-view="transportRoutes" data-role="security_manager" type="button">
+            <span aria-hidden="true">▤</span>
+            跟车路线
+          </button>
           <button class="nav-item" data-view="adminScheduling" data-role="admin" type="button">
             <span aria-hidden="true">▦</span>
             排课管理
@@ -122,6 +127,10 @@
           <button class="nav-item" data-view="academicCalendar" data-role="system_admin,division_head,principal" type="button">
             <span aria-hidden="true">□</span>
             学部校历
+          </button>
+          <button class="nav-item" data-view="attendanceManagement" data-role="division_head,system_admin,principal" type="button">
+            <span aria-hidden="true">✓</span>
+            考勤管理
           </button>
           <button class="nav-item" data-view="budgetOverview" data-role="division_head,principal" type="button">
             <span aria-hidden="true">¥</span>
@@ -163,7 +172,7 @@
             <span aria-hidden="true">⚙</span>
             审批流程设置
           </button>
-          <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin,hr,principal" type="button">
+          <button class="nav-item" data-view="notifications" data-role="teacher,finance,admin,system_admin,hr,principal,security_manager" type="button">
             <span aria-hidden="true">✉</span>
             通知中心
           </button>
@@ -183,7 +192,7 @@
             <span aria-hidden="true">¥</span>
             薪资结算
           </button>
-          <button class="nav-item" data-view="payrollHistory" data-role="finance" type="button">
+          <button class="nav-item" data-view="payrollHistory" data-role="finance,division_head,principal,payroll_viewer,payroll_exporter" type="button">
             <span aria-hidden="true">▥</span>
             工资记录
           </button>
@@ -420,6 +429,36 @@
             </div>
             <div class="schedule-summary" id="scheduleSummary"></div>
             <div class="schedule-week-grid teacher-week-grid" id="scheduleWeekGrid"></div>
+            <div class="life-route-run-list" id="lifeRouteRunList" hidden></div>
+          </section>
+        </section>
+
+        <section class="view" id="transportRoutesView" aria-labelledby="transportRoutesTitle" hidden>
+          <section class="panel" id="transportRoutesPanel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="transportRoutesTitle">跟车路线</h2>
+                <p>维护生活老师学生接送路线。每趟路线均包含早晨接与放学送；两段均完成后才计入接送补助。</p>
+              </div>
+              <button class="primary-button" id="addTransportRoute" type="button">新建路线</button>
+            </div>
+            <div class="transport-route-toolbar">
+              <label class="field-label" for="transportRouteTermSelect">
+                <span>适用学期</span>
+                <select class="lesson-select" id="transportRouteTermSelect"></select>
+              </label>
+              <p class="muted" id="transportRouteHint">路线发布后会同步到对应生活老师的排班表。</p>
+            </div>
+            <div class="transport-route-list" id="transportRouteList"></div>
+          </section>
+          <section class="panel transport-transfer-panel" id="transportTransferPanel">
+            <div class="panel-heading">
+              <div>
+                <h2>调班申请</h2>
+                <p>生活老师提出调班后，由安全部主管核验时间冲突并处理。</p>
+              </div>
+            </div>
+            <div class="transport-transfer-list" id="transportTransferList"></div>
           </section>
         </section>
 
@@ -433,6 +472,10 @@
               <span class="status-pill" id="adminScheduleStatus">未生成</span>
             </div>
             <div class="admin-schedule-selectors">
+              <label class="field-label" for="adminSchedulingTermSelect">
+                <span>排课学期</span>
+                <select class="lesson-select" id="adminSchedulingTermSelect"></select>
+              </label>
               <label class="field-label" for="adminDivisionSelect">
                 <span>选择学部</span>
                 <select class="lesson-select" id="adminDivisionSelect"></select>
@@ -447,7 +490,7 @@
                 <strong>班级结构</strong>
                 <span id="classStructureHelp">设置当前年级普通班、实验班数量，并维护每个班对应的普通教室名称。</span>
               </div>
-              <div class="class-structure-controls">
+              <div class="class-structure-controls" id="standardClassStructureControls">
                 <label class="field-label compact-field" for="regularClassCountInput">
                   <span>普通班</span>
                   <div class="input-with-unit">
@@ -466,6 +509,32 @@
                   保存班级结构
                 </button>
               </div>
+              <div class="class-structure-controls" id="highClassStructureControls" hidden>
+                <label class="field-label compact-field" for="highAClassCountInput">
+                  <span>A类 · 清北班</span>
+                  <div class="input-with-unit">
+                    <input id="highAClassCountInput" type="number" min="0" max="20" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="highBClassCountInput">
+                  <span>B类 · 实验班</span>
+                  <div class="input-with-unit">
+                    <input id="highBClassCountInput" type="number" min="0" max="20" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <label class="field-label compact-field" for="highCClassCountInput">
+                  <span>C类 · 普通班</span>
+                  <div class="input-with-unit">
+                    <input id="highCClassCountInput" type="number" min="0" max="20" step="1" />
+                    <em>个</em>
+                  </div>
+                </label>
+                <button class="primary-button compact-button" id="saveHighClassStructure" type="button">
+                  保存高中班级
+                </button>
+              </div>
               <div class="class-structure-preview" id="classStructurePreview"></div>
               <div class="room-catalog-list class-room-catalog-list" id="classRoomCatalog"></div>
             </div>
@@ -475,6 +544,10 @@
                 <span id="periodTemplateHelp">维护正课节次及固定非正课时段。午休、大课间通过节次之间的空档体现，不占课表格子。</span>
               </div>
               <div class="period-template-actions">
+                <label class="field-label compact-field" id="scheduleTemplateSelectorWrap" hidden>
+                  <span>班级类别</span>
+                  <select class="lesson-select" id="scheduleTemplateSelect"></select>
+                </label>
                 <button class="ghost-button compact-button" id="addSchedulePeriod" type="button">
                   新增节次
                 </button>
@@ -544,7 +617,7 @@
             </div>
           </section>
 
-          <section class="panel term-management-panel">
+          <section class="panel term-management-panel" id="termManagementPanel" hidden>
             <div class="panel-heading">
               <div>
                 <h2>教学学期管理</h2>
@@ -964,6 +1037,36 @@
               <div class="calendar-term-ledger" id="academicCalendarTermLedger"></div>
             </section>
             <p class="muted calendar-footnote" id="academicCalendarFootnote"></p>
+          </section>
+        </section>
+
+        <section class="view" id="attendanceManagementView" aria-labelledby="attendanceManagementTitle">
+          <section class="panel attendance-management-panel">
+            <div class="panel-heading">
+              <div>
+                <h2 id="attendanceManagementTitle">月度教师考勤</h2>
+                <p>学部主任按月上传本学部老师的考勤结果。系统会校验、留存，并按各学部已确认的考勤规则纳入未锁定工资核算。</p>
+              </div>
+              <a class="ghost-button compact-button attendance-template-button" id="attendanceTemplateDownload" href="assets/教师月度考勤上传模板.xlsx" download>下载当前学部 Excel 模板</a>
+            </div>
+            <div class="attendance-management-toolbar">
+              <label class="field-label compact-field" for="attendanceMonthInput">
+                <span>考勤月份</span>
+                <input class="lesson-select" id="attendanceMonthInput" type="month" />
+              </label>
+              <label class="field-label compact-field" for="attendanceStageSelect">
+                <span>学部</span>
+                <select class="lesson-select" id="attendanceStageSelect"></select>
+              </label>
+              <label class="attendance-file-field" for="attendanceUploadFile">
+                <span>考勤表</span>
+                <input id="attendanceUploadFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <small>仅支持 .xlsx，单次不超过 12MB</small>
+              </label>
+              <button class="primary-button compact-button" id="attendanceUploadButton" type="button">上传并校验</button>
+            </div>
+            <p class="attendance-management-note" id="attendanceManagementNote">请先选择月份和学部，再下载模板或上传考勤表。</p>
+            <div class="attendance-upload-list" id="attendanceUploadList"></div>
           </section>
         </section>
 
@@ -2241,8 +2344,8 @@
           <section class="panel table-panel payroll-history-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="payrollHistoryTitle">历史工资记录</h2>
-                <p>按学期和月份查看已发工资汇总，并导出当月老师工资明细 CSV。</p>
+                <h2 id="payrollHistoryTitle">工资记录</h2>
+                <p>按学期和月份查看工资汇总；学部主任仅可查看本人学部。</p>
               </div>
               <button class="ghost-button" id="exportPayrollHistoryCsv" type="button">导出明细 CSV</button>
             </div>
@@ -2347,6 +2450,6 @@
       src="vendor/html5-qrcode.min.js"
       onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';"
     ></script>
-    <script src="app.js?v=20260905-personnel-tags-1"></script>
+    <script src="app.js?v=20260910-attendance-6"></script>
   </body>
 </html>

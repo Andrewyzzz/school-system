@@ -21,6 +21,7 @@ const install = await read("deploy/install.sh");
 const unit = await read("deploy/school-system.service");
 const timer = await read("deploy/school-system-restart.timer");
 const ctl = await read("deploy/schoolctl");
+const productionEnv = await read("config/production.env.example");
 
 // ---------------------------------------------------------------------------
 // 1. 语法必须合法——部署脚本执行到一半才报语法错，服务器已经被改了一半
@@ -97,6 +98,10 @@ const ctl = await read("deploy/schoolctl");
   );
   assert.match(install, /pg_database WHERE datname[\s\S]{0,120}createdb/, "建库前应先判断是否已存在");
   assert.match(install, /id -u "\$\{APP_USER\}"[\s\S]{0,80}useradd/, "建账号前应先判断是否已存在");
+  assert.match(install, /DB_DRIVER=postgres/, "安装脚本必须显式启用 PostgreSQL，不能静默回落到 JSON");
+  assert.match(productionEnv, /^DB_DRIVER=postgres$/m, "生产配置模板必须显式启用 PostgreSQL");
+  assert.match(install, /ATTACHMENT_DIR=.*server\/data\/attachments/, "安装脚本必须配置附件目录，确保备份包含上传文件");
+  assert.match(productionEnv, /^ATTACHMENT_DIR=.*server\/data\/attachments$/m, "生产模板必须配置附件目录");
 }
 
 // ---------------------------------------------------------------------------

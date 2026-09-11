@@ -461,7 +461,10 @@ export function buildRoster(db, options = {}) {
   const left = [];
   const leftInPeriod = [];
   (db.employees || []).forEach((e) => {
-    const hiredAt = String(e.hiredAt || "");
+    // 与 ledgerContains 使用同一入职时点口径。系统/管理账号早期档案可能
+    // 没有 hiredAt，但有 createdAt；如果这里忽略 createdAt，名册汇总会把
+    // 尚未建立的档案算作在职，而账套明细又会正确排除，导致两边人数对不上。
+    const hiredAt = String(e.hiredAt || e.createdAt || "").slice(0, 10);
     // 还没入职的不算在册
     if (hiredAt && hiredAt > cutoff) return;
     const leftAt = String(e.leftAt || "");

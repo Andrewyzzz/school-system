@@ -13,7 +13,9 @@ assert.ok(sql.includes("INSERT INTO teacher_salary_profiles"), "salary profiles 
 assert.ok(sql.includes("INSERT INTO payroll_rules"), "payroll rules should be exported");
 assert.ok(sql.endsWith("COMMIT;\n"), "export should be transaction wrapped");
 
-assert.equal(summary.teachers, 30);
+// 除传入的普通教师外，初始化数据还包含学部主任兼课账号、幼儿园教师和
+// 生活老师。导出测试应核对真实数据源，不能把旧版的普通教师参数写死成总数。
+assert.equal(summary.teachers, db.teachers.length, "导出的教师数应与数据源一致");
 // 不写死账号总数：每新增一个系统账号（如财务按学部拆成四个）都要来改这里，
 // 断言的本意是「导出条数与实际账号数一致」，直接比对数据源即可。
 assert.equal(summary.accounts, db.accounts.length, "导出的账号数应与数据源一致");

@@ -24,6 +24,17 @@ const DAY_PARTS = {
   afternoon: "下午",
 };
 
+// 高中 A/B/C 不是把现有的“普通班 / 实验班”再拆一层，而是三类真正的教学班级。
+// 旧 classType 仍保留给全校既有的班级结构、导入和历史数据使用；高中专用字段
+// highClassCategory 只负责标识清北、实验、普通三类班级及其作息模板。
+// 这样小学、初中等现有数据不需要迁移，旧高中数据也会自动落在 B/C 的兼容映射上。
+const HIGH_CLASS_CATEGORIES = [
+  { key: "a", code: "A", name: "清北班", legacyClassType: "regular" },
+  { key: "b", code: "B", name: "实验班", legacyClassType: "experimental" },
+  { key: "c", code: "C", name: "普通班", legacyClassType: "regular" },
+];
+const HIGH_CLASS_CATEGORY_KEYS = new Set(HIGH_CLASS_CATEGORIES.map((item) => item.key));
+
 const ROOM_TYPES = {
   homeroom: "普通教室",
   lab: "实验室",
@@ -208,6 +219,38 @@ function divisionByStageId(stageId = "") {
   return DIVISIONS.find((division) => division.stageId === stageId) || null;
 }
 
+function isHighDivision(divisionOrStageId) {
+  const stageId = typeof divisionOrStageId === "string" ? divisionOrStageId : divisionOrStageId?.stageId;
+  return stageId === "high";
+}
+
+function highClassCategoryDefinition(category = "") {
+  return HIGH_CLASS_CATEGORIES.find((item) => item.key === String(category || "").toLowerCase()) || null;
+}
+
+function normalizeHighClassCategory(category = "", fallback = "") {
+  const normalized = String(category || "").trim().toLowerCase();
+  if (HIGH_CLASS_CATEGORY_KEYS.has(normalized)) return normalized;
+  return HIGH_CLASS_CATEGORY_KEYS.has(fallback) ? fallback : "";
+}
+
+function highClassCategoryForRow(schoolClass = {}) {
+  const explicit = normalizeHighClassCategory(schoolClass.highClassCategory || schoolClass.classCategory);
+  if (explicit) return explicit;
+  // 兼容本次改动前已有的高中班级：原“实验班”归 B，原普通班归 C。
+  return schoolClass.classType === "experimental" ? "b" : "c";
+}
+
+function scheduleTemplateKeyForClass(division, schoolClass = {}) {
+  return isHighDivision(division) ? highClassCategoryForRow(schoolClass) : "default";
+}
+
+function scheduleTemplateLabel(division, key = "") {
+  if (!isHighDivision(division)) return "年级统一作息";
+  const category = highClassCategoryDefinition(key);
+  return category ? `${category.code}类 · ${category.name}` : "高中统一作息";
+}
+
 function schedulingScopeFromStageGrade(db, stageId, gradeValue) {
   const division = divisionByStageId(stageId);
   const gradeNumber = Number(gradeValue);
@@ -303,6 +346,20 @@ function regularSchedulePeriods(periods = []) {
   return (periods || []).filter(isRegularSchedulePeriod);
 }
 
+const DEFAULT_SCHEDULE_DAY_INDEXES = [0, 1, 2, 3, 4];
+
+function normalizeScheduleDayIndexes(value) {
+  const source = Array.isArray(value) && value.length ? value : DEFAULT_SCHEDULE_DAY_INDEXES;
+  const normalized = Array.from(
+    new Set(source.map((dayIndex) => Number.parseInt(dayIndex, 10)).filter((dayIndex) => dayIndex >= 0 && dayIndex <= 6)),
+  ).sort((left, right) => left - right);
+  return normalized.length ? normalized : [...DEFAULT_SCHEDULE_DAY_INDEXES];
+}
+
+function periodAppliesOnDay(period, dayIndex) {
+  return normalizeScheduleDayIndexes(period?.dayIndexes).includes(Number(dayIndex));
+}
+
 function periodDayPartFromTime(startTime = "") {
   const minutes = timeToMinutes(startTime);
   if (minutes === null) return "afternoon";
@@ -322,6 +379,7 @@ function defaultSchedulePeriods() {
       typeName: periodTypeLabel("regular"),
       dayPart: periodDayPartFromTime(startTime),
       active: true,
+      dayIndexes: [...DEFAULT_SCHEDULE_DAY_INDEXES],
     };
   });
 }
@@ -331,7 +389,7 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
   const source = Array.isArray(periods) && periods.length ? periods : defaultSchedulePeriods();
   const normalized = [];
 
-  source.slice(0, 12).forEach((period, index) => {
+  source.slice(0, 48).forEach((period, index) => {
     const [fallbackStart = "", fallbackEnd = ""] = String(period.time || "").split("-");
     const startTime = clockTime(period.startTime || fallbackStart);
     const endTime = clockTime(period.endTime || fallbackEnd);
@@ -346,6 +404,22 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       return;
     }
     const type = ["regular", "selfStudy", "activity", "evening"].includes(period.type) ? period.type : "regular";
+    const dayIndexes = normalizeScheduleDayIndexes(period.dayIndexes);
+    if (strict && type === "regular" && dayIndexes.some((dayIndex) => dayIndex > 4)) {
+      const error = new Error(`第 ${index + 1} 个时段包含周末；周六、周日只能配置为固定非正课日程`);
+      error.statusCode = 400;
+      throw error;
+    }
+    const responsibleTeacherId = type === "regular" ? "" : String(period.responsibleTeacherId || "").trim();
+    const responsibleRole =
+      type === "regular" || !["homeroom", "life_teacher"].includes(String(period.responsibleRole || "").trim())
+        ? ""
+        : String(period.responsibleRole).trim();
+    if (strict && type !== "regular" && dayIndexes.includes(6) && !responsibleTeacherId && !responsibleRole) {
+      const error = new Error(`第 ${index + 1} 个周日日程必须选择负责老师或负责岗位，保存发布后才会同步到老师终端`);
+      error.statusCode = 400;
+      throw error;
+    }
     normalized.push({
       period: Number.parseInt(period.period, 10) || index + 1,
       label: String(period.label || "").trim(),
@@ -357,7 +431,9 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       typeName: periodTypeLabel(type),
       active: period.active !== false,
       content: type === "regular" ? "" : String(period.content || "").trim().slice(0, 80),
-      responsibleTeacherId: type === "regular" ? "" : String(period.responsibleTeacherId || "").trim(),
+      responsibleTeacherId,
+      responsibleRole,
+      dayIndexes,
     });
   });
 
@@ -372,11 +448,14 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
   }
 
   for (let index = 1; index < normalized.length; index += 1) {
-    const previous = normalized[index - 1];
     const current = normalized[index];
-    if (current.startMinutes < previous.endMinutes) {
+    const overlapping = normalized.slice(0, index).find((previous) => {
+      const sharedDays = current.dayIndexes.some((dayIndex) => previous.dayIndexes.includes(dayIndex));
+      return sharedDays && current.startMinutes < previous.endMinutes && current.endMinutes > previous.startMinutes;
+    });
+    if (overlapping) {
       if (strict) {
-        const error = new Error(`第 ${index + 1} 节与上一节时间重叠`);
+        const error = new Error(`第 ${index + 1} 个时段与“${overlapping.label || `第 ${overlapping.period} 节`}”在同一生效日重叠`);
         error.statusCode = 400;
         throw error;
       }
@@ -398,17 +477,38 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       active: period.active !== false,
       content: period.type === "regular" ? "" : period.content || "",
       responsibleTeacherId: period.type === "regular" ? "" : period.responsibleTeacherId || "",
+      responsibleRole: period.type === "regular" ? "" : period.responsibleRole || "",
+      dayIndexes: [...period.dayIndexes],
     };
   });
 }
 
-function schedulingPeriods(db, division, grade, term) {
-  const template = termMergedRows(
+function schedulingPeriods(db, division, grade, term, templateKey = "default") {
+  const normalizedTemplateKey = isHighDivision(division) ? normalizeHighClassCategory(templateKey, "c") : "default";
+  const templates = termMergedRows(
     db.schedulePeriodTemplates || [],
     term,
     (row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade),
-    (row) => `${row.stageId}:${row.grade}`,
-  ).find((row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade));
+    (row) => `${row.stageId}:${row.grade}:${isHighDivision(division) ? normalizeHighClassCategory(row.highClassCategory || row.classCategory, "default") || "default" : "default"}`,
+  );
+  // 新模板优先；没有维护过 A/B/C 时回退到该年级原有的统一作息模板，
+  // 使本次上线前已存在的高中课表和历史数据完全兼容。
+  const template =
+    templates.find(
+      (row) =>
+        row.stageId === division.stageId &&
+        Number(row.grade) === Number(grade.grade) &&
+        (isHighDivision(division)
+          ? normalizeHighClassCategory(row.highClassCategory || row.classCategory) === normalizedTemplateKey
+          : true),
+    ) ||
+    templates.find(
+      (row) =>
+        row.stageId === division.stageId &&
+        Number(row.grade) === Number(grade.grade) &&
+        !normalizeHighClassCategory(row.highClassCategory || row.classCategory),
+    ) ||
+    templates.find((row) => row.stageId === division.stageId && Number(row.grade) === Number(grade.grade));
   return normalizeSchedulePeriods(template?.periods || []).map((period) => {
     const responsibleTeacher = (db.teachers || []).find(
       (teacher) => teacher.id === period.responsibleTeacherId && teacher.status === "active",
@@ -417,7 +517,14 @@ function schedulingPeriods(db, division, grade, term) {
       ...period,
       content: period.type === "regular" ? "" : period.content || "",
       responsibleTeacherId: period.type === "regular" ? "" : responsibleTeacher?.id || "",
-      responsibleTeacherName: responsibleTeacher?.name || "",
+      responsibleRole: period.type === "regular" ? "" : period.responsibleRole || "",
+      responsibleTeacherName:
+        responsibleTeacher?.name ||
+        (period.responsibleRole === "homeroom"
+          ? "各班班主任"
+          : period.responsibleRole === "life_teacher"
+            ? "本学部生活老师"
+            : ""),
     };
   });
 }
@@ -486,16 +593,24 @@ function assignmentTeachers(db, division, grade, subjectId, classId = "", term =
 }
 
 function publicSchedulingTeacher(teacher) {
+  const teachableSubjectIds = Array.from(
+    new Set([teacher.primarySubjectId, ...(teacher.teachableSubjectIds || [])].filter(Boolean)),
+  );
   return {
     id: teacher.id,
     employeeNo: teacher.employeeNo,
     name: teacher.name,
     subject: teacher.primarySubjectName,
     subjectId: teacher.primarySubjectId,
+    teachableSubjectIds,
+    teachableSubjectNames: Array.isArray(teacher.teachableSubjectNames)
+      ? teacher.teachableSubjectNames
+      : [teacher.primarySubjectName].filter(Boolean),
     department: teacher.department,
     stageId: teacher.stageId,
     title: teacher.title,
     phone: teacher.phone,
+    isLifeTeacher: teacher.salaryProfile?.salaryCategory === "lifeTeacher",
   };
 }
 
@@ -505,7 +620,7 @@ function activeSubjectTeachers(db, stageId, subjectId) {
       (teacher) =>
         teacher.status === "active" &&
         teacher.stageId === stageId &&
-        teacher.primarySubjectId === subjectId &&
+        (teacher.primarySubjectId === subjectId || teacher.teachableSubjectIds?.includes(subjectId)) &&
         // 人事联动（PRD 4.5）：离职中冻结新增排课，待入职/已离职/停用不进任课池
         teacherEligibility(db, teacher.id).inTeachingPool,
     )
@@ -530,7 +645,7 @@ function schedulingNonRegularTeacherRows(db, division) {
       (teacher) =>
         teacher.status === "active" &&
         teacher.stageId === division.stageId &&
-        teacherEligibility(db, teacher.id).inTeachingPool,
+        (teacherEligibility(db, teacher.id).inTeachingPool || teacher.salaryProfile?.salaryCategory === "lifeTeacher"),
     )
     .sort((a, b) => String(a.employeeNo || a.id).localeCompare(String(b.employeeNo || b.id), "zh-CN"))
     .map(publicSchedulingTeacher);
@@ -541,9 +656,34 @@ function defaultCourseRule(division, subjectId) {
 }
 
 function normalizeWeeklyLessons(value, fallback = 1) {
-  const number = Number.parseInt(value, 10);
+  const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
-  return Math.min(Math.max(number, 0), 12);
+  return Math.min(Math.max(Math.round(number * 2) / 2, 0), 12);
+}
+
+function cycleWeekIndex(termStartDate, weekStart, cycleWeeks = 2) {
+  const start = new Date(`${termStartDate}T00:00:00`);
+  const week = new Date(`${weekStart}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(week.getTime())) return 0;
+  const elapsedWeeks = Math.max(Math.floor((week.getTime() - start.getTime()) / (7 * 86400000)), 0);
+  return elapsedWeeks % Math.max(Number(cycleWeeks) || 2, 1);
+}
+
+function courseCycleFields(value, subjectId = "", classAlternating = undefined) {
+  const sourceWeeklyLessons = normalizeWeeklyLessons(value, 1);
+  if (Number.isInteger(sourceWeeklyLessons)) {
+    return { sourceWeeklyLessons, cycleWeeks: 1, cycleLessonCounts: [sourceWeeklyLessons], classAlternating: false };
+  }
+  const upper = Math.ceil(sourceWeeklyLessons);
+  const lower = Math.floor(sourceWeeklyLessons);
+  const alternateByClass =
+    classAlternating !== undefined ? Boolean(classAlternating) : subjectId === "psychology" && sourceWeeklyLessons === 0.5;
+  return {
+    sourceWeeklyLessons,
+    cycleWeeks: 2,
+    cycleLessonCounts: alternateByClass ? [upper, upper] : [upper, lower],
+    classAlternating: alternateByClass,
+  };
 }
 
 function normalizeDurationMinutes(value, fallback = DEFAULT_LESSON_DURATION_MINUTES) {
@@ -650,7 +790,14 @@ function courseRuleConstraintFields(rule = {}, fallbackRule = {}, maxPeriodCount
   };
 }
 
-function schedulingCourseRules(db, division, grade, term = currentTerm(db), maxPeriodCount = PERIODS.length) {
+function schedulingCourseRules(
+  db,
+  division,
+  grade,
+  term = currentTerm(db),
+  maxPeriodCount = PERIODS.length,
+  cycleContext = {},
+) {
   const savedRules = new Map(
     termMergedRows(
       db.gradeCourseRules || [],
@@ -665,10 +812,17 @@ function schedulingCourseRules(db, division, grade, term = currentTerm(db), maxP
     const defaultRule = defaultCourseRule(division, subject.id);
     const savedRule = savedRules.get(subject.id);
     const enabled = savedRule ? Boolean(savedRule.enabled) : Boolean(defaultRule);
-    const weeklyLessons = normalizeWeeklyLessons(
-      savedRule?.weeklyLessons ?? defaultRule?.weeklyLessons,
-      defaultRule?.weeklyLessons || 1,
+    const cycle = courseCycleFields(
+      savedRule?.sourceWeeklyLessons ?? savedRule?.weeklyLessons ?? defaultRule?.weeklyLessons,
+      subject.id,
+      savedRule?.classAlternating,
     );
+    const weekIndex = cycleWeekIndex(
+      cycleContext.termStartDate || term.startDate,
+      cycleContext.weekStart || term.startDate,
+      cycle.cycleWeeks,
+    );
+    const weeklyLessons = Number(cycle.cycleLessonCounts[weekIndex] ?? cycle.cycleLessonCounts[0] ?? 0);
     const durationMinutes = normalizeDurationMinutes(
       savedRule?.durationMinutes ?? defaultRule?.durationMinutes,
       DEFAULT_LESSON_DURATION_MINUTES,
@@ -684,6 +838,10 @@ function schedulingCourseRules(db, division, grade, term = currentTerm(db), maxP
       subjectName: subject.name,
       enabled,
       weeklyLessons,
+      sourceWeeklyLessons: cycle.sourceWeeklyLessons,
+      cycleWeeks: cycle.cycleWeeks,
+      cycleLessonCounts: cycle.cycleLessonCounts,
+      classAlternating: cycle.classAlternating,
       durationMinutes,
       ...constraintFields,
     };
@@ -785,6 +943,10 @@ function schedulingSubjects(db, division, grade, term = currentTerm(db), courseR
             id: subject.id,
             name: subject.name,
             weeklyLessons: rule.weeklyLessons,
+            sourceWeeklyLessons: rule.sourceWeeklyLessons,
+            cycleWeeks: rule.cycleWeeks,
+            cycleLessonCounts: rule.cycleLessonCounts,
+            classAlternating: rule.classAlternating,
             durationMinutes: rule.durationMinutes,
             minPerClassPerDay: rule.minPerClassPerDay,
             maxPerClassPerDay: rule.maxPerClassPerDay,
@@ -797,6 +959,10 @@ function schedulingSubjects(db, division, grade, term = currentTerm(db), courseR
             requiredRoomTypeName: ROOM_TYPES[normalizeRoomType(rule.requiredRoomType, "homeroom")],
             teacherIds,
             classTeacherIds,
+            classTeacherMeta:
+              assignment?.classTeacherMeta && typeof assignment.classTeacherMeta === "object"
+                ? assignment.classTeacherMeta
+                : {},
             availableTeachers: availableTeachers.map(publicSchedulingTeacher),
           }
         : null;
@@ -812,11 +978,20 @@ function schedulingClasses(db, division, grade, term = currentTerm(db)) {
   )
     .map((schoolClass) => {
       const room = findScopedRoom(db, schoolClass.roomId, term);
+      const highClassCategory = isHighDivision(division) ? highClassCategoryForRow(schoolClass) : "";
+      const category = highClassCategoryDefinition(highClassCategory);
       return {
         id: schoolClass.id,
         name: schoolClass.name,
         classType: schoolClass.classType || (String(schoolClass.name || "").includes("实验") ? "experimental" : "regular"),
+        highClassCategory,
+        highClassCategoryCode: category?.code || "",
+        highClassCategoryName: category?.name || "",
+        scheduleTemplateKey: scheduleTemplateKeyForClass(division, schoolClass),
+        scheduleTemplateLabel: scheduleTemplateLabel(division, scheduleTemplateKeyForClass(division, schoolClass)),
         displayOrder: Number(schoolClass.displayOrder || 0),
+        homeroomTeacherId: schoolClass.homeroomTeacherId || "",
+        homeroomTeacherName: schoolClass.homeroomTeacherName || "",
         room: room?.name || schoolClass.roomId,
         roomId: schoolClass.roomId,
         roomType: normalizeRoomType(room?.roomType || room?.type, "homeroom"),
@@ -826,6 +1001,11 @@ function schedulingClasses(db, division, grade, term = currentTerm(db)) {
 
 function gradeClassStructure(classes = []) {
   const activeClasses = classes.filter((schoolClass) => schoolClass.active !== false);
+  const categoryCounts = { a: 0, b: 0, c: 0 };
+  activeClasses.forEach((schoolClass) => {
+    const category = normalizeHighClassCategory(schoolClass.highClassCategory || schoolClass.classCategory);
+    if (category) categoryCounts[category] += 1;
+  });
   const regularCount = activeClasses.filter(
     (schoolClass) => (schoolClass.classType || (String(schoolClass.name || "").includes("实验") ? "experimental" : "regular")) !== "experimental",
   ).length;
@@ -835,6 +1015,7 @@ function gradeClassStructure(classes = []) {
   return {
     regularCount,
     experimentalCount,
+    highClassCounts: categoryCounts,
     totalCount: activeClasses.length,
   };
 }
@@ -984,13 +1165,37 @@ export function buildSchedulingConfig(db, options = {}) {
   const term = currentTerm(db, options.termId);
   const division = divisionById(options.divisionId);
   const grade = gradeById(division, options.gradeId);
-  const periods = schedulingPeriods(db, division, grade, term);
+  const classes = schedulingClasses(db, division, grade, term);
+  const requestedTemplateKey = isHighDivision(division)
+    ? normalizeHighClassCategory(options.scheduleTemplateKey || options.highClassCategory, "c")
+    : "default";
+  const scheduleTemplateOptions = isHighDivision(division)
+    ? HIGH_CLASS_CATEGORIES.map((category) => ({
+        key: category.key,
+        code: category.code,
+        name: category.name,
+        label: `${category.code}类 · ${category.name}`,
+        classCount: classes.filter((schoolClass) => schoolClass.highClassCategory === category.key).length,
+      }))
+    : [{ key: "default", code: "", name: "", label: "年级统一作息", classCount: classes.length }];
+  const periodTemplates = Object.fromEntries(
+    scheduleTemplateOptions.map((template) => [template.key, schedulingPeriods(db, division, grade, term, template.key)]),
+  );
+  const periods = periodTemplates[requestedTemplateKey] || periodTemplates.default || Object.values(periodTemplates)[0] || [];
   // 课程规则仍按作息表中的节次编号保存。这样即使第 3 节是自习、第 6 节仍是正课，
   // “禁排第 6 节”之类的既有规则也不会在读取时被错误丢弃；真正的候选时段由
   // schedulingSlots 统一筛成正课。
-  const courseRules = schedulingCourseRules(db, division, grade, term, periods.length);
+  const maxPeriodCount = Math.max(...Object.values(periodTemplates).map((items) => items.length), periods.length, PERIODS.length);
+  // 课程计划允许 0.5 节步进：按校历起点和当前排课周换算成当周整数课次，
+  // 心理课再结合班级任课表中的单/双周标记决定本周实际参与的班级。
+  const calendarRange = termCalendarRangeForStage(db, term, division.stageId);
+  const scheduleWeekStart =
+    String(options.weekStart || "").trim() || weekStartForDivision(term, division, db) || division.weekStart || "2026-06-15";
+  const courseRules = schedulingCourseRules(db, division, grade, term, maxPeriodCount, {
+    termStartDate: calendarRange.startDate,
+    weekStart: scheduleWeekStart,
+  });
   const subjects = schedulingSubjects(db, division, grade, term, courseRules);
-  const classes = schedulingClasses(db, division, grade, term);
   const classStructure = gradeClassStructure(classes);
   const constraints = publicScheduleConstraints(db, division, grade, term);
   const teacherRules = publicTeacherScheduleRules(db, division, subjects, term);
@@ -998,8 +1203,6 @@ export function buildSchedulingConfig(db, options = {}) {
   const roomResourceTypes = roomResourceTypesForScope(db, term, division, scopedRooms);
   // 校历是学部级数据：同一个“上学期”在不同学部可以有不同的开、结课日。
   // termId 仍是排课数据主键，因此前端继续只选择教学学期，寒暑假永不成为选项。
-  const calendarRange = termCalendarRangeForStage(db, term, division.stageId);
-
   return {
     divisionId: division.id,
     divisionName: division.name,
@@ -1012,7 +1215,7 @@ export function buildSchedulingConfig(db, options = {}) {
     gradeId: grade.id,
     gradeName: grade.name,
     grade: grade.grade,
-    weekStart: String(options.weekStart || "").trim() || weekStartForDivision(term, division, db) || division.weekStart || "2026-06-15",
+    weekStart: scheduleWeekStart,
     classCount: classes.length,
     classStructure,
     roomResourceCounts: specialRoomCounts(scopedRooms),
@@ -1028,6 +1231,9 @@ export function buildSchedulingConfig(db, options = {}) {
         capacity: Number(room.capacity || 1),
       })),
     periods,
+    activeScheduleTemplateKey: requestedTemplateKey,
+    scheduleTemplateOptions,
+    periodTemplates,
     courseRules,
     constraints,
     teacherRules,
@@ -1058,37 +1264,64 @@ function classTypeLabel(classType) {
   return classType === "experimental" ? "实验班" : "普通班";
 }
 
+function highClassStructureCounts(value = {}, fallback = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  return Object.fromEntries(
+    HIGH_CLASS_CATEGORIES.map((category) => [
+      category.key,
+      normalizeClassCount(source[category.key], Number(fallback[category.key] || 0), { min: 0, max: 20 }),
+    ]),
+  );
+}
+
+function classCategoryLabel(division, classType = "regular", highClassCategory = "") {
+  if (isHighDivision(division)) {
+    return highClassCategoryDefinition(highClassCategory)?.name || classTypeLabel(classType);
+  }
+  return classTypeLabel(classType);
+}
+
 function normalizeClassRoomCatalog(classRoomCatalog = []) {
   if (!Array.isArray(classRoomCatalog)) return [];
   return classRoomCatalog
     .map((room) => ({
       classType: room.classType === "experimental" ? "experimental" : "regular",
+      highClassCategory: normalizeHighClassCategory(room.highClassCategory || room.classCategory),
       index: normalizeClassCount(room.index, 0, { min: 1, max: 40 }),
       roomName: normalizeRoomName(room.roomName || room.name),
     }))
     .filter((room) => room.index >= 1);
 }
 
-function classRoomCatalogFromClasses(classes = []) {
+function classRoomCatalogFromClasses(classes = [], division = null) {
   const counters = { regular: 0, experimental: 0 };
+  const highCounters = { a: 0, b: 0, c: 0 };
   return classes
     .slice()
     .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
     .map((schoolClass) => {
       const classType = schoolClass.classType === "experimental" ? "experimental" : "regular";
       counters[classType] += 1;
+      const highClassCategory = isHighDivision(division || schoolClass.stageId)
+        ? highClassCategoryForRow(schoolClass)
+        : "";
+      if (highClassCategory) highCounters[highClassCategory] += 1;
       return {
         classType,
-        index: counters[classType],
+        highClassCategory,
+        index: highClassCategory ? highCounters[highClassCategory] : counters[classType],
         roomName: normalizeRoomName(schoolClass.room),
       };
     });
 }
 
-function classRoomNameFromCatalog(classRoomCatalog, classType, index, fallback) {
+function classRoomNameFromCatalog(classRoomCatalog, classType, index, fallback, highClassCategory = "") {
   return (
     normalizeClassRoomCatalog(classRoomCatalog).find(
-      (room) => room.classType === classType && Number(room.index) === Number(index),
+      (room) =>
+        room.classType === classType &&
+        normalizeHighClassCategory(room.highClassCategory) === normalizeHighClassCategory(highClassCategory) &&
+        Number(room.index) === Number(index),
     )?.roomName || fallback
   );
 }
@@ -1097,8 +1330,14 @@ function buildClassAndRoomRows(division, grade, options = {}) {
   const term = options.term || null;
   const regularCount = normalizeClassCount(options.regularCount, 1, { min: 0, max: 30 });
   const experimentalCount = normalizeClassCount(options.experimentalCount, 0, { min: 0, max: 10 });
+  const highClassCounts = isHighDivision(division)
+    ? highClassStructureCounts(options.highClassCounts, options.previousHighClassCounts)
+    : null;
   const classRoomCatalog = normalizeClassRoomCatalog(options.classRoomCatalog || []);
-  if (regularCount + experimentalCount < 1) {
+  const totalClassCount = highClassCounts
+    ? Object.values(highClassCounts).reduce((sum, count) => sum + Number(count || 0), 0)
+    : regularCount + experimentalCount;
+  if (totalClassCount < 1) {
     const error = new Error("当前年级至少保留 1 个班");
     error.statusCode = 400;
     throw error;
@@ -1106,24 +1345,44 @@ function buildClassAndRoomRows(division, grade, options = {}) {
 
   const classRows = [];
   const roomRows = [];
+  const existingHighClassesByKey = new Map();
+  if (highClassCounts) {
+    const categoryIndexes = { a: 0, b: 0, c: 0 };
+    (options.existingClasses || [])
+      .slice()
+      .sort((left, right) => Number(left.displayOrder || 0) - Number(right.displayOrder || 0))
+      .forEach((schoolClass) => {
+        const category = highClassCategoryForRow(schoolClass);
+        categoryIndexes[category] += 1;
+        existingHighClassesByKey.set(`${category}:${categoryIndexes[category]}`, schoolClass);
+      });
+  }
   // 班级与教室行按学期存放，ID 必须带学期作用域，否则在新学期重新保存班级结构时
   // 会与上一学期的同名行撞主键，整批写入被拒。后缀规则与 cloneTermConfigRows 一致；
   // 二维码沿用不带作用域的物理编号，保证门牌贴纸跨学期继续可用。
   const termSuffix = term?.id ? `@${String(term.id).replace(/^TERM-/, "").slice(-13)}` : "";
-  const pushClass = (classType, index, displayOrder) => {
-    const suffix = classType === "experimental" ? `E${pad(index)}` : pad(index);
+  const pushClass = (classType, index, displayOrder, highClassCategory = "") => {
+    const highCategory = highClassCategoryDefinition(highClassCategory);
+    const suffix = highCategory ? `${highCategory.code}${pad(index)}` : classType === "experimental" ? `E${pad(index)}` : pad(index);
     const physicalRoomId = `ROOM-${division.stageId}-${grade.grade}-${suffix}`;
-    const classId = `CLS-${division.stageId}-${grade.grade}-${suffix}${termSuffix}`;
-    const roomId = `${physicalRoomId}${termSuffix}`;
-    const className =
-      classType === "experimental"
+    const existingClass = highClassCategory
+      ? existingHighClassesByKey.get(`${highClassCategory}:${index}`)
+      : null;
+    // 高中原有普通/实验班首次接入 C/B 作息时保留班级和教室 ID，
+    // 已发布课表、课时记录与薪资明细可继续关联到同一班级。
+    const classId = existingClass?.id || `CLS-${division.stageId}-${grade.grade}-${suffix}${termSuffix}`;
+    const roomId = existingClass?.roomId || `${physicalRoomId}${termSuffix}`;
+    const className = highCategory
+      ? `${grade.name}${highCategory.code}${index}班`
+      : classType === "experimental"
         ? `${grade.name}实验${index}班`
         : `${grade.name} ${index} 班`;
-    const roomName =
-      classType === "experimental"
+    const roomName = highCategory
+      ? `${division.shortName || division.name}${grade.name}${highCategory.code}${index}班`
+      : classType === "experimental"
         ? `${division.shortName || division.name}${grade.name}实验${index}班`
         : `${division.shortName || division.name}${grade.name}-${pad(index)}`;
-    const catalogRoomName = classRoomNameFromCatalog(classRoomCatalog, classType, index, roomName);
+    const catalogRoomName = classRoomNameFromCatalog(classRoomCatalog, classType, index, roomName, highClassCategory);
     classRows.push({
       id: classId,
       termId: term?.id || "",
@@ -1133,7 +1392,10 @@ function buildClassAndRoomRows(division, grade, options = {}) {
       grade: grade.grade,
       name: className,
       classType,
-      classTypeLabel: classTypeLabel(classType),
+      classTypeLabel: classCategoryLabel(division, classType, highClassCategory),
+      highClassCategory: highClassCategory || "",
+      highClassCategoryCode: highCategory?.code || "",
+      highClassCategoryName: highCategory?.name || "",
       displayOrder,
       roomId,
       active: true,
@@ -1153,14 +1415,24 @@ function buildClassAndRoomRows(division, grade, options = {}) {
     });
   };
 
-  for (let index = 1; index <= regularCount; index += 1) {
-    pushClass("regular", index, index);
-  }
-  for (let index = 1; index <= experimentalCount; index += 1) {
-    pushClass("experimental", index, regularCount + index);
+  if (highClassCounts) {
+    let displayOrder = 0;
+    HIGH_CLASS_CATEGORIES.forEach((category) => {
+      for (let index = 1; index <= highClassCounts[category.key]; index += 1) {
+        displayOrder += 1;
+        pushClass(category.legacyClassType, index, displayOrder, category.key);
+      }
+    });
+  } else {
+    for (let index = 1; index <= regularCount; index += 1) {
+      pushClass("regular", index, index);
+    }
+    for (let index = 1; index <= experimentalCount; index += 1) {
+      pushClass("experimental", index, regularCount + index);
+    }
   }
 
-  return { classRows, roomRows, regularCount, experimentalCount };
+  return { classRows, roomRows, regularCount, experimentalCount, highClassCounts };
 }
 
 export function updateRoomResources(db, options = {}, actorAccount = null) {
@@ -1267,13 +1539,37 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
   const previousClasses = schedulingClasses(db, division, grade, term);
   const previousStructure = gradeClassStructure(previousClasses);
   const submittedClassRoomCatalog = normalizeClassRoomCatalog(options.classRoomCatalog);
-  const classRoomCatalog = submittedClassRoomCatalog.length ? submittedClassRoomCatalog : classRoomCatalogFromClasses(previousClasses);
-  const { classRows, roomRows, regularCount, experimentalCount } = buildClassAndRoomRows(division, grade, {
+  const classRoomCatalog = submittedClassRoomCatalog.length
+    ? submittedClassRoomCatalog
+    : classRoomCatalogFromClasses(previousClasses, division);
+  const { classRows, roomRows, regularCount, experimentalCount, highClassCounts } = buildClassAndRoomRows(division, grade, {
     term,
     regularCount: options.regularCount ?? previousStructure.regularCount,
     experimentalCount: options.experimentalCount ?? previousStructure.experimentalCount,
+    highClassCounts: isHighDivision(division)
+      ? options.highClassCounts || previousStructure.highClassCounts
+      : null,
+    previousHighClassCounts: previousStructure.highClassCounts,
+    existingClasses: previousClasses,
     classRoomCatalog,
   });
+  const nextClassIds = new Set(classRows.map((schoolClass) => schoolClass.id));
+  const removedClassIds = previousClasses
+    .map((schoolClass) => schoolClass.id)
+    .filter((classId) => !nextClassIds.has(classId));
+  const hasPublishedLessonForRemovedClass = removedClassIds.length && (db.lessonInstances || []).some(
+    (lesson) =>
+      itemBelongsToTerm(lesson, term) &&
+      lesson.stageId === division.stageId &&
+      Number(lesson.grade) === Number(grade.grade) &&
+      lesson.status !== "cancelled" &&
+      removedClassIds.includes(lesson.classId),
+  );
+  if (hasPublishedLessonForRemovedClass) {
+    const error = new Error("当前学期已有已发布课表，不能删除其中的班级；请保留原班级或切换到新学期后再调整班级结构");
+    error.statusCode = 409;
+    throw error;
+  }
   const scopeClassIds = new Set(
     (db.classes || [])
       .filter(
@@ -1316,6 +1612,7 @@ export function updateGradeClassStructure(db, options = {}, actorAccount = null)
     grade: grade.grade,
     regularCount,
     experimentalCount,
+    highClassCounts,
     actorAccountId: actorAccount?.id || "",
     createdAt: now,
   });
@@ -1335,6 +1632,9 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
   const scopeConfig = buildSchedulingConfig(db, { termId: options.termId, divisionId: division.id, gradeId: grade.id });
   const term = currentTerm(db, scopeConfig.termId);
   assertEditableScheduleTerm(scopeConfig, "修改作息时间");
+  const highClassCategory = isHighDivision(division)
+    ? normalizeHighClassCategory(options.highClassCategory || options.scheduleTemplateKey, "c")
+    : "";
   const periods = normalizeSchedulePeriods(options.periods || [], { strict: true });
   if (!regularSchedulePeriods(periods).length) {
     const error = new Error("请至少保留 1 个正课节次用于自动排课");
@@ -1343,7 +1643,7 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
   }
   const responsibleTeacherIds = new Set(schedulingNonRegularTeacherRows(db, division).map((teacher) => teacher.id));
   periods.forEach((period) => {
-    if (period.type === "regular" || !period.responsibleTeacherId) return;
+    if (period.type === "regular" || period.responsibleRole || !period.responsibleTeacherId) return;
     if (!responsibleTeacherIds.has(period.responsibleTeacherId)) {
       const error = new Error("请选择当前学部在职老师作为非正课负责人");
       error.statusCode = 400;
@@ -1357,7 +1657,10 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
       !(
         itemBelongsToTerm(template, term) &&
         template.stageId === division.stageId &&
-        Number(template.grade) === Number(grade.grade)
+        Number(template.grade) === Number(grade.grade) &&
+        (isHighDivision(division)
+          ? normalizeHighClassCategory(template.highClassCategory || template.classCategory) === highClassCategory
+          : !normalizeHighClassCategory(template.highClassCategory || template.classCategory))
       ),
   );
   db.schedulePeriodTemplates.push({
@@ -1368,6 +1671,9 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
     stageName: division.name,
     grade: grade.grade,
     gradeName: grade.name,
+    highClassCategory,
+    scheduleTemplateKey: highClassCategory || "default",
+    scheduleTemplateLabel: scheduleTemplateLabel(division, highClassCategory || "default"),
     periods,
     updatedAt: now,
     updatedByAccountId: actorAccount?.id || "",
@@ -1387,12 +1693,18 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
     termId: term.id,
     stageId: division.stageId,
     grade: grade.grade,
+    highClassCategory,
     periodCount: periods.length,
     createdAt: now,
   });
 
   return {
-    config: buildSchedulingConfig(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
+    config: buildSchedulingConfig(db, {
+      termId: scopeConfig.termId,
+      divisionId: division.id,
+      gradeId: grade.id,
+      scheduleTemplateKey: highClassCategory || "default",
+    }),
     draft: findScheduleDraft(db, { termId: scopeConfig.termId, divisionId: division.id, gradeId: grade.id }),
   };
 }
@@ -1418,6 +1730,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
     const subject = subjectById(db, subjectId);
     if (!subject) return;
     const defaultRule = defaultCourseRule(division, subjectId) || {};
+    const cycle = courseCycleFields(rule.sourceWeeklyLessons ?? rule.weeklyLessons, subjectId, rule.classAlternating);
     bySubject.set(subjectId, {
       id: scopedConfigId("CR", term.id, division.stageId, grade.grade, subjectId),
       termId: term.id,
@@ -1426,7 +1739,11 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
       grade: grade.grade,
       subjectId,
       enabled: Boolean(rule.enabled),
-      weeklyLessons: normalizeWeeklyLessons(rule.weeklyLessons, 1),
+      weeklyLessons: cycle.sourceWeeklyLessons,
+      sourceWeeklyLessons: cycle.sourceWeeklyLessons,
+      cycleWeeks: cycle.cycleWeeks,
+      cycleLessonCounts: cycle.cycleLessonCounts,
+      classAlternating: cycle.classAlternating,
       durationMinutes: normalizeDurationMinutes(rule.durationMinutes, DEFAULT_LESSON_DURATION_MINUTES),
       ...courseRuleConstraintFields(rule, defaultRule, scopeConfig.periods?.length || PERIODS.length),
       updatedAt: new Date().toISOString(),
@@ -1852,13 +2169,16 @@ export function updateTeacherScheduleRule(db, options = {}, actorAccount = null)
   };
 }
 
-function schedulingSlots(config) {
+function schedulingSlots(config, schoolClassOrId = "") {
+  const templateKey = scheduleTemplateKeyForConfigClass(config, schoolClassOrId);
+  const periods = periodsForConfigClass(config, schoolClassOrId);
   return Array.from({ length: 5 }, (_, dayIndex) => addDays(config.weekStart, dayIndex)).flatMap((date, dayIndex) =>
-    regularSchedulePeriods(config.periods).map((period) => ({
+    regularSchedulePeriods(periods).filter((period) => periodAppliesOnDay(period, dayIndex)).map((period) => ({
       ...period,
       date,
       dayIndex,
-      slotKey: `${date}-${period.period}`,
+      scheduleTemplateKey: templateKey,
+      slotKey: `${date}-${templateKey}-${period.period}`,
     })),
   );
 }
@@ -1868,8 +2188,30 @@ function weekDateKeys(config) {
 }
 
 export function requiredScheduleLessonCount(config) {
-  const weeklyPerClass = config.subjects.reduce((sum, subject) => sum + subject.weeklyLessons, 0);
-  return config.classes.length * weeklyPerClass;
+  return (config.classes || []).reduce(
+    (sum, schoolClass) =>
+      sum +
+      (config.subjects || []).reduce(
+        (classTotal, subject) =>
+          classTotal + (classParticipatesThisWeek(config, subject, schoolClass.id) ? Number(subject.weeklyLessons || 0) : 0),
+        0,
+      ),
+    0,
+  );
+}
+
+function classParticipatesThisWeek(config, subject, classId) {
+  const pattern = String(subject?.classTeacherMeta?.[classId]?.weekPattern || "weekly").toLowerCase();
+  if (pattern !== "odd" && pattern !== "even") return true;
+  const index = cycleWeekIndex(config.termStartDate, config.weekStart, 2);
+  return pattern === "odd" ? index === 0 : index === 1;
+}
+
+function subjectDemandForWeek(config, subject) {
+  const classCount = (config.classes || []).filter((schoolClass) =>
+    classParticipatesThisWeek(config, subject, schoolClass.id),
+  ).length;
+  return classCount * Number(subject.weeklyLessons || 0);
 }
 
 function missingTeacherAssignmentCells(config) {
@@ -1977,7 +2319,9 @@ export function autoAssignGradeTeachers(db, options = {}, actorAccount = null) {
   );
 
   subjects.forEach((subject) => {
-    const pool = (config.teachers || []).filter((teacher) => teacher.subjectId === subject.id);
+    const pool = (config.teachers || []).filter(
+      (teacher) => teacher.subjectId === subject.id || teacher.teachableSubjectIds?.includes(subject.id),
+    );
     if (!pool.length) {
       summary.push({
         subjectId: subject.id,
@@ -2347,7 +2691,32 @@ function projectedMaxConsecutive(periods = [], nextPeriod = null) {
   return maxConsecutiveRun(next);
 }
 
-function teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad = 0, teacherDayPeriods = []) {
+function maxConsecutiveTimeRun(items = []) {
+  const ranges = items
+    .map((item) => ({ item, range: timeRangeForItem(item) }))
+    .filter((item) => item.range)
+    .sort((left, right) => left.range.start - right.range.start || left.range.end - right.range.end);
+  if (!ranges.length) return 0;
+  let longest = 0;
+  let current = 0;
+  let previousEnd = null;
+  ranges.forEach(({ range }) => {
+    // 相隔一节课间（15 分钟以内）仍视作连续授课；不同模板的“第几节”不再混用。
+    current = previousEnd !== null && range.start <= previousEnd + 15 ? current + 1 : 1;
+    longest = Math.max(longest, current);
+    previousEnd = Math.max(previousEnd ?? range.end, range.end);
+  });
+  return longest;
+}
+
+function usesMultiTimetable(config = {}) {
+  return (
+    config.stageId === "high" &&
+    new Set((config.classes || []).map((schoolClass) => scheduleTemplateKeyForConfigClass(config, schoolClass))).size > 1
+  );
+}
+
+function teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad = 0, teacherDayPeriods = [], teacherDayItems = []) {
   const rule = teacherScheduleRuleFor(config, teacherId);
   if (!rule) return null;
   const unavailable = teacherUnavailableSlot(rule, slot);
@@ -2367,11 +2736,14 @@ function teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad = 0, t
     };
   }
   const maxConsecutiveLessons = Number(rule.maxConsecutiveLessons || 3);
-  if (projectedMaxConsecutive(teacherDayPeriods, slot.period) > maxConsecutiveLessons) {
+  const projectedConsecutive = usesMultiTimetable(config) && teacherDayItems.length
+    ? maxConsecutiveTimeRun([...teacherDayItems, slot])
+    : projectedMaxConsecutive(teacherDayPeriods, slot.period);
+  if (projectedConsecutive > maxConsecutiveLessons) {
     return {
       type: "teacher-consecutive",
       title: `${teacherName(config, teacherId)} 连堂超上限`,
-      text: `${dayLabel(Number(slot.dayIndex))}加入第 ${slot.period} 节后连续课超过 ${maxConsecutiveLessons} 节`,
+      text: `${dayLabel(Number(slot.dayIndex))}加入 ${slot.time || `第 ${slot.period} 节`} 后连续课超过 ${maxConsecutiveLessons} 节`,
     };
   }
   return null;
@@ -2380,6 +2752,88 @@ function teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad = 0, t
 function periodForLesson(lesson) {
   if (lesson.period) return Number.parseInt(lesson.period, 10);
   return PERIODS.find((period) => period.time === lesson.time)?.period || null;
+}
+
+function classForConfig(config, classId = "") {
+  return (config.classes || []).find((schoolClass) => schoolClass.id === classId) || null;
+}
+
+function scheduleTemplateKeyForConfigClass(config, schoolClassOrId = "") {
+  const schoolClass =
+    typeof schoolClassOrId === "object" && schoolClassOrId
+      ? schoolClassOrId
+      : classForConfig(config, schoolClassOrId);
+  if (!schoolClass) return config.activeScheduleTemplateKey || "default";
+  return schoolClass.scheduleTemplateKey || (config.stageId === "high" ? highClassCategoryForRow(schoolClass) : "default");
+}
+
+function periodsForConfigClass(config, schoolClassOrId = "") {
+  const key = scheduleTemplateKeyForConfigClass(config, schoolClassOrId);
+  return (config.periodTemplates && config.periodTemplates[key]) || config.periods || [];
+}
+
+function periodForConfigClass(config, schoolClassOrId, periodNumber) {
+  return periodsForConfigClass(config, schoolClassOrId).find((item) => Number(item.period) === Number(periodNumber)) || null;
+}
+
+function timeRangeForItem(item = {}) {
+  const [startText = "", endText = ""] = String(item.time || "").split("-");
+  const start = timeToMinutes(item.startTime || startText);
+  const end = timeToMinutes(item.endTime || endText);
+  if (start === null || end === null || end <= start) return null;
+  return { start, end };
+}
+
+function scheduleSlotOverlap(left, right) {
+  if (!left || !right || left.date !== right.date) return false;
+  const leftRange = timeRangeForItem(left);
+  const rightRange = timeRangeForItem(right);
+  if (!leftRange || !rightRange) {
+    return Number(left.period) === Number(right.period);
+  }
+  return leftRange.start < rightRange.end && rightRange.start < leftRange.end;
+}
+
+function overlappingAssignmentPairs(items = []) {
+  const pairs = [];
+  for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+      if (scheduleSlotOverlap(items[leftIndex], items[rightIndex])) {
+        pairs.push([items[leftIndex], items[rightIndex]]);
+      }
+    }
+  }
+  return pairs;
+}
+
+function occupancyKeysForSlot(slot = {}) {
+  const range = timeRangeForItem(slot);
+  if (!slot.date || !range) return [slotKeyFor(slot.date, slot.period)];
+  const keys = [];
+  for (let minute = range.start; minute < range.end; minute += 1) {
+    keys.push(`${slot.date}@${minute}`);
+  }
+  return keys;
+}
+
+function hasBusyTimeOverlap(map, ownerId, slot) {
+  const slots = map.get(ownerId);
+  if (!slots) return false;
+  return occupancyKeysForSlot(slot).some((key) => slots.has(key));
+}
+
+function markBusyTimeRange(map, ownerId, slot) {
+  if (!ownerId) return;
+  if (!map.has(ownerId)) map.set(ownerId, new Set());
+  const slots = map.get(ownerId);
+  occupancyKeysForSlot(slot).forEach((key) => slots.add(key));
+}
+
+function removeBusyTimeRange(map, ownerId, slot) {
+  const slots = map.get(ownerId);
+  if (!slots) return;
+  occupancyKeysForSlot(slot).forEach((key) => slots.delete(key));
+  if (!slots.size) map.delete(ownerId);
 }
 
 function termScopeMatches(config, item) {
@@ -2512,7 +2966,7 @@ function nextAssignmentId(usedIds, classId, subjectId, nextIndex) {
 
 function normalizeLockedAssignment(config, assignment) {
   const schoolClass = classById(config, assignment.classId);
-  const period = config.periods.find((item) => item.period === assignment.period);
+  const period = periodForConfigClass(config, schoolClass || assignment.classId, assignment.period);
   const room = roomById(config, assignment.roomId) || roomById(config, schoolClass?.roomId);
   const subject = config.subjects.find((item) => item.id === assignment.subjectId);
   return {
@@ -2522,6 +2976,8 @@ function normalizeLockedAssignment(config, assignment) {
     durationMinutes: assignment.durationMinutes || subject?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
     dayIndex: dayIndexForDate(config, assignment.date),
     time: assignment.time || period?.time || "",
+    scheduleTemplateKey: assignment.scheduleTemplateKey || scheduleTemplateKeyForConfigClass(config, schoolClass || assignment.classId),
+    highClassCategory: assignment.highClassCategory || schoolClass?.highClassCategory || "",
     roomId: room?.id || assignment.roomId || schoolClass?.roomId || "",
     room: room?.name || assignment.room || schoolClass?.room || "",
     locked: true,
@@ -2645,6 +3101,8 @@ function createSolverState(config, lockedAssignments = [], externalAssignments =
     classDayLoad: new Map(),
     classSubjectDay: new Map(),
     teacherDayPeriods: new Map(),
+    teacherDayItems: new Map(),
+    timeAwareOccupancy: usesMultiTimetable(config),
   };
 
   externalAssignments.forEach((assignment) => markSolverAssignment(state, assignment, { external: true }));
@@ -2656,24 +3114,38 @@ function createSolverState(config, lockedAssignments = [], externalAssignments =
 function markSolverAssignment(state, assignment, options = {}) {
   const busySlotKey = slotKeyFor(assignment.date, assignment.period);
   if (!options.external) {
-    markBusy(state.classBusy, assignment.classId, busySlotKey);
+    if (state.timeAwareOccupancy) markBusyTimeRange(state.classBusy, assignment.classId, assignment);
+    else markBusy(state.classBusy, assignment.classId, busySlotKey);
     incrementMap(state.classDayLoad, classDayKey(assignment.classId, assignment.date));
     incrementMap(state.classSubjectDay, classSubjectDayKey(assignment.classId, assignment.subjectId, assignment.date));
   }
-  markBusy(state.teacherBusy, assignment.teacherId, busySlotKey);
-  if (assignment.roomId || assignment.room) markBusy(state.roomBusy, assignment.roomId || assignment.room, busySlotKey);
+  if (state.timeAwareOccupancy) {
+    markBusyTimeRange(state.teacherBusy, assignment.teacherId, assignment);
+    if (assignment.roomId || assignment.room) markBusyTimeRange(state.roomBusy, assignment.roomId || assignment.room, assignment);
+  } else {
+    markBusy(state.teacherBusy, assignment.teacherId, busySlotKey);
+    if (assignment.roomId || assignment.room) markBusy(state.roomBusy, assignment.roomId || assignment.room, busySlotKey);
+  }
   incrementMap(state.teacherLoad, assignment.teacherId);
   incrementMap(state.teacherDayLoad, teacherDayKey(assignment.teacherId, assignment.date));
   const periodKey = teacherDayPeriodKey(assignment.teacherId, assignment.date);
   if (!state.teacherDayPeriods.has(periodKey)) state.teacherDayPeriods.set(periodKey, []);
   state.teacherDayPeriods.get(periodKey).push(Number(assignment.period));
+  if (!state.teacherDayItems.has(periodKey)) state.teacherDayItems.set(periodKey, []);
+  state.teacherDayItems.get(periodKey).push({ ...assignment });
 }
 
 function unmarkSolverAssignment(state, assignment) {
   const busySlotKey = slotKeyFor(assignment.date, assignment.period);
-  removeBusy(state.classBusy, assignment.classId, busySlotKey);
-  removeBusy(state.teacherBusy, assignment.teacherId, busySlotKey);
-  if (assignment.roomId || assignment.room) removeBusy(state.roomBusy, assignment.roomId || assignment.room, busySlotKey);
+  if (state.timeAwareOccupancy) {
+    removeBusyTimeRange(state.classBusy, assignment.classId, assignment);
+    removeBusyTimeRange(state.teacherBusy, assignment.teacherId, assignment);
+    if (assignment.roomId || assignment.room) removeBusyTimeRange(state.roomBusy, assignment.roomId || assignment.room, assignment);
+  } else {
+    removeBusy(state.classBusy, assignment.classId, busySlotKey);
+    removeBusy(state.teacherBusy, assignment.teacherId, busySlotKey);
+    if (assignment.roomId || assignment.room) removeBusy(state.roomBusy, assignment.roomId || assignment.room, busySlotKey);
+  }
   incrementMap(state.teacherLoad, assignment.teacherId, -1);
   incrementMap(state.teacherDayLoad, teacherDayKey(assignment.teacherId, assignment.date), -1);
   incrementMap(state.classDayLoad, classDayKey(assignment.classId, assignment.date), -1);
@@ -2683,6 +3155,10 @@ function unmarkSolverAssignment(state, assignment) {
   const index = periods.indexOf(Number(assignment.period));
   if (index >= 0) periods.splice(index, 1);
   if (!periods.length) state.teacherDayPeriods.delete(periodKey);
+  const dayItems = state.teacherDayItems.get(periodKey) || [];
+  const dayItemIndex = dayItems.findIndex((item) => item.id === assignment.id);
+  if (dayItemIndex >= 0) dayItems.splice(dayItemIndex, 1);
+  if (!dayItems.length) state.teacherDayItems.delete(periodKey);
 }
 
 function buildScheduleTasks(config, lockedAssignments = []) {
@@ -2692,6 +3168,7 @@ function buildScheduleTasks(config, lockedAssignments = []) {
 
   config.classes.forEach((schoolClass, classIndex) => {
     config.subjects.forEach((subject, subjectIndex) => {
+      if (!classParticipatesThisWeek(config, subject, schoolClass.id)) return;
       const countKey = `${schoolClass.id}:${subject.id}`;
       const remaining = Math.max(Number(subject.weeklyLessons || 0) - (existingCounts.get(countKey) || 0), 0);
       const taskTeacherIds = Array.isArray(subject.classTeacherIds?.[schoolClass.id]) && subject.classTeacherIds[schoolClass.id].length
@@ -2711,6 +3188,8 @@ function buildScheduleTasks(config, lockedAssignments = []) {
           classId: schoolClass.id,
           className: schoolClass.name,
           classIndex,
+          highClassCategory: schoolClass.highClassCategory || "",
+          scheduleTemplateKey: scheduleTemplateKeyForConfigClass(config, schoolClass),
           room: schoolClass.room,
           roomId: schoolClass.roomId,
           subjectId: subject.id,
@@ -2751,6 +3230,8 @@ function assignmentFromCandidate(config, task, candidate) {
     dayIndex: candidate.slot.dayIndex,
     period: candidate.slot.period,
     time: candidate.slot.time,
+    scheduleTemplateKey: candidate.slot.scheduleTemplateKey || task.scheduleTemplateKey || "default",
+    highClassCategory: task.highClassCategory || "",
     room: room?.name || task.room,
     roomId: room?.id || candidate.roomId || task.roomId,
     roomType: room?.roomType || task.requiredRoomType || "homeroom",
@@ -2785,22 +3266,35 @@ function candidateSoftScore(config, state, task, slot, teacherId, random) {
 function buildCandidateList(config, state, task, slots, random) {
   if (!task.teacherIds.length) return [];
   const candidates = [];
+  const taskSlots = schedulingSlots(config, task.classId);
 
   const candidateRooms = roomsForTask(config, task);
   if (!candidateRooms.length) return [];
 
-  slots.forEach((slot) => {
-    if (state.classBusy.get(task.classId)?.has(slot.slotKey)) return;
+  taskSlots.forEach((slot) => {
+    const busySlotKey = slotKeyFor(slot.date, slot.period);
+    const classBusy = state.timeAwareOccupancy
+      ? hasBusyTimeOverlap(state.classBusy, task.classId, slot)
+      : (state.classBusy.get(task.classId) || new Set()).has(busySlotKey);
+    if (classBusy) return;
     if (firstScheduleConstraintViolation(config, task.subjectId, slot)) return;
     if (subjectHardRuleViolation(config, task.subjectId, slot, state.assignments, task.classId)) return;
 
     candidateRooms.forEach((room) => {
-      if ((state.roomBusy.get(room.id) || new Set()).has(slot.slotKey)) return;
+      const roomBusy = state.timeAwareOccupancy
+        ? hasBusyTimeOverlap(state.roomBusy, room.id, slot)
+        : (state.roomBusy.get(room.id) || new Set()).has(busySlotKey);
+      if (roomBusy) return;
       task.teacherIds.forEach((teacherId) => {
-        if ((state.teacherBusy.get(teacherId) || new Set()).has(slot.slotKey)) return;
+        const teacherBusy = state.timeAwareOccupancy
+          ? hasBusyTimeOverlap(state.teacherBusy, teacherId, slot)
+          : (state.teacherBusy.get(teacherId) || new Set()).has(busySlotKey);
+        if (teacherBusy) return;
         const teacherDayLoad = state.teacherDayLoad.get(teacherDayKey(teacherId, slot.date)) || 0;
-        const teacherPeriods = state.teacherDayPeriods.get(teacherDayPeriodKey(teacherId, slot.date)) || [];
-        if (teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad, teacherPeriods)) return;
+        const teacherDayKeyValue = teacherDayPeriodKey(teacherId, slot.date);
+        const teacherPeriods = state.teacherDayPeriods.get(teacherDayKeyValue) || [];
+        const teacherDayItems = state.teacherDayItems.get(teacherDayKeyValue) || [];
+        if (teacherHardRuleViolation(config, teacherId, slot, teacherDayLoad, teacherPeriods, teacherDayItems)) return;
         candidates.push({
           slot,
           teacherId,
@@ -3247,6 +3741,11 @@ function solveGreedyScheduleConstruction(config, tasks, options, attemptIndex, d
   let nodes = 0;
   let stoppedByLimit = false;
   let skippedCount = 0;
+  // 动态 MRV 每放一节课都重算全部剩余任务，任务数达到三百多时复杂度接近
+  // O(n²)，一次贪心扫描就会吃完整个超时窗口，高中 16 个 A/B/C 班只能排出
+  // 一半。大规模时仅在当前最难的一小段任务中动态选最紧候选，既保留专用
+  // 教室/严格分布规则优先，又把每轮重算控制在常数规模。
+  const selectionWindow = remaining.length >= 180 ? 24 : Number.POSITIVE_INFINITY;
 
   while (remaining.length) {
     if (Date.now() > deadline || nodes >= options.maxNodesPerAttempt) {
@@ -3256,7 +3755,8 @@ function solveGreedyScheduleConstruction(config, tasks, options, attemptIndex, d
     nodes += 1;
 
     let selected = null;
-    for (let index = 0; index < remaining.length; index += 1) {
+    const scanCount = Math.min(remaining.length, selectionWindow);
+    for (let index = 0; index < scanCount; index += 1) {
       const task = remaining[index];
       const candidates = buildCandidateList(config, state, task, slots, random);
       const zeroCandidatePenalty = candidates.length ? 0 : 100000;
@@ -3368,17 +3868,20 @@ export function buildSchedulePrecheck(config, options = {}) {
   }
 
   const weeklyPerClass = weeklyLessonsPerClass(config);
-  if (weeklyPerClass > slots.length) {
+  (config.classes || []).forEach((schoolClass) => {
+    const classSlots = schedulingSlots(config, schoolClass);
+    if (weeklyPerClass <= classSlots.length) return;
+    const label = schoolClass.scheduleTemplateLabel ? `（${schoolClass.scheduleTemplateLabel}）` : "";
     checks.push(
       precheckItem(
         "error",
-        "class_weekly_capacity",
-        "班级周课时超过可用时段",
-        `当前每班每周需要 ${weeklyPerClass} 节，但一周只有 ${slots.length} 个可排时段，请减少课程课时或增加时段。`,
-        { weeklyPerClass, availableSlots: slots.length },
+        `class_weekly_capacity_${schoolClass.id}`,
+        `${schoolClass.name}周课时超过可用时段`,
+        `${schoolClass.name}${label}每周需要 ${weeklyPerClass} 节，但其作息表只有 ${classSlots.length} 个可排时段，请减少课程课时或增加该类班级的正课节次。`,
+        { classId: schoolClass.id, weeklyPerClass, availableSlots: classSlots.length },
       ),
     );
-  }
+  });
 
   const lockedConflicts = validateScheduleConflicts(lockedAssignments, {
     externalAssignments,
@@ -3459,7 +3962,7 @@ export function buildSchedulePrecheck(config, options = {}) {
       );
     }
 
-    const demand = config.classes.length * Number(subject.weeklyLessons || 0);
+    const demand = subjectDemandForWeek(config, subject);
     const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
     const candidateRooms =
       requiredRoomType === "homeroom"
@@ -3547,7 +4050,7 @@ export function buildSchedulePrecheck(config, options = {}) {
   config.subjects.forEach((subject) => {
     const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
     if (requiredRoomType === "homeroom") return;
-    const demand = config.classes.length * Number(subject.weeklyLessons || 0);
+    const demand = subjectDemandForWeek(config, subject);
     roomTypeDemand.set(requiredRoomType, (roomTypeDemand.get(requiredRoomType) || 0) + demand);
   });
 
@@ -3964,7 +4467,13 @@ function solveScheduleWithOrTools(config, options = {}) {
 }
 
 export function generateScheduleSolution(config, options = {}) {
-  const shouldUseOrTools = options.engine !== "heuristic" && process.env.SCHEDULER_ENGINE !== "heuristic";
+  // 旧版 CP-SAT 输入只认识“第几节”，无法安全表达高中 A/B/C 的不同钟点。
+  // 高中混合作息统一走下面支持真实时间区间的约束搜索，其他学部继续使用 CP-SAT。
+  const hasMixedHighTimetable =
+    config.stageId === "high" &&
+    new Set((config.classes || []).map((schoolClass) => scheduleTemplateKeyForConfigClass(config, schoolClass))).size > 1;
+  const shouldUseOrTools =
+    !hasMixedHighTimetable && options.engine !== "heuristic" && process.env.SCHEDULER_ENGINE !== "heuristic";
   const cpSatResult = shouldUseOrTools ? solveScheduleWithOrTools(config, options) : null;
 
   if (cpSatResult?.ok) {
@@ -3976,6 +4485,11 @@ export function generateScheduleSolution(config, options = {}) {
   }
 
   const fallback = generateHeuristicScheduleSolution(config, options);
+  if (hasMixedHighTimetable) {
+    fallback.meta.algorithm = "high-school-multi-timetable-search";
+    fallback.meta.description = "高中 A/B/C 不同作息的真实时间区间约束搜索";
+    fallback.meta.timetableMode = "real-time-interval";
+  }
   if (cpSatResult && !cpSatResult.ok) {
     fallback.meta.fallbackFrom = "ortools-cp-sat";
     fallback.meta.fallbackReason = cpSatResult.error;
@@ -4027,7 +4541,9 @@ function generateGreedyScheduleAssignments(config, options = {}) {
     const counters = new Map(
       config.subjects.map((subject) => [
         subject.id,
-        Math.max(subject.weeklyLessons - (existingCounts.get(`${schoolClass.id}:${subject.id}`) || 0), 0),
+        classParticipatesThisWeek(config, subject, schoolClass.id)
+          ? Math.max(subject.weeklyLessons - (existingCounts.get(`${schoolClass.id}:${subject.id}`) || 0), 0)
+          : 0,
       ]),
     );
     const subjectQueue = buildSubjectQueueFromCounters(config, classIndex, counters);
@@ -4112,7 +4628,7 @@ export function validateScheduleConflicts(assignments, options = {}) {
   ];
 
   allAssignments.forEach((assignment) => {
-    const teacherKey = `${assignment.teacherId}-${assignment.date}-${assignment.period}`;
+    const teacherKey = `${assignment.teacherId}-${assignment.date}`;
     if (!teacherSlots.has(teacherKey)) teacherSlots.set(teacherKey, []);
     teacherSlots.get(teacherKey).push(assignment);
     const teacherDay = teacherDayKey(assignment.teacherId, assignment.date);
@@ -4121,14 +4637,14 @@ export function validateScheduleConflicts(assignments, options = {}) {
 
     // 教室是全校/学部共享资源（操场、实验室等），外部课节也必须参与教室占用冲突判定
     if (assignment.roomId || assignment.room) {
-      const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
+      const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}`;
       if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
       roomSlots.get(roomKey).push(assignment);
     }
 
     if (assignment.external) return;
 
-    const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
+    const classKey = `${assignment.classId}-${assignment.date}`;
     if (!classSlots.has(classKey)) classSlots.set(classKey, []);
     classSlots.get(classKey).push(assignment);
 
@@ -4189,20 +4705,21 @@ export function validateScheduleConflicts(assignments, options = {}) {
   });
 
   teacherSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    if (!items.some((item) => !item.external)) return;
-    const currentItems = items.filter((item) => !item.external);
-    const externalItems = items.filter((item) => item.external);
-    const conflictType = externalItems.length ? "teacher-global" : "teacher";
-    conflicts.push({
-      type: conflictType,
-      title: externalItems.length
-        ? `${items[0].teacherName} 已在其他年级同一时间有课`
-        : `${items[0].teacherName} 同一时间被安排 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${[
-        ...currentItems.map((item) => `当前草稿 ${item.className}${item.subjectName}`),
-        ...externalItems.map((item) => `${item.sourceLabel || "外部课表"} ${externalAssignmentLabel(item)}`),
-      ].join("、")}`,
+    overlappingAssignmentPairs(items).forEach(([left, right]) => {
+      if (left.external && right.external) return;
+      const currentItems = [left, right].filter((item) => !item.external);
+      const externalItems = [left, right].filter((item) => item.external);
+      const conflictType = externalItems.length ? "teacher-global" : "teacher";
+      conflicts.push({
+        type: conflictType,
+        title: externalItems.length
+          ? `${left.teacherName} 已在其他年级同一时间有课`
+          : `${left.teacherName} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${[
+          ...currentItems.map((item) => `当前草稿 ${item.className}${item.subjectName}`),
+          ...externalItems.map((item) => `${item.sourceLabel || "外部课表"} ${externalAssignmentLabel(item)}`),
+        ].join("、")}`,
+      });
     });
   });
 
@@ -4222,43 +4739,47 @@ export function validateScheduleConflicts(assignments, options = {}) {
         });
       }
       const maxConsecutiveLessons = Number(rule.maxConsecutiveLessons || 3);
-      if (maxConsecutiveRun(periods) > maxConsecutiveLessons) {
+      const consecutiveRun = usesMultiTimetable(config)
+        ? maxConsecutiveTimeRun(items) || maxConsecutiveRun(periods)
+        : maxConsecutiveRun(periods);
+      if (consecutiveRun > maxConsecutiveLessons) {
         conflicts.push({
           type: "teacher-consecutive",
           title: `${items[0].teacherName} 连续上课超过上限`,
-          text: `${formatDate(items[0].date)}：第 ${Array.from(new Set(periods)).sort((a, b) => a - b).join("、")} 节中存在超过 ${maxConsecutiveLessons} 节连堂`,
+          text: `${formatDate(items[0].date)}：${items
+            .sort((left, right) => (timeRangeForItem(left)?.start || 0) - (timeRangeForItem(right)?.start || 0))
+            .map((item) => item.time || `第 ${item.period} 节`)
+            .join("、")} 中存在超过 ${maxConsecutiveLessons} 节连堂`,
         });
       }
     });
   }
 
   classSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    if (!items.some((item) => !item.external)) return;
-    conflicts.push({
-      type: "class",
-      title: `${items[0].className} 同一时间有 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
-        .filter((item) => !item.external)
-        .map((item) => item.subjectName)
-        .join("、")}`,
+    overlappingAssignmentPairs(items).forEach(([left, right]) => {
+      conflicts.push({
+        type: "class",
+        title: `${left.className} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${left.subjectName}、${right.subjectName}`,
+      });
     });
   });
 
   roomSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    if (!items.some((item) => !item.external)) return;
-    const currentItems = items.filter((item) => !item.external);
-    const externalItems = items.filter((item) => item.external);
-    conflicts.push({
-      type: externalItems.length ? "room-global" : "room",
-      title: externalItems.length
-        ? `${items[0].room} 已被其他年级同一时间占用`
-        : `${items[0].room} 同一时间被安排 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${[
-        ...currentItems.map((item) => `当前草稿 ${item.className}${item.subjectName}`),
-        ...externalItems.map((item) => `${item.sourceLabel || "外部课表"} ${externalAssignmentLabel(item)}`),
-      ].join("、")}`,
+    overlappingAssignmentPairs(items).forEach(([left, right]) => {
+      if (left.external && right.external) return;
+      const currentItems = [left, right].filter((item) => !item.external);
+      const externalItems = [left, right].filter((item) => item.external);
+      conflicts.push({
+        type: externalItems.length ? "room-global" : "room",
+        title: externalItems.length
+          ? `${left.room} 已被其他年级同一时间占用`
+          : `${left.room} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${[
+          ...currentItems.map((item) => `当前草稿 ${item.className}${item.subjectName}`),
+          ...externalItems.map((item) => `${item.sourceLabel || "外部课表"} ${externalAssignmentLabel(item)}`),
+        ].join("、")}`,
+      });
     });
   });
 
@@ -4326,12 +4847,39 @@ function scheduleScopeMatches(item, config) {
   );
 }
 
+function draftRevision(draft) {
+  return Math.max(0, Number.parseInt(draft?.revision, 10) || 0);
+}
+
+function hasExpectedDraftRevision(options = {}) {
+  return Object.prototype.hasOwnProperty.call(options, "expectedDraftRevision");
+}
+
+function staleScheduleDraftError() {
+  const error = new Error("课表已被另一位负责人更新，请刷新后继续操作");
+  error.statusCode = 409;
+  error.code = "SCHEDULE_DRAFT_STALE";
+  return error;
+}
+
+function assertDraftRevision(draft, options = {}) {
+  if (!hasExpectedDraftRevision(options)) return;
+  const expected = Math.max(0, Number.parseInt(options.expectedDraftRevision, 10) || 0);
+  if (draftRevision(draft) !== expected) throw staleScheduleDraftError();
+}
+
+function bumpDraftRevision(draft) {
+  draft.revision = draftRevision(draft) + 1;
+  return draft.revision;
+}
+
 function refreshDraftConflicts(db, config, draft) {
   if (!draft) return null;
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   draft.conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
   draft.globalBusyCount = externalAssignments.length;
   draft.updatedAt = draft.updatedAt || "";
+  draft.revision = draftRevision(draft);
   return draft;
 }
 
@@ -4348,6 +4896,8 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   ensureSchedulingStore(db);
   const config = buildSchedulingConfig(db, options);
   assertEditableScheduleTerm(config, "生成排课");
+  const previousDraft = findScheduleDraft(db, options);
+  assertDraftRevision(previousDraft, options);
   assertTeacherAssignmentsComplete(config);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   const precheck = buildSchedulePrecheck(config, { externalAssignments });
@@ -4385,6 +4935,7 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
     lockedCount: 0,
     publishedLessonIds: [],
     generatedByAccountId: actorAccount?.id || "",
+    revision: draftRevision(previousDraft) + 1,
   };
 
   db.scheduleDrafts = db.scheduleDrafts.filter(
@@ -4438,49 +4989,95 @@ function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
     stageId: draft.stageId,
     grade: draft.grade,
     period: assignment.period,
+    scheduleTemplateKey: assignment.scheduleTemplateKey || "default",
+    highClassCategory: assignment.highClassCategory || "",
   };
 }
 
 function nonRegularLessonsFromPeriods(config, draft, scheduleVersionId = "") {
-  const className = `${draft.gradeName}全体班级`;
-  return (config.periods || [])
-    .filter((period) => period.type !== "regular" && period.active !== false)
-    .flatMap((period) =>
-      weekDateKeys(config).map((date, dayIndex) => ({
-        id: `NONREG-${draft.id}-${date}-${period.period}`,
-        teacherId: period.responsibleTeacherId || "",
-        responsibleTeacherId: period.responsibleTeacherId || "",
-        responsibleTeacherName: period.responsibleTeacherName || "",
-        classId: "",
-        className,
-        subjectId: "",
-        subjectName: period.content || nonRegularPeriodDefaultContent(period.type),
-        durationMinutes:
-          Math.max((timeToMinutes(period.endTime) || 0) - (timeToMinutes(period.startTime) || 0), 0) ||
-          DEFAULT_LESSON_DURATION_MINUTES,
-        roomId: "",
-        room: "",
-        date,
-        time: period.time,
-        type: period.type,
-        units: 0,
-        status: "scheduled",
-        source: "backend-nonregular",
-        nonPayable: true,
-        scheduleImpact: false,
-        nonRegular: true,
-        schedulingDraftId: draft.id,
-        scheduleVersionId,
-        termId: draft.termId,
-        termName: draft.termName,
-        divisionId: draft.divisionId,
-        gradeId: draft.gradeId,
-        stageId: draft.stageId,
-        grade: draft.grade,
-        period: period.period,
-        dayIndex,
-      })),
-    );
+  const templates = config.stageId === "high"
+    ? (config.scheduleTemplateOptions || []).map((template) => ({
+        key: template.key,
+        label: template.label,
+        classes: (config.classes || []).filter((schoolClass) => schoolClass.scheduleTemplateKey === template.key),
+        periods: config.periodTemplates?.[template.key] || [],
+      }))
+    : [{ key: "default", label: "", classes: config.classes || [], periods: config.periods || [] }];
+  const lifeTeachers = (config.nonRegularTeachers || []).filter((teacher) => teacher.isLifeTeacher);
+
+  const lessonFromPeriod = (template, period, dayIndex, responsibility = {}) => ({
+    id: `NONREG-${draft.id}-${template.key}-${addDays(config.weekStart, dayIndex)}-${period.period}${responsibility.idSuffix || ""}`,
+    teacherId: responsibility.teacherId || period.responsibleTeacherId || "",
+    responsibleTeacherId: responsibility.teacherId || period.responsibleTeacherId || "",
+    responsibleTeacherIds: responsibility.teacherIds || [responsibility.teacherId || period.responsibleTeacherId].filter(Boolean),
+    responsibleRole: period.responsibleRole || "",
+    responsibleTeacherName: responsibility.teacherName || period.responsibleTeacherName || "",
+    classId: responsibility.classId || "",
+    className:
+      responsibility.className ||
+      (template.classes || []).map((schoolClass) => schoolClass.name).join("、") ||
+      `${draft.gradeName}${template.label}`,
+    subjectId: "",
+    subjectName: period.content || nonRegularPeriodDefaultContent(period.type),
+    durationMinutes:
+      Math.max((timeToMinutes(period.endTime) || 0) - (timeToMinutes(period.startTime) || 0), 0) ||
+      DEFAULT_LESSON_DURATION_MINUTES,
+    roomId: "",
+    room: "",
+    date: addDays(config.weekStart, dayIndex),
+    time: period.time,
+    type: period.type,
+    units: 0,
+    status: "scheduled",
+    source: "backend-nonregular",
+    nonPayable: true,
+    scheduleImpact: false,
+    nonRegular: true,
+    schedulingDraftId: draft.id,
+    scheduleVersionId,
+    termId: draft.termId,
+    termName: draft.termName,
+    divisionId: draft.divisionId,
+    gradeId: draft.gradeId,
+    stageId: draft.stageId,
+    grade: draft.grade,
+    period: period.period,
+    scheduleTemplateKey: template.key,
+    highClassCategory: config.stageId === "high" ? template.key : "",
+    dayIndex,
+  });
+
+  return templates.flatMap((template) =>
+    (template.periods || [])
+      .filter((period) => period.type !== "regular" && period.active !== false)
+      .flatMap((period) =>
+        normalizeScheduleDayIndexes(period.dayIndexes).flatMap((dayIndex) => {
+          if (period.responsibleRole === "homeroom") {
+            return (template.classes || []).map((schoolClass) =>
+              lessonFromPeriod(template, period, dayIndex, {
+                idSuffix: `-${schoolClass.id}`,
+                teacherId: schoolClass.homeroomTeacherId || "",
+                teacherIds: [schoolClass.homeroomTeacherId].filter(Boolean),
+                teacherName: schoolClass.homeroomTeacherName || "班主任待维护",
+                classId: schoolClass.id,
+                className: schoolClass.name,
+              }),
+            );
+          }
+          if (period.responsibleRole === "life_teacher") {
+            const teacherIds = lifeTeachers.map((teacher) => teacher.id);
+            return [
+              lessonFromPeriod(template, period, dayIndex, {
+                teacherId: teacherIds[0] || "",
+                teacherIds,
+                teacherName: lifeTeachers.map((teacher) => teacher.name).join("、") || "生活老师待维护",
+              }),
+            ];
+          }
+          return [lessonFromPeriod(template, period, dayIndex)];
+        }),
+      ),
+  );
 }
 
 function assignmentVersionSignature(assignment) {
@@ -4490,6 +5087,8 @@ function assignmentVersionSignature(assignment) {
     assignment.teacherId,
     assignment.date,
     assignment.period,
+    assignment.time,
+    assignment.scheduleTemplateKey || "default",
     assignment.roomId || assignment.room,
   ].join("|");
 }
@@ -4620,6 +5219,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     error.statusCode = 400;
     throw error;
   }
+  assertDraftRevision(draft, options);
 
   if (!draft.assignments?.length) {
     const error = new Error("排课草稿为空，不能发布");
@@ -4683,11 +5283,14 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   draft.publishedLessonIds = lessons.map((lesson) => lesson.id);
   draft.publishedByAccountId = actorAccount?.id || "";
   draft.scheduleVersionId = scheduleVersionId;
+  bumpDraftRevision(draft);
   const version = createPublishedScheduleVersion(db, config, draft, lessons, actorAccount, scheduleVersionId);
   pushScheduleNotification(
     db,
     {
-      teacherIds: regularLessons.map((lesson) => lesson.teacherId),
+      teacherIds: lessons
+        .flatMap((lesson) => [lesson.teacherId, ...(lesson.responsibleTeacherIds || [])])
+        .filter(Boolean),
       title: `${draft.termName}${draft.divisionName}${draft.gradeName}课表已发布`,
       text: `${draft.termName}自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
       level: "info",
@@ -4803,7 +5406,9 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
   pushScheduleNotification(
     db,
     {
-      teacherIds: lessons.filter((lesson) => !lesson.nonPayable).map((lesson) => lesson.teacherId),
+      teacherIds: lessons
+        .flatMap((lesson) => [lesson.teacherId, ...(lesson.responsibleTeacherIds || [])])
+        .filter(Boolean),
       title: `${targetVersion.termName || config.termName}${targetVersion.divisionName}${targetVersion.gradeName}课表已回滚`,
       text: `已回滚到 V${targetVersion.versionNumber}，老师端课表、签入签出和薪资工作量将按该版本执行。`,
       level: "warning",
@@ -4892,7 +5497,7 @@ function validatePublishedLessonChange(db, config, lesson, next, { excludeLesson
     error.statusCode = 400;
     throw error;
   }
-  const period = config.periods.find((item) => item.period === Number(next.period));
+  const period = periodForConfigClass(config, lesson.classId, Number(next.period));
   if (!period) {
     const error = new Error("调课节次不在当前排课时段内");
     error.statusCode = 400;
@@ -4950,6 +5555,8 @@ function validatePublishedLessonChange(db, config, lesson, next, { excludeLesson
     dayIndex,
     period: period.period,
     time: period.time,
+    scheduleTemplateKey: scheduleTemplateKeyForConfigClass(config, lesson.classId),
+    highClassCategory: classForConfig(config, lesson.classId)?.highClassCategory || "",
     room: room.name,
     roomId: room.id,
   };
@@ -5386,6 +5993,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
     error.statusCode = 400;
     throw error;
   }
+  assertDraftRevision(draft, options);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表暂不允许直接调整，请重新生成草稿或走调课流程");
@@ -5416,7 +6024,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   }
 
   const nextPeriod = Number.parseInt(options.period || assignment.period, 10);
-  const period = config.periods.find((item) => item.period === nextPeriod);
+  const period = periodForConfigClass(config, assignment.classId, nextPeriod);
   if (!period) {
     const error = new Error("调整节次不在当前排课时段内");
     error.statusCode = 400;
@@ -5505,6 +6113,8 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   assignment.dayIndex = nextDayIndex;
   assignment.period = period.period;
   assignment.time = period.time;
+  assignment.scheduleTemplateKey = scheduleTemplateKeyForConfigClass(config, assignment.classId);
+  assignment.highClassCategory = classForConfig(config, assignment.classId)?.highClassCategory || "";
   assignment.roomId = nextRoom.id;
   assignment.room = nextRoom.name;
   assignment.roomType = nextRoom.roomType || "homeroom";
@@ -5517,6 +6127,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
   draft.unassignedCount = Math.max((draft.requiredLessonCount || 0) - draft.generatedLessonCount, 0);
   draft.updatedAt = formatDateTimeMinute();
   draft.adjustedAt = draft.updatedAt;
+  bumpDraftRevision(draft);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -5555,6 +6166,7 @@ export function setScheduleAssignmentLock(db, options = {}, actorAccount = null)
     error.statusCode = 400;
     throw error;
   }
+  assertDraftRevision(draft, options);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表不能修改锁定状态");
@@ -5579,6 +6191,7 @@ export function setScheduleAssignmentLock(db, options = {}, actorAccount = null)
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   draft.conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
   draft.globalBusyCount = externalAssignments.length;
+  bumpDraftRevision(draft);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,
@@ -5663,6 +6276,7 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
     error.statusCode = 400;
     throw error;
   }
+  assertDraftRevision(draft, options);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表不能重新排未锁定课程");
@@ -5707,6 +6321,7 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
   draft.updatedAt = now;
   draft.replannedAt = now;
   draft.replannedByAccountId = actorAccount?.id || "";
+  bumpDraftRevision(draft);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
     id: `AUDIT-${Date.now()}`,

@@ -7,11 +7,40 @@
 // 这个测试不看实现，直接以五个财务账号的身份把它们有权访问的接口全部打一遍，
 // 在原始响应体里搜他部关键词。新增接口若忘了收敛范围，这里就会红。
 //
-// 需要服务端在跑：SCHOOL_SYSTEM_BASE_URL 可覆盖，默认 http://127.0.0.1:4173
+// SCHOOL_SYSTEM_BASE_URL 可指向指定测试服务；未提供时自动启动独立临时服务，
+// 不能再误连开发者正在使用的 4173 实例或真实名单数据库。
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-const BASE = process.env.SCHOOL_SYSTEM_BASE_URL || "http://127.0.0.1:4173";
+const externalBase = String(process.env.SCHOOL_SYSTEM_BASE_URL || "").trim();
+const PORT = 4880 + (process.pid % 80);
+const BASE = externalBase || `http://127.0.0.1:${PORT}`;
 const PASSWORD = process.env.SCHOOL_SYSTEM_TEST_PASSWORD || "123456";
+const testDataDir = externalBase ? "" : fs.mkdtempSync(path.join(os.tmpdir(), "school-finance-isolation-"));
+const child = externalBase
+  ? null
+  : spawn(process.execPath, ["server/server.js"], {
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        NODE_ENV: "test",
+        DB_DRIVER: "json",
+        HR_ENCRYPTION_KEY: "0".repeat(64),
+        SCHOOL_DATA_FILE: path.join(testDataDir, "phase1-db.json"),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+let serverLog = "";
+child?.stdout.on("data", (chunk) => (serverLog += chunk));
+child?.stderr.on("data", (chunk) => (serverLog += chunk));
+const cleanup = () => {
+  child?.kill("SIGTERM");
+  if (testDataDir) fs.rmSync(testDataDir, { recursive: true, force: true });
+};
+process.once("exit", cleanup);
 
 // 学部之间互斥；总校财务按新口径可只读查看全部学部，因此不设只读关键词禁区。
 const ACCOUNTS = [
@@ -54,13 +83,20 @@ async function get(path, token) {
   return { status: res.status, text: await res.text() };
 }
 
-// 服务端没起时给出明确提示，而不是抛一堆 fetch failed
-try {
-  await fetch(`${BASE}/`);
-} catch {
-  console.error(`[skip] 服务端未运行（${BASE}），跳过隔离审计。启动后重跑：npm run test:finance-isolation`);
-  process.exit(0);
+// 临时服务需要完成初始化；外部服务不可达时仍给出明确提示。
+let serverReady = false;
+for (let attempt = 0; attempt < 100; attempt += 1) {
+  try {
+    if ((await fetch(`${BASE}/api/health`)).ok) {
+      serverReady = true;
+      break;
+    }
+  } catch {
+    // 启动中
+  }
+  await new Promise((resolve) => setTimeout(resolve, 200));
 }
+assert.ok(serverReady, `财务隔离测试服务未能启动：${serverLog.slice(-1500)}`);
 
 let checked = 0;
 const leaks = [];
@@ -102,7 +138,10 @@ assert.deepEqual(leaks, [], `跨学部数据泄露：\n  ${leaks.join("\n  ")}`)
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${primary.token}` },
     body: JSON.stringify({ month: "2026-08", teacherIds: [middleTeacherId] }),
   });
-  assert.equal(batch.status, 403, "小学部财务批量锁定初中部老师工资应被拒");
+  assert.ok(
+    batch.status === 403 || batch.status === 409,
+    `小学部财务不得批量锁定初中部老师工资；新版月度工资确认统一停用该接口时可返回 409，实际 ${batch.status}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -142,3 +181,5 @@ assert.deepEqual(leaks, [], `跨学部数据泄露：\n  ${leaks.join("\n  ")}`)
 }
 
 console.log(`finance isolation checks passed（${ACCOUNTS.length} 个账号 × ${ENDPOINTS.length} 个接口，实际校验 ${checked} 次，含前端学段区块静态检查）`);
+cleanup();
+process.removeListener("exit", cleanup);

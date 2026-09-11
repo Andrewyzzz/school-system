@@ -34,6 +34,13 @@ function teacherNameOf(db, teacherId) {
   return (db.teachers || []).find((t) => t.id === teacherId)?.name || teacherId || "";
 }
 
+function lessonBelongsToTeacher(lesson, teacherId) {
+  return (
+    lesson?.teacherId === teacherId ||
+    (Array.isArray(lesson?.responsibleTeacherIds) && lesson.responsibleTeacherIds.includes(teacherId))
+  );
+}
+
 function nonRegularTypeLabel(type = "") {
   if (type === "selfStudy") return "自习";
   if (type === "activity") return "活动";
@@ -61,14 +68,14 @@ export function buildScheduleGrid(db, options = {}) {
 
   let title = term.name;
   if (dimension === "teacher" && targetId) {
-    lessons = lessons.filter((l) => l.teacherId === targetId);
+    lessons = lessons.filter((l) => lessonBelongsToTeacher(l, targetId));
     title = `${teacherNameOf(db, targetId)} 课表`;
   } else if (dimension === "class" && targetId) {
     const schoolClass = (db.classes || []).find((item) => item.id === targetId);
     lessons = lessons.filter(
       (l) =>
         l.classId === targetId ||
-        (l.nonRegular && schoolClass && l.stageId === schoolClass.stageId && Number(l.grade) === Number(schoolClass.grade)),
+        (l.nonRegular && !l.classId && schoolClass && l.stageId === schoolClass.stageId && Number(l.grade) === Number(schoolClass.grade)),
     );
     title = `${schoolClass?.name || lessons.find((l) => l.classId === targetId)?.className || targetId} 课表`;
   } else if (dimension === "grade" && targetId) {
@@ -87,7 +94,7 @@ export function buildScheduleGrid(db, options = {}) {
     cells[p][w].push({
       subjectName: lesson.subjectName || "",
       className: lesson.className || "",
-      teacherName: teacherNameOf(db, lesson.teacherId) || lesson.responsibleTeacherName || "",
+      teacherName: lesson.responsibleTeacherName || teacherNameOf(db, lesson.teacherId) || "",
       room: lesson.room || "",
       status: lesson.status || "",
       date: lesson.date,

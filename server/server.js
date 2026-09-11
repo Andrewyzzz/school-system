@@ -5,6 +5,16 @@ import { fileURLToPath } from "node:url";
 import { createToken, verifyPassword, verifyPasswordAsync } from "./auth.js";
 import { assertConfigOrExit, inspectConfig } from "./config.js";
 import { parseMultipart } from "./multipart.js";
+import { importAttendanceWorkbook, queryAttendanceUploads } from "./attendance.js";
+import {
+  createTransportTransferRequest,
+  operateTransportRouteLeg,
+  publishTransportRoute,
+  queryTransportRoutes,
+  queryTransportTransferRequests,
+  reviewTransportTransferRequest,
+  saveTransportRoute,
+} from "./transportRoutes.js";
 import { canTeacherAccessPayrollMonth } from "./payrollVisibility.js";
 import {
   ATTACHMENT_CATEGORIES,
@@ -36,6 +46,8 @@ import {
 } from "./dataPorting.js";
 import {
   canExportAllPayrollDetails,
+  canViewDivisionPayrollDetails,
+  canViewAllPayrollDetails,
   canFinanceActOnTeacher,
   canFinanceReadTeacher,
   filterStageRowsByFinanceScope,
@@ -43,6 +55,7 @@ import {
   financeScopeFor,
   financeReadScopeFor,
   financeScopeLabel,
+  divisionPayrollScopeFor,
   payrollScopeOfTeacher,
 } from "./financeScope.js";
 import { accountStageScopeIds, assertSchedulingAccess, stageIdForDivision } from "./accessScope.js";
@@ -134,6 +147,7 @@ import {
   storageHealth,
   DB_DRIVER,
   invalidateOpenPayrollDetailsForTeacher,
+  invalidateOpenPayrollDetailsForStage,
 } from "./storage.js";
 import {
   ensureSchemaConstraints,
@@ -313,6 +327,7 @@ const MIME_TYPES = {
   ".jpg": "image/jpeg",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
 
 // 安全响应头（验收 E-4）。
@@ -950,10 +965,223 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
+    // 月度考勤：学部主任维护本学部老师每日四次打卡记录。初中部按已确认制度
+    // 在工资预览／重新生成时计算迟到早退、旷工扣款；其他学部暂仅校验和留存。
+    if (req.method === "GET" && url.pathname === "/api/attendance/uploads") {
+      const auth = requireAuth(req, res, db, ["division_head", "system_admin", "principal"]);
+      if (!auth) return;
+      sendJson(res, 200, queryAttendanceUploads(db, auth.account, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/attendance/uploads") {
+      const auth = requireAuth(req, res, db, ["division_head", "system_admin"]);
+      if (!auth) return;
+      const { fields, files } = await parseMultipart(req, { maxBytes: 12 * 1024 * 1024, maxFiles: 1 });
+      const file = files.find((item) => item.name === "attendanceFile") || files[0];
+      if (!file) {
+        sendError(res, 400, "请选择要上传的考勤表");
+        return;
+      }
+      if (!/\.xlsx$/i.test(file.filename || "")) {
+        sendError(res, 400, "只支持上传 .xlsx 格式的考勤表，请使用系统模板");
+        return;
+      }
+      const result = importAttendanceWorkbook(db, auth.account, {
+        month: fields.month,
+        stageId: fields.stageId,
+        filename: file.filename,
+        data: file.data,
+      });
+      result.invalidatedPayrollCount = result.upload.settlementSummary?.applies
+        ? invalidateOpenPayrollDetailsForStage(db, result.upload.stageId, result.upload.month)
+        : 0;
+      appendAuditLog(db, {
+        action: "attendance_monthly_upload",
+        actorAccount: auth.account,
+        stageId: result.upload.stageId,
+        month: result.upload.month,
+        uploadId: result.upload.id,
+        rowCount: result.upload.rowCount,
+        teacherCount: result.upload.teacherCount,
+        invalidatedPayrollCount: result.invalidatedPayrollCount,
+        detail: `上传${result.upload.stageName}${result.upload.month}教师考勤表`,
+      });
+      await saveDatabase(db);
+      broadcastEvent("attendance-upload", { stageId: result.upload.stageId, month: result.upload.month });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    // 安全部主管维护真实接送路线；生活老师仅能查看本人班次、签到完成及申请调班。
+    // 路线发布后的每个运行日拆成“早晨接 + 放学送”两段，两个环节完成才进入接送补助。
+    if (req.method === "GET" && url.pathname === "/api/transport-routes") {
+      const auth = requireAuth(req, res, db, ["security_manager", "life_teacher"]);
+      if (!auth) return;
+      sendJson(res, 200, queryTransportRoutes(db, auth.account, Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/transport-routes") {
+      const auth = requireAuth(req, res, db, ["security_manager"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = saveTransportRoute(db, auth.account, body);
+      appendAuditLog(db, {
+        action: result.created ? "transport_route_create" : "transport_route_update",
+        actorAccount: auth.account,
+        routeId: result.route.id,
+        routeName: result.route.name,
+        termId: result.route.termId,
+        lifeTeacherId: result.route.lifeTeacher?.id || "",
+      });
+      await saveDatabase(db);
+      broadcastEvent("transport-route", { routeId: result.route.id });
+      sendJson(res, 200, result);
+      return;
+    }
+
+    const transportRoutePublishMatch = url.pathname.match(/^\/api\/transport-routes\/([^/]+)\/publish$/);
+    if (transportRoutePublishMatch && req.method === "POST") {
+      const auth = requireAuth(req, res, db, ["security_manager"]);
+      if (!auth) return;
+      const result = publishTransportRoute(db, auth.account, decodeURIComponent(transportRoutePublishMatch[1]));
+      createNotification(
+        db,
+        {
+          audience: "teacher",
+          teacherIds: [result.teacherId],
+          title: "跟车路线已发布",
+          text: `安全部已发布「${result.route.name}」${result.route.termName}的跟车排班，请在“我的排班”中查看并按实际班次签到、完成。`,
+          source: "安全部",
+          level: "info",
+        },
+        auth.account,
+      );
+      appendAuditLog(db, {
+        action: "transport_route_publish",
+        actorAccount: auth.account,
+        routeId: result.route.id,
+        routeName: result.route.name,
+        termId: result.route.termId,
+        generatedRunCount: result.runs.length,
+        lifeTeacherId: result.teacherId,
+      });
+      await saveDatabase(db);
+      broadcastEvent("transport-route", { routeId: result.route.id, teacherId: result.teacherId });
+      broadcastEvent("notification");
+      sendJson(res, 200, { route: result.route, generatedRunCount: result.runs.length });
+      return;
+    }
+
+    const transportLegMatch = url.pathname.match(/^\/api\/transport-runs\/([^/]+)\/leg$/);
+    if (transportLegMatch && req.method === "POST") {
+      const auth = requireAuth(req, res, db, ["life_teacher"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = operateTransportRouteLeg(db, auth.account, { ...body, runId: decodeURIComponent(transportLegMatch[1]) });
+      const invalidatedPayrollCount = invalidateOpenPayrollDetailsForTeacher(db, result.teacherId, result.month);
+      appendAuditLog(db, {
+        action: body.action === "check_in" ? "transport_route_leg_check_in" : "transport_route_leg_complete",
+        actorAccount: auth.account,
+        routeRunId: result.run.id,
+        routeId: result.run.routeId,
+        routeName: result.run.routeName,
+        date: result.run.date,
+        leg: body.leg,
+        invalidatedPayrollCount,
+      });
+      await saveDatabase(db);
+      broadcastEvent("transport-route", { routeRunId: result.run.id, teacherId: result.teacherId });
+      if (invalidatedPayrollCount) broadcastEvent("payroll", { teacherId: result.teacherId, month: result.month });
+      sendJson(res, 200, { ...result, invalidatedPayrollCount });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/transport-transfers") {
+      const auth = requireAuth(req, res, db, ["security_manager", "life_teacher"]);
+      if (!auth) return;
+      sendJson(res, 200, queryTransportTransferRequests(db, auth.account));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/transport-transfers") {
+      const auth = requireAuth(req, res, db, ["life_teacher"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = createTransportTransferRequest(db, auth.account, body);
+      createNotification(
+        db,
+        {
+          audience: "teacher",
+          accountIds: result.securityManagerAccountIds,
+          title: "待处理：生活老师调班申请",
+          text: `${result.request.fromTeacherName}申请将${result.request.date}的「${result.request.routeName}」调给${result.request.toTeacherName}，请核验冲突后处理。`,
+          source: "跟车排班",
+          level: "warning",
+        },
+        auth.account,
+      );
+      appendAuditLog(db, {
+        action: "transport_transfer_request_create",
+        actorAccount: auth.account,
+        requestId: result.request.id,
+        routeRunId: result.request.runId,
+        fromTeacherId: result.request.fromTeacherId,
+        toTeacherId: result.request.toTeacherId,
+      });
+      await saveDatabase(db);
+      broadcastEvent("transport-route", { requestId: result.request.id });
+      broadcastEvent("notification");
+      sendJson(res, 200, { request: result.request });
+      return;
+    }
+
+    const transportTransferReviewMatch = url.pathname.match(/^\/api\/transport-transfers\/([^/]+)\/review$/);
+    if (transportTransferReviewMatch && req.method === "POST") {
+      const auth = requireAuth(req, res, db, ["security_manager"]);
+      if (!auth) return;
+      const body = await readJsonBody(req);
+      const result = reviewTransportTransferRequest(db, auth.account, decodeURIComponent(transportTransferReviewMatch[1]), body);
+      const month = String(result.request.date || "").slice(0, 7);
+      const invalidatedPayrollCount = result.affectedTeacherIds.reduce(
+        (sum, teacherId) => sum + invalidateOpenPayrollDetailsForTeacher(db, teacherId, month),
+        0,
+      );
+      createNotification(
+        db,
+        {
+          audience: "teacher",
+          teacherIds: result.affectedTeacherIds,
+          title: result.request.status === "approved" ? "跟车调班已批准" : "跟车调班未获批准",
+          text: result.request.status === "approved"
+            ? `${result.request.date}「${result.request.routeName}」已调整为${result.request.toTeacherName}执行。`
+            : `${result.request.date}「${result.request.routeName}」的调班申请未获批准，请按原班次执行。`,
+          source: "安全部",
+          level: result.request.status === "approved" ? "info" : "warning",
+        },
+        auth.account,
+      );
+      appendAuditLog(db, {
+        action: "transport_transfer_request_review",
+        actorAccount: auth.account,
+        requestId: result.request.id,
+        approved: result.request.status === "approved",
+        routeRunId: result.request.runId,
+        invalidatedPayrollCount,
+      });
+      await saveDatabase(db);
+      broadcastEvent("transport-route", { requestId: result.request.id });
+      broadcastEvent("notification");
+      if (invalidatedPayrollCount) broadcastEvent("payroll", { month });
+      sendJson(res, 200, { ...result, invalidatedPayrollCount });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/terms") {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
-      if (rejectScopedAdmin(res, auth.account)) return;
+      if (rejectScopedAdmin(res, auth.account, "教学学期由学部主任在“学部校历”统一创建；排课负责人只能选择已有正式学期")) return;
       const body = await readJsonBody(req);
       const result = createAcademicTerm(db, body, auth.account);
       await saveDatabase(db);
@@ -1190,6 +1418,7 @@ async function handleApi(req, res, db, url) {
       const auth = requireAuth(req, res, db, ["admin", "system_admin"]);
       if (!auth) return;
       const options = Object.fromEntries(url.searchParams);
+      assertSchedulingAccess(db, auth.account, options, "查看");
       const result = previewSchedulePrecheck(db, options);
       sendJson(res, 200, {
         config: result.config,
@@ -1663,7 +1892,7 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/export") {
-      const auth = requireAuth(req, res, db, ["finance"]);
+      const auth = requireAuth(req, res, db, ["finance", "principal", "payroll_exporter"]);
       if (!auth) return;
       if (!canExportAllPayrollDetails(auth.account)) {
         sendError(res, 403, "仅总校财务可以导出全校工资明细");
@@ -1999,7 +2228,7 @@ async function handleApi(req, res, db, url) {
     // 这里只负责把账号透传下去——不要在这里先取全量再过滤。
     if (req.method === "GET" && url.pathname === "/api/reports/weekly-workload") {
       const auth = requireAuth(req, res, db, [
-        "admin", "system_admin", "finance", "hr", "division_head", "teacher",
+        "admin", "system_admin", "finance", "hr", "division_head", "teacher", "payroll_exporter",
       ]);
       if (!auth) return;
       const params = Object.fromEntries(url.searchParams);
@@ -2034,9 +2263,17 @@ async function handleApi(req, res, db, url) {
     // 因此不能从年度报表接口绕过当前学期的可见窗口。
     if (req.method === "GET" && url.pathname === "/api/reports/annual-salary") {
       const auth = requireAuth(req, res, db, [
-        "admin", "finance", "hr", "division_head",
+        "admin", "system_admin", "finance", "hr", "division_head", "principal", "payroll_viewer", "payroll_exporter",
       ]);
       if (!auth) return;
+      if (
+        auth.account.role !== "finance" &&
+        !canViewAllPayrollDetails(auth.account) &&
+        !canViewDivisionPayrollDetails(auth.account)
+      ) {
+        sendError(res, 403, "当前账号未获薪资查看权限");
+        return;
+      }
       const params = Object.fromEntries(url.searchParams);
       const options = {
         year: Number(params.year) || new Date().getFullYear(),
@@ -2074,11 +2311,16 @@ async function handleApi(req, res, db, url) {
     }
 
     if (req.method === "GET" && url.pathname === "/api/payroll/history") {
-      const auth = requireAuth(req, res, db, ["finance"]);
+      const auth = requireAuth(req, res, db, ["finance", "system_admin", "division_head", "principal", "payroll_viewer", "payroll_exporter"]);
       if (!auth) return;
+      const divisionPayrollScope = divisionPayrollScopeFor(auth.account);
+      if (auth.account.role !== "finance" && !canViewAllPayrollDetails(auth.account) && !canViewDivisionPayrollDetails(auth.account)) {
+        sendError(res, 403, "当前账号未获薪资查看权限");
+        return;
+      }
       sendJson(res, 200, queryPayrollHistory(db, {
         ...Object.fromEntries(url.searchParams),
-        financeScope: financeReadScopeFor(auth.account),
+        financeScope: financeReadScopeFor(auth.account) || divisionPayrollScope,
       }));
       return;
     }

@@ -20,6 +20,7 @@ const BASE = {
   NODE_ENV: "production",
   PORT: "4173",
   HOST: "127.0.0.1",
+  DB_DRIVER: "postgres",
   DATABASE_URL: "postgresql://school_app:pwd@127.0.0.1:5432/school_system",
   HR_ENCRYPTION_KEY: "0".repeat(64),
   SCHEDULER_PYTHON: "/opt/school-system/.venv-solver/bin/python",
@@ -41,7 +42,7 @@ const BASE = {
 // 2. 生产环境缺必填项必须拦下，且要说清缺的是哪一项
 // ---------------------------------------------------------------------------
 {
-  for (const key of ["DATABASE_URL", "HR_ENCRYPTION_KEY", "SCHEDULER_PYTHON"]) {
+  for (const key of ["DB_DRIVER", "DATABASE_URL", "HR_ENCRYPTION_KEY", "SCHEDULER_PYTHON"]) {
     const env = { ...BASE };
     delete env[key];
     const result = inspectConfig(env);
@@ -78,6 +79,7 @@ const BASE = {
     ["TRUST_PROXY", "yes", /0 或 1/],
     ["CORS_ALLOW_ORIGIN", "*", /不接受 \*/],
     ["NODE_ENV", "staging", /development|test|production/],
+    ["DB_DRIVER", "sqlite", /json \/ postgres \/ dual/],
     ["LOGIN_FAIL_MAX_PER_IP", "0", /正整数/],
   ];
   for (const [key, value, pattern] of cases) {
@@ -169,7 +171,7 @@ const BASE = {
           return [l.slice(0, i), l.slice(i + 1)];
         }),
     );
-    const required = ["DATABASE_URL", "HR_ENCRYPTION_KEY"];
+    const required = ["DB_DRIVER", "DATABASE_URL", "HR_ENCRYPTION_KEY", "ATTACHMENT_DIR"];
     required.forEach((key) => {
       assert.ok(key in env, `${name} 模板缺少 ${key} 这一项，运维照着填会漏配`);
     });
@@ -179,11 +181,13 @@ const BASE = {
       assert.match(env.HR_ENCRYPTION_KEY, /请填写/, "生产模板的密钥必须是占位符，不能给一个能用的值");
       assert.match(env.DATABASE_URL, /请填写/, "生产模板的数据库口令必须是占位符");
       assert.equal(env.HOST, "127.0.0.1", "生产应只监听本机，由反代转发");
+      assert.equal(env.DB_DRIVER, "postgres", "生产模板必须使用 PostgreSQL 数据层");
       assert.equal(env.TRUST_PROXY, "1");
       assert.equal(env.CORS_ALLOW_ORIGIN, "", "生产模板不得预设跨域来源");
     }
     // 测试模板应当开箱可用，否则没人会去用它
     if (name === "test") {
+      assert.equal(env.DB_DRIVER, "postgres", "测试环境也必须覆盖真实 PostgreSQL 路径");
       assert.equal(inspectConfig(env).ok, true, `test 模板应开箱可用：${JSON.stringify(inspectConfig(env).errors)}`);
       assert.ok(!/school_system(?!_test)/.test(env.DATABASE_URL), "测试库绝不能指向生产库");
       assert.notEqual(env.HR_ENCRYPTION_KEY, "", "测试也要有独立密钥");

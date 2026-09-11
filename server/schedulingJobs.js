@@ -18,13 +18,39 @@ function scheduleJobId() {
 
 function normalizeScheduleJobScope(options = {}) {
   return {
+    termId: options.termId || "",
     divisionId: options.divisionId || "",
     gradeId: options.gradeId || "",
   };
 }
 
 function sameScheduleScope(left = {}, right = {}) {
-  return left.divisionId === right.divisionId && left.gradeId === right.gradeId;
+  return left.termId === right.termId && left.divisionId === right.divisionId && left.gradeId === right.gradeId;
+}
+
+function expectedDraftRevision(options = {}) {
+  if (!Object.prototype.hasOwnProperty.call(options, "expectedDraftRevision")) return null;
+  return Math.max(0, Number.parseInt(options.expectedDraftRevision, 10) || 0);
+}
+
+function jobDraftForScope(db, job) {
+  return (db.scheduleDrafts || []).find(
+    (draft) =>
+      draft.divisionId === job.scope.divisionId &&
+      draft.gradeId === job.scope.gradeId &&
+      (!job.scope.termId || draft.termId === job.scope.termId),
+  ) || null;
+}
+
+function draftRevision(draft) {
+  return Math.max(0, Number.parseInt(draft?.revision, 10) || 0);
+}
+
+function staleDraftError() {
+  const error = new Error("课表已被另一位负责人更新，请刷新后继续操作");
+  error.statusCode = 409;
+  error.code = "SCHEDULE_DRAFT_STALE";
+  return error;
 }
 
 function scheduleJobMessage(job) {
@@ -58,8 +84,16 @@ function applyScheduleGenerationResult(db, job, payload) {
   const result = payload.result;
   const config = result?.config || {};
   const draft = result?.draft || {};
+  if (job.expectedDraftRevision !== null && draftRevision(jobDraftForScope(db, job)) !== job.expectedDraftRevision) {
+    throw staleDraftError();
+  }
+  draft.revision = Math.max(draftRevision(draft), draftRevision(jobDraftForScope(db, job)) + 1);
   db.scheduleDrafts = (db.scheduleDrafts || []).filter(
-    (item) => !(item.divisionId === config.divisionId && item.gradeId === config.gradeId),
+    (item) => !(
+      item.divisionId === config.divisionId &&
+      item.gradeId === config.gradeId &&
+      (!config.termId || item.termId === config.termId)
+    ),
   );
   db.scheduleDrafts.push(draft);
   db.meta = db.meta || {};
@@ -120,6 +154,10 @@ export function scheduleGenerationJobResponse(job, options = {}) {
 export function startScheduleGenerationJob(db, options = {}, actorAccount = null, callbacks = {}) {
   pruneScheduleJobs();
   const scope = normalizeScheduleJobScope(options);
+  const expectedRevision = expectedDraftRevision(options);
+  if (expectedRevision !== null && draftRevision(jobDraftForScope(db, { scope })) !== expectedRevision) {
+    throw staleDraftError();
+  }
   const existing = activeScheduleGenerationJob(scope);
   if (existing) {
     return {
@@ -145,6 +183,7 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
     cancelledAt: "",
     cancelledByAccountId: "",
     createdByAccountId: actorAccount?.id || "",
+    expectedDraftRevision: expectedRevision,
     error: null,
     result: null,
   };
@@ -182,14 +221,14 @@ export function startScheduleGenerationJob(db, options = {}, actorAccount = null
       }
 
       if (message.type === "completed") {
-        job.status = "completed";
-        job.phase = "completed";
-        job.progress = 100;
-        job.message = "排课草稿已生成";
-        job.completedAt = nowIso();
-        job.updatedAt = job.completedAt;
-        applyScheduleGenerationResult(db, job, message);
         try {
+          applyScheduleGenerationResult(db, job, message);
+          job.status = "completed";
+          job.phase = "completed";
+          job.progress = 100;
+          job.message = "排课草稿已生成";
+          job.completedAt = nowIso();
+          job.updatedAt = job.completedAt;
           if (callbacks.saveDatabase) await callbacks.saveDatabase();
         } catch (error) {
           job.status = "failed";

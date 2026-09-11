@@ -14,3 +14,20 @@ node_modules/
 config/*.env
 !config/*.env.example
 backups/
+
+# 本地检查、解析和发布中间产物
+output/
+tmp/
+work/
+
+# 一次性真实名册导入脚本包含校内人员映射，仅保留在本机，不进入代码仓库
+scripts/build-primary-scheduling-plan.py
+scripts/configure-grade-scoped-schedulers.js
+scripts/configure-principal-payroll-access.js
+scripts/import-roster-plan.js
+scripts/import-roster-postgres.js
+scripts/promote-roster-finance.js
+scripts/replace-primary-scheduling-data.js
+scripts/sync-roster-payroll-access.js
+scripts/transfer-roster-division-heads.js
+scripts/transfer-roster-hr-admin.js

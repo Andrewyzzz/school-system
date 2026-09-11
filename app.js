@@ -289,6 +289,7 @@ const initialState = {
   selectedScheduleDate: "2026-06-09",
   selectedSchedulingDivisionId: "elementary",
   selectedSchedulingGradeId: "elementary-g1",
+  selectedSchedulingTermId: "",
   selectedSchedulingClassId: "P1C01",
   selectedScheduleOverviewClassId: "",
   selectedScheduleAssignmentId: "",
@@ -892,6 +893,26 @@ function initialAcademicCalendarState() {
   };
 }
 let academicCalendarState = initialAcademicCalendarState();
+function initialAttendanceUploadState() {
+  return {
+    month: "",
+    stageId: "",
+    stageOptions: [],
+    uploads: [],
+    canUpload: false,
+    loaded: false,
+    loading: false,
+    error: "",
+  };
+}
+let attendanceUploadState = initialAttendanceUploadState();
+function initialTransportRouteState() {
+  return {
+    termId: "", loaded: false, loading: false, error: "", canManage: false,
+    termOptions: [], lifeTeachers: [], distanceTiers: [], routes: [], transfers: [],
+  };
+}
+let transportRouteState = initialTransportRouteState();
 let schedulingJobPollTimer = null;
 let draggedScheduleAssignmentId = "";
 
@@ -930,6 +951,16 @@ const views = {
     role: "system_admin,division_head,principal",
     title: "学部校历",
     el: document.querySelector("#academicCalendarView"),
+  },
+  attendanceManagement: {
+    role: "division_head,system_admin,principal",
+    title: "考勤管理",
+    el: document.querySelector("#attendanceManagementView"),
+  },
+  transportRoutes: {
+    role: "security_manager",
+    title: "跟车路线",
+    el: document.querySelector("#transportRoutesView"),
   },
   budgetOverview: {
     role: "division_head,principal",
@@ -1007,7 +1038,7 @@ const views = {
     el: document.querySelector("#monitoringView"),
   },
   notifications: {
-    role: "teacher,finance,admin,system_admin,hr,principal",
+    role: "teacher,finance,admin,system_admin,hr,principal,security_manager",
     title: "通知中心",
     el: document.querySelector("#notificationsView"),
   },
@@ -1031,8 +1062,9 @@ const views = {
     title: "薪资结算",
     el: document.querySelector("#settlementView"),
   },
+  // 总校人事行政不得查看工资；对应接口同样返回 403，避免出现“菜单看得到、点开没权限”。
   payrollHistory: {
-    role: "finance",
+    role: "finance,division_head,principal,payroll_viewer,payroll_exporter",
     title: "工资记录",
     el: document.querySelector("#payrollHistoryView"),
   },
@@ -1051,6 +1083,9 @@ const defaultViewByRole = {
   hr: "hrEmployees",
   division_head: "adminScheduleOverview",
   principal: "adminScheduleOverview",
+  security_manager: "transportRoutes",
+  payroll_viewer: "payrollHistory",
+  payroll_exporter: "payrollHistory",
 };
 
 const lessonTypeLabel = {
@@ -1209,6 +1244,8 @@ function resetScopedCaches() {
   dataPortingState = initialDataPortingState();
   resourceLedgerState = initialResourceLedgerState();
   academicCalendarState = initialAcademicCalendarState();
+  attendanceUploadState = initialAttendanceUploadState();
+  transportRouteState = initialTransportRouteState();
   // 选中的老师也要清：上一个账号选中的老师往往不在本账号范围内
   state.selectedFinanceTeacherId = "";
 }
@@ -1268,6 +1305,40 @@ function connectEventStream() {
     termBudgetState = { ...initialTermBudgetState(), termId: termBudgetState.termId };
     if (["budgetOverview", "finance", "settlement"].includes(state.activeView)) loadTermBudget();
   });
+  // 工资生成、复核或总校财务执行发放后，相关角色正在看的工资页也必须立即失效重载。
+  // 只广播事件但不监听会造成“审批已办结，另一端仍显示旧金额，刷新后才正常”的假故障。
+  eventStream.addEventListener("payroll", async () => {
+    if (!backendMode()) return;
+    const selectedTermId = payrollHistoryState.termId;
+    const selectedMonth = payrollHistoryState.month;
+    payrollHistoryState = {
+      ...initialPayrollHistoryState(),
+      termId: selectedTermId,
+      month: selectedMonth,
+    };
+    teacherPayrollRequestId += 1;
+    resetTeacherPayrollState();
+    resetFinanceTeacherDetailState();
+
+    if (state.activeView === "payrollHistory" && canViewPayrollHistory()) {
+      await loadPayrollHistory({ termId: selectedTermId, month: selectedMonth });
+      return;
+    }
+    if (isTeacherAccount() && ["dashboard", "confirm", "teacherPayroll"].includes(state.activeView)) {
+      const month = teacherConfirmationMonth || defaultTeacherPayrollMonth();
+      await loadBackendTeacherPayroll(currentTeacherId(), month, { detail: state.activeView === "confirm" });
+      return;
+    }
+    if (isFinanceRole() && ["finance", "financeRecords", "settlement"].includes(state.activeView)) {
+      await loadFinanceTeacherPage({ page: financeTeacherPage.page });
+      if (state.selectedFinanceTeacherId && ["financeRecords", "settlement"].includes(state.activeView)) {
+        await loadFinanceTeacherDetail(state.selectedFinanceTeacherId, {
+          month: currentSettlementMonth(),
+          generatePayroll: false,
+        });
+      }
+    }
+  });
   // 新通知：刷新通知中心与角标
   eventStream.addEventListener("notification", () => {
     if (backendMode()) loadBackendNotifications().then(render);
@@ -1291,6 +1362,22 @@ function connectEventStream() {
     if (!backendMode()) return;
     academicCalendarState = { ...academicCalendarState, loaded: false, loading: false };
     if (state.activeView === "academicCalendar") render();
+  });
+  eventStream.addEventListener("attendance-upload", () => {
+    if (!backendMode()) return;
+    attendanceUploadState = { ...attendanceUploadState, loaded: false, loading: false };
+    if (state.activeView === "attendanceManagement") loadAttendanceUploads();
+  });
+  eventStream.addEventListener("transport-route", async () => {
+    if (!backendMode()) return;
+    transportRouteState = { ...transportRouteState, loaded: false, loading: false };
+    if (currentRole() === "security_manager" && state.activeView === "transportRoutes") {
+      await loadTransportRoutes({ termId: transportRouteState.termId });
+    }
+    if (isLifeTeacherAccount()) {
+      await loadBackendTeacherContext(currentTeacherId(), state.selectedScheduleWeekStart || "auto");
+      if (state.activeView === "schedule") renderSchedule();
+    }
   });
   // 连接后先拉一次待办角标（HR 系角色）
   if (["hr", "system_admin", "division_head"].includes(currentRole())) refreshHrTodoBadge();
@@ -1473,6 +1560,9 @@ function roleTitle(role) {
   if (role === "hr") return "人事账号";
   if (role === "division_head") return "学部主任";
   if (role === "principal") return "校长（总校领导）";
+  if (role === "security_manager") return "安全部主管";
+  if (role === "payroll_viewer") return "全校薪资查看";
+  if (role === "payroll_exporter") return "薪资导出专员";
   return "系统账号";
 }
 
@@ -1531,6 +1621,7 @@ function upsertBackendAccount(account) {
     financeScopeName: account.financeScopeName || "",
     financeReadAll: Boolean(account.financeReadAll),
     scopeStageIds: Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [],
+    schedulingGradeIds: Array.isArray(account.schedulingGradeIds) ? account.schedulingGradeIds.map(String) : [],
   };
   const index = state.accounts.findIndex((item) => item.id === accountId);
   if (index >= 0) {
@@ -1556,17 +1647,26 @@ function normalizeBackendLesson(lesson) {
     roomId: lesson.roomId,
     room: lesson.room || lesson.roomId,
     type: lesson.type || "regular",
-    units: lesson.units || 1,
+    units: Number.isFinite(Number(lesson.units)) ? Number(lesson.units) : 1,
     status: lesson.status,
     isLifeDuty: Boolean(lesson.isLifeDuty),
+    nonRegular: Boolean(lesson.nonRegular),
+    nonPayable: Boolean(lesson.nonPayable),
     dutyType: lesson.dutyType || "",
     studentCount: Number(lesson.studentCount || 0),
+    routeRunId: lesson.routeRunId || "",
+    routeId: lesson.routeId || "",
+    routeName: lesson.routeName || "",
+    distanceTier: lesson.distanceTier || "",
+    transportRunStatus: lesson.transportRunStatus || "",
+    routeLeg: lesson.routeLeg || "",
+    routeLegStatus: lesson.routeLegStatus || "",
     scanTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
     checkInTime: lesson.checkInAt ? lesson.checkInAt.slice(11, 16) : "",
     checkOutTime: lesson.checkOutAt ? lesson.checkOutAt.slice(11, 16) : "",
     note:
       lesson.nonPayable
-        ? "固定非正课时段，不计入课时或工资"
+        ? lesson.note || "固定非正课时段，不计入课时或工资"
         : lesson.attendanceNote ||
           (lesson.status === "completed" ? "后端接口：已计薪" : "后端接口：尚未上课"),
     source: "backend-api",
@@ -1812,8 +1912,18 @@ function viewAllowed(viewName) {
   if (role === "finance" && ["hrOrg", "payrollConfig"].includes(viewName) && !canExportAllPayrollDetails()) {
     return false;
   }
+  if (["system_admin", "principal", "payroll_viewer", "payroll_exporter"].includes(role) && viewName === "payrollHistory" && !canViewAllPayrollDetails()) {
+    return false;
+  }
+  if (role === "division_head" && viewName === "payrollHistory" && !canViewDivisionPayrollDetails()) {
+    return false;
+  }
   const scopedScheduler = role === "admin" && (currentAccount()?.scopeStageIds || []).length > 0;
-  if (scopedScheduler && !["adminScheduling", "adminScheduleOverview"].includes(viewName)) return false;
+  if (scopedScheduler) {
+    const schedulerViews = ["adminScheduling", "adminScheduleOverview", "approvals", "notifications", "myHrProfile"];
+    const teacherViews = ["dashboard", "schedule", "confirm"];
+    if (!schedulerViews.includes(viewName) && !(isTeacherAccount() && teacherViews.includes(viewName))) return false;
+  }
   return true;
 }
 
@@ -1916,8 +2026,8 @@ function renderTeacherPayrollMonthSelect() {
 function runtimeEnvironmentName() {
   const host = window.location.hostname;
   if (host === "127.0.0.1" || host === "localhost" || host === "") return "本地开发";
-  // 私有网段（局域网调试、手机真机预览）也视为本地开发环境
-  if (/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)) return "本地开发";
+  // 校内测试通常就是 10.x / 172.16-31.x / 192.168.x。不能把“内网”误判成
+  // 本机开发，否则部署到学校服务器后所有默认口令快捷入口和重置数据按钮都会露出。
   return "正式环境";
 }
 
@@ -2377,17 +2487,26 @@ function applySchedulingScopeForAccount(account = currentAccount()) {
   const stageId = account?.scopeStageIds?.[0] || "";
   const divisionId = divisionIdForStageId(stageId);
   if (!divisionId || !schedulingCatalog.divisions.some((item) => item.id === divisionId)) return;
-  applySchedulingSelection(divisionId);
+  const grades = schedulingGradesForDivision(divisionId, account);
+  applySchedulingSelection(divisionId, grades[0]?.id || "");
 }
 
-function schedulingGradeOptions(divisionId, selectedId) {
+function schedulingGradesForDivision(divisionId, account = currentAccount()) {
   const division =
     schedulingCatalog.divisions.find((item) => item.id === divisionId) ||
     schedulingCatalog.divisions[0];
-  return division.grades
+  const gradeScope = account?.schedulingGradeIds || backendSession?.account?.schedulingGradeIds || [];
+  if (!gradeScope.length) return division.grades;
+  return division.grades.filter((grade) => gradeScope.includes(grade.id));
+}
+
+function schedulingGradeOptions(divisionId, selectedId) {
+  const grades = schedulingGradesForDivision(divisionId);
+  const resolvedSelectedId = grades.some((grade) => grade.id === selectedId) ? selectedId : grades[0]?.id;
+  return grades
     .map(
       (grade) => `
-        <option value="${grade.id}" ${grade.id === selectedId ? "selected" : ""}>
+        <option value="${grade.id}" ${grade.id === resolvedSelectedId ? "selected" : ""}>
           ${grade.name}
         </option>
       `,
@@ -2511,10 +2630,42 @@ function regularSchedulePeriods(config = state.schedulingConfig) {
   return (config?.periods || []).filter(isRegularSchedulePeriod);
 }
 
+const DEFAULT_SCHEDULE_DAY_INDEXES = [0, 1, 2, 3, 4];
+const SCHEDULE_DAY_OPTIONS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+function normalizeScheduleDayIndexes(value) {
+  const source = Array.isArray(value) && value.length ? value : DEFAULT_SCHEDULE_DAY_INDEXES;
+  const normalized = Array.from(
+    new Set(source.map((dayIndex) => Number.parseInt(dayIndex, 10)).filter((dayIndex) => dayIndex >= 0 && dayIndex <= 6)),
+  ).sort((left, right) => left - right);
+  return normalized.length ? normalized : [...DEFAULT_SCHEDULE_DAY_INDEXES];
+}
+
+function schedulePeriodAppliesOnDay(period, dayIndex) {
+  return normalizeScheduleDayIndexes(period?.dayIndexes).includes(Number(dayIndex));
+}
+
+function schedulePeriodDayText(period) {
+  const days = normalizeScheduleDayIndexes(period?.dayIndexes);
+  if (days.join(",") === "0,1,2,3") return "周一至周四";
+  if (days.join(",") === "0,1,2,3,4") return "周一至周五";
+  return days.map((dayIndex) => SCHEDULE_DAY_OPTIONS[dayIndex]).join("、");
+}
+
+function schedulingClassById(config, classId = "") {
+  return (config?.classes || []).find((schoolClass) => schoolClass.id === classId) || null;
+}
+
+function schedulePeriodsForSchedulingClass(config = state.schedulingConfig, classId = "") {
+  const schoolClass = schedulingClassById(config, classId);
+  const templateKey = schoolClass?.scheduleTemplateKey || schoolClass?.highClassCategory || activeScheduleTemplateKey(config);
+  return (config?.periodTemplates?.[templateKey] || config?.periods || []).map((period) => ({ ...period }));
+}
+
 function schedulingSlots() {
   const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
   return weekDates.flatMap((date, dayIndex) =>
-    regularSchedulePeriods().map((period) => ({
+    regularSchedulePeriods().filter((period) => schedulePeriodAppliesOnDay(period, dayIndex)).map((period) => ({
       ...period,
       date,
       dayIndex,
@@ -2920,11 +3071,11 @@ function validateScheduleConflicts(assignments) {
   const classSubjectDateItems = new Map();
 
   assignments.forEach((assignment) => {
-    const teacherKey = `${assignment.teacherId}-${assignment.date}-${assignment.period}`;
+    const teacherKey = `${assignment.teacherId}-${assignment.date}`;
     if (!teacherSlots.has(teacherKey)) teacherSlots.set(teacherKey, []);
     teacherSlots.get(teacherKey).push(assignment);
 
-    const classKey = `${assignment.classId}-${assignment.date}-${assignment.period}`;
+    const classKey = `${assignment.classId}-${assignment.date}`;
     if (!classSlots.has(classKey)) classSlots.set(classKey, []);
     classSlots.get(classKey).push(assignment);
 
@@ -2932,7 +3083,7 @@ function validateScheduleConflicts(assignments) {
     if (!classSubjectDateItems.has(classSubjectDateKey)) classSubjectDateItems.set(classSubjectDateKey, []);
     classSubjectDateItems.get(classSubjectDateKey).push(assignment);
 
-    const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}-${assignment.period}`;
+    const roomKey = `${assignment.roomId || assignment.room}-${assignment.date}`;
     if (!roomSlots.has(roomKey)) roomSlots.set(roomKey, []);
     roomSlots.get(roomKey).push(assignment);
 
@@ -2973,36 +3124,46 @@ function validateScheduleConflicts(assignments) {
     }
   });
 
+  const overlappingPairs = (items) => {
+    const pairs = [];
+    for (let leftIndex = 0; leftIndex < items.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < items.length; rightIndex += 1) {
+        const left = lessonTimeRange(items[leftIndex]);
+        const right = lessonTimeRange(items[rightIndex]);
+        if (left.startMinutes < right.endMinutes && right.startMinutes < left.endMinutes) {
+          pairs.push([items[leftIndex], items[rightIndex]]);
+        }
+      }
+    }
+    return pairs;
+  };
   teacherSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    conflicts.push({
-      type: "teacher",
-      title: `${items[0].teacherName} 同一时间被安排 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
-        .map((item) => `${item.className}${item.subjectName}`)
-        .join("、")}`,
+    overlappingPairs(items).forEach(([left, right]) => {
+      conflicts.push({
+        type: "teacher",
+        title: `${left.teacherName} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${left.className}${left.subjectName}、${right.className}${right.subjectName}`,
+      });
     });
   });
 
   classSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    conflicts.push({
-      type: "class",
-      title: `${items[0].className} 同一时间有 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
-        .map((item) => item.subjectName)
-        .join("、")}`,
+    overlappingPairs(items).forEach(([left, right]) => {
+      conflicts.push({
+        type: "class",
+        title: `${left.className} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${left.subjectName}、${right.subjectName}`,
+      });
     });
   });
 
   roomSlots.forEach((items) => {
-    if (items.length <= 1) return;
-    conflicts.push({
-      type: "room",
-      title: `${items[0].room} 同一时间被安排 ${items.length} 节课`,
-      text: `${formatDate(items[0].date)} 第 ${items[0].period} 节 ${items[0].time}：${items
-        .map((item) => `${item.className}${item.subjectName}`)
-        .join("、")}`,
+    overlappingPairs(items).forEach(([left, right]) => {
+      conflicts.push({
+        type: "room",
+        title: `${left.room} 上课时间重叠`,
+        text: `${formatDate(left.date)} ${left.time} 与 ${right.time} 重叠：${left.className}${left.subjectName}、${right.className}${right.subjectName}`,
+      });
     });
   });
 
@@ -3067,9 +3228,9 @@ function todayKey() {
   return "2026-06-09";
 }
 
-// 计薪课次：排给这位教师的课，除了取消的都算
+// 计薪课次：固定日程（含周日值班、自习、活动）会显示在终端，但不进入课时工资。
 function payableLessons(teacherId) {
-  return teacherLessons(teacherId).filter((lesson) => lesson.status !== "cancelled");
+  return teacherLessons(teacherId).filter((lesson) => lesson.status !== "cancelled" && !lesson.nonPayable);
 }
 
 function countUnits(teacherId, type) {
@@ -4344,10 +4505,27 @@ let annualSalaryState = initialAnnualSalaryState();
 // 这里只提供"全部 + 三个学部"，越权的选择在服务端会被裁掉。
 const REPORT_STAGE_OPTIONS = [
   { value: "", label: "全部（按账号权限）" },
+  { value: "kindergarten", label: "幼儿园" },
   { value: "primary", label: "小学部" },
   { value: "middle", label: "初中部" },
   { value: "high", label: "高中部" },
 ];
+
+function reportStageOptionsForAccount() {
+  const account = backendSession?.account || currentAccount() || {};
+  const financeScope = currentFinanceScopeId();
+  if (currentRole() === "finance" && financeScope && financeScope !== "headquarters") {
+    return [{ value: "", label: `${stageLabel(financeScope) || currentFinanceScopeName() || "本学部"}（账号范围）` }];
+  }
+  const scopedStages = Array.isArray(account.scopeStageIds)
+    ? [...new Set(account.scopeStageIds.map(String).filter(Boolean))]
+    : [];
+  if (scopedStages.length) {
+    const names = scopedStages.map(stageLabel).filter(Boolean).join("、") || "负责学部";
+    return [{ value: "", label: `${names}（账号范围）` }];
+  }
+  return REPORT_STAGE_OPTIONS;
+}
 
 function defaultReportWeek() {
   const term = termManagementState.currentTerm;
@@ -4373,7 +4551,7 @@ function reportYearOptions() {
 }
 
 function canViewAnnualSalaryReport() {
-  return ["admin", "finance", "hr", "division_head"].includes(currentRole());
+  return currentRole() === "finance" || canViewDivisionPayrollDetails() || canViewAllPayrollDetails();
 }
 
 // 学部财务可查看本学部台账，但不能把台账导出为 Excel 或打印为 PDF。
@@ -4446,7 +4624,8 @@ async function loadAnnualSalary() {
 }
 
 function renderReportsView() {
-  fillSelect("#weeklyWorkloadStage", REPORT_STAGE_OPTIONS, weeklyWorkloadState.stageId);
+  const reportStageOptions = reportStageOptionsForAccount();
+  fillSelect("#weeklyWorkloadStage", reportStageOptions, weeklyWorkloadState.stageId);
   const weeklyReportExportAllowed = canExportWeeklyWorkloadReport();
   ["#exportWeeklyWorkload", "#printWeeklyWorkload"].forEach((selector) => {
     const button = document.querySelector(selector);
@@ -4468,7 +4647,7 @@ function renderReportsView() {
     reportYearOptions().map((y) => ({ value: y, label: `${y} 年` })),
     annualSalaryState.year || new Date().getFullYear(),
   );
-  fillSelect("#annualSalaryStage", REPORT_STAGE_OPTIONS, annualSalaryState.stageId);
+  fillSelect("#annualSalaryStage", reportStageOptions, annualSalaryState.stageId);
 
   const week = document.querySelector("#weeklyWorkloadWeek");
   if (week) week.value = weeklyWorkloadState.weekStart || defaultReportWeek();
@@ -4515,8 +4694,7 @@ function renderWeeklyWorkload() {
     { label: "教师", value: `${report.rows.length} 人` },
     { label: "课次合计", value: t.lessonCount },
     { label: "课时合计", value: t.units },
-    { label: "已完成", value: t.completed },
-    { label: "已取消", value: t.cancelled },
+    { label: "计薪课次", value: t.payable },
     { label: "已取消", value: t.cancelled },
   ]
     .map(
@@ -5174,7 +5352,7 @@ function ensurePayrollHistorySelection() {
 }
 
 async function loadPayrollHistory(options = {}) {
-  if (!backendMode() || !isFinanceRole()) return;
+  if (!backendMode() || !canViewPayrollHistory()) return;
   const termId = options.termId || payrollHistoryState.termId || termManagementState.currentTerm?.id || "";
   const month = options.month || payrollHistoryState.month || "2026-06";
   if (!termId || !month) return;
@@ -5494,6 +5672,29 @@ function currentFinanceCanReadAll() {
   return Boolean(backendSession?.account?.financeReadAll || currentAccount()?.financeReadAll);
 }
 
+function canViewAllPayrollDetails() {
+  const account = backendSession?.account || currentAccount() || {};
+  return Boolean(
+    (currentRole() === "finance" && currentFinanceScopeId() === "headquarters" && currentFinanceCanReadAll()) ||
+      (["system_admin", "principal", "payroll_viewer", "payroll_exporter"].includes(currentRole()) && account.payrollReadAll),
+  );
+}
+
+function divisionPayrollScope() {
+  const account = backendSession?.account || currentAccount() || {};
+  if (currentRole() !== "division_head" || !account.payrollReadDivision) return "";
+  const scopes = Array.isArray(account.scopeStageIds) ? [...new Set(account.scopeStageIds.map(String).filter(Boolean))] : [];
+  return scopes.length === 1 && ["kindergarten", "primary", "middle", "high"].includes(scopes[0]) ? scopes[0] : "";
+}
+
+function canViewDivisionPayrollDetails() {
+  return Boolean(divisionPayrollScope());
+}
+
+function canViewPayrollHistory() {
+  return canViewAllPayrollDetails() || canViewDivisionPayrollDetails();
+}
+
 function isDivisionFinanceAccount() {
   return isFinanceRole() && Boolean(currentFinanceScopeId()) && currentFinanceScopeId() !== "headquarters";
 }
@@ -5501,10 +5702,10 @@ function isDivisionFinanceAccount() {
 // 导出会形成可离线留存的工资文件，权限必须独立于页面查看权限。
 // 只有带全校读取权限的总校财务可以导出；学部财务仍可核算、查看本学部工资。
 function canExportAllPayrollDetails() {
-  return (
-    currentRole() === "finance" &&
-    currentFinanceScopeId() === "headquarters" &&
-    currentFinanceCanReadAll()
+  const account = backendSession?.account || currentAccount() || {};
+  return Boolean(
+    (currentRole() === "finance" && currentFinanceScopeId() === "headquarters" && currentFinanceCanReadAll() && account.payrollExportAll !== false) ||
+      (["principal", "payroll_exporter"].includes(currentRole()) && account.payrollReadAll && account.payrollExportAll),
   );
 }
 
@@ -5895,14 +6096,65 @@ function ensureFinanceTeacherDetail(teacherId, { generatePayroll = false } = {})
 
 function backendSchedulingOptions() {
   return {
-    termId: termManagementState.currentTerm?.id || state.schedulingConfig.termId || "",
+    termId: selectedSchedulingTermId(),
     divisionId: state.selectedSchedulingDivisionId,
     gradeId: state.selectedSchedulingGradeId,
+    expectedDraftRevision: Number(state.schedulingDraft?.revision || 0),
   };
 }
 
 function currentSchedulingTermId() {
-  return termManagementState.currentTerm?.id || state.schedulingConfig.termId || "";
+  return selectedSchedulingTermId();
+}
+
+// 排课负责人只从学部主任已发布的正式学期中选择。寒暑假没有 termId，
+// 已归档学期也不能再生成或修改课表，因此不进入排课下拉框。
+function selectableSchedulingTerms() {
+  const terms = termManagementState.terms || [];
+  const selectable = terms.filter((term) => term.status !== "archived" && term.datePhase !== "ended");
+  if (selectable.length) return selectable;
+  return termManagementState.currentTerm ? [termManagementState.currentTerm] : [];
+}
+
+function selectedSchedulingTermId() {
+  const terms = selectableSchedulingTerms();
+  return (
+    terms.find((term) => term.id === state.selectedSchedulingTermId)?.id ||
+    termManagementState.currentTerm?.id ||
+    terms[0]?.id ||
+    state.schedulingConfig.termId ||
+    ""
+  );
+}
+
+function renderSchedulingTermSelector(config = state.schedulingConfig) {
+  const select = document.querySelector("#adminSchedulingTermSelect");
+  if (!select) return;
+  const current = config?.termId || selectedSchedulingTermId();
+  const terms = selectableSchedulingTerms();
+  const visibleTerms = terms.some((term) => term.id === current)
+    ? terms
+    : [
+        ...terms,
+        ...(config?.termId
+          ? [{
+              id: config.termId,
+              name: config.termName || "当前正式学期",
+              startDate: config.termStartDate || "",
+              endDate: config.termEndDate || "",
+              status: config.termStatus || "active",
+            }]
+          : []),
+      ];
+  select.innerHTML = visibleTerms.length
+    ? visibleTerms
+        .map(
+          (term) =>
+            `<option value="${escapeHtml(term.id)}" ${term.id === current ? "selected" : ""}>${escapeHtml(budgetTermLabel(term))}</option>`,
+        )
+        .join("")
+    : '<option value="">暂无可排课的正式学期</option>';
+  select.disabled = termManagementState.loading || !visibleTerms.length;
 }
 
 function applyTermContext(result = {}) {
@@ -5914,6 +6166,10 @@ function applyTermContext(result = {}) {
     loading: false,
     error: "",
   };
+  const selectableIds = new Set(selectableSchedulingTerms().map((term) => term.id));
+  if (!selectableIds.has(state.selectedSchedulingTermId)) {
+    state.selectedSchedulingTermId = termManagementState.currentTerm?.id || selectableSchedulingTerms()[0]?.id || "";
+  }
   if (termManagementState.currentTerm) {
     state.schedulingConfig = {
       ...state.schedulingConfig,
@@ -6392,9 +6648,440 @@ async function archiveAcademicCalendarTerm(termId) {
   }
 }
 
+function selectedAttendanceMonth() {
+  const month = attendanceUploadState.month || currentSettlementMonth();
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(month) ? month : currentSettlementMonth();
+}
+
+function attendanceStageOptionsHtml(options = [], selectedStageId = "") {
+  return options
+    .map(
+      (stage) =>
+        `<option value="${escapeHtml(stage.id)}" ${stage.id === selectedStageId ? "selected" : ""}>${escapeHtml(stage.name)}</option>`,
+    )
+    .join("");
+}
+
+function attendanceTemplateForStage(stageId) {
+  const templates = {
+    kindergarten: { filename: "幼儿园教师月度考勤上传模板.xlsx", label: "幼儿园" },
+    primary: { filename: "小学部教师月度考勤上传模板.xlsx", label: "小学部" },
+    middle: { filename: "初中部教师月度考勤上传模板.xlsx", label: "初中部" },
+    high: { filename: "高中部教师月度考勤上传模板.xlsx", label: "高中部" },
+  };
+  return templates[stageId] || { filename: "教师月度考勤上传模板.xlsx", label: "当前学部" };
+}
+
+async function loadAttendanceUploads({ month = selectedAttendanceMonth(), stageId = attendanceUploadState.stageId } = {}) {
+  if (!backendMode()) return;
+  attendanceUploadState = { ...attendanceUploadState, month, stageId, loading: true, error: "" };
+  if (state.activeView === "attendanceManagement") renderAttendanceManagement();
+  try {
+    const params = new URLSearchParams({ month });
+    if (stageId) params.set("stageId", stageId);
+    const result = await apiRequest(`/api/attendance/uploads?${params.toString()}`);
+    const stageOptions = result.stageOptions || [];
+    const resolvedStageId = stageOptions.some((stage) => stage.id === stageId)
+      ? stageId
+      : stageOptions[0]?.id || "";
+    attendanceUploadState = {
+      month: result.month || month,
+      stageId: resolvedStageId,
+      stageOptions,
+      uploads: result.uploads || [],
+      canUpload: Boolean(result.canUpload),
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    attendanceUploadState = {
+      ...attendanceUploadState,
+      month,
+      stageId,
+      loaded: true,
+      loading: false,
+      error: error.message || "考勤记录加载失败",
+    };
+  }
+  if (state.activeView === "attendanceManagement") renderAttendanceManagement();
+}
+
+function renderAttendanceManagement() {
+  if (state.activeView !== "attendanceManagement") return;
+  const monthInput = document.querySelector("#attendanceMonthInput");
+  const stageSelect = document.querySelector("#attendanceStageSelect");
+  const fileInput = document.querySelector("#attendanceUploadFile");
+  const uploadButton = document.querySelector("#attendanceUploadButton");
+  const templateDownload = document.querySelector("#attendanceTemplateDownload");
+  const list = document.querySelector("#attendanceUploadList");
+  const note = document.querySelector("#attendanceManagementNote");
+  if (!monthInput || !stageSelect || !fileInput || !uploadButton || !list || !note) return;
+
+  if (!backendMode()) {
+    list.innerHTML = '<div class="empty-state">请登录系统后使用月度考勤管理。</div>';
+    return;
+  }
+
+  if (!attendanceUploadState.loaded && !attendanceUploadState.loading) {
+    loadAttendanceUploads();
+  }
+
+  const month = selectedAttendanceMonth();
+  monthInput.value = month;
+  const stageOptions = attendanceUploadState.stageOptions || [];
+  const selectedStageId = stageOptions.some((stage) => stage.id === attendanceUploadState.stageId)
+    ? attendanceUploadState.stageId
+    : stageOptions[0]?.id || "";
+  if (selectedStageId && selectedStageId !== attendanceUploadState.stageId && !attendanceUploadState.loading) {
+    attendanceUploadState = { ...attendanceUploadState, stageId: selectedStageId };
+  }
+  stageSelect.innerHTML = stageOptions.length
+    ? attendanceStageOptionsHtml(stageOptions, selectedStageId)
+    : '<option value="">暂无可用学部</option>';
+  stageSelect.disabled = attendanceUploadState.loading || !stageOptions.length;
+  const template = attendanceTemplateForStage(selectedStageId);
+  if (templateDownload) {
+    templateDownload.href = `assets/${encodeURIComponent(template.filename)}`;
+    templateDownload.download = template.filename;
+    templateDownload.textContent = `下载${template.label} Excel 模板`;
+  }
+  monthInput.disabled = attendanceUploadState.loading;
+  const allowUpload = attendanceUploadState.canUpload && Boolean(selectedStageId);
+  fileInput.disabled = !allowUpload || attendanceUploadState.loading;
+  uploadButton.hidden = !attendanceUploadState.canUpload;
+  uploadButton.disabled = !allowUpload || attendanceUploadState.loading;
+  uploadButton.textContent = attendanceUploadState.loading ? "正在处理…" : "上传并校验";
+
+  if (attendanceUploadState.loading && !attendanceUploadState.loaded) {
+    note.textContent = "正在读取考勤上传记录…";
+    list.innerHTML = '<div class="empty-state">正在读取…</div>';
+    return;
+  }
+  if (attendanceUploadState.error) {
+    note.textContent = "未能读取考勤记录，请稍后重试。";
+    list.innerHTML = `<div class="empty-state">${escapeHtml(attendanceUploadState.error)}</div>`;
+    return;
+  }
+  const appliesPrimaryPolicy = selectedStageId === "primary";
+  const appliesMiddlePolicy = selectedStageId === "middle";
+  const appliesHighPolicy = selectedStageId === "high";
+  note.textContent = attendanceUploadState.canUpload
+    ? appliesPrimaryPolicy
+      ? "小学部已启用考勤扣款：上午 7:45 后、下午 14:15 后打卡各扣 30 元；应出勤且明确“未补卡”的缺卡每次扣 50 元；四次均无打卡、四项均填“未补卡”时按旷工 200 元／天处理。系统不判断应打卡日期，不自动处理早退、周五下午离校、周日值班或假打卡。上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。"
+      : appliesMiddlePolicy
+      ? "初中部已启用迟到／早退、旷工考勤规则：上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。请只填写应出勤日，并在“应出勤”列明确填写“是”或“否”。"
+      : appliesHighPolicy
+      ? "高中部请使用专用考勤结果表：直接填写准时／迟到及分钟数、签退情况、旷课节数和旷工天数。10 分钟内迟到或未签退累计第 3 次起，每次扣考核工资 2%；超时迟到或早退每次扣 3%；旷课、旷工按制度计算。上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。"
+      : "同一学部同一月份再次上传会覆盖当前考勤版本，旧版本会保留为历史记录。除小学部、初中部、高中部外，当前仅校验和留存，不会自动扣薪。"
+    : appliesPrimaryPolicy
+      ? "小学部考勤会在工资预览／重新生成时，按导入记录中的迟到、明确未补卡与旷工自动扣款；上传与覆盖由对应学部主任完成。"
+      : appliesMiddlePolicy
+      ? "初中部考勤会在工资预览／重新生成时自动计算迟到、早退与旷工扣款；上传与覆盖由对应学部主任完成。"
+      : appliesHighPolicy
+      ? "高中部考勤会在工资预览／重新生成时按专用考勤结果表计算考核工资扣款与旷工扣款；上传与覆盖由对应学部主任完成。"
+      : "您可查看各学部已上传的考勤版本；上传与覆盖由对应学部主任完成。";
+  const uploads = attendanceUploadState.uploads || [];
+  list.innerHTML = uploads.length
+    ? uploads
+        .map((upload) => {
+          const active = upload.status === "active";
+          const settlement = upload.settlementSummary || {};
+          const policyLine = settlement.applies
+            ? settlement.requiresPayrollContext
+              ? `<small>${escapeHtml(settlement.componentName || "考勤违纪扣款")}：${escapeHtml(settlement.attendanceLabel || "轻微迟到／未签退")} ${Number(settlement.lateEarlyCount || 0)} 次${Number(settlement.seriousOccurrenceCount || 0) ? ` · 超时迟到／早退 ${Number(settlement.seriousOccurrenceCount || 0)} 次` : ""}${Number(settlement.missedClassCount || 0) ? ` · 旷课 ${Number(settlement.missedClassCount || 0)} 节` : ""}${Number(settlement.absenceDays || 0) ? ` · 旷工 ${Number(settlement.absenceDays || 0)} 天` : ""} · 工资生成时按考核工资和当月工资总额计算</small>`
+              : `<small>${escapeHtml(settlement.componentName || "考勤扣款")}：${escapeHtml(settlement.attendanceLabel || "迟到／早退")} ${Number(settlement.lateEarlyCount || 0)} 次${Number(settlement.missingPunchCount || 0) ? ` · 未补卡 ${Number(settlement.missingPunchCount || 0)} 次` : ""}${Number(settlement.absenceDays || 0) ? ` · 旷工 ${Number(settlement.absenceDays || 0)} 天` : ""} · 暂计扣款 ¥${Number(settlement.totalDeduction || 0).toLocaleString()}</small>`
+            : "";
+          return `
+            <article class="attendance-upload-entry ${active ? "" : "is-replaced"}">
+              <div class="attendance-upload-copy">
+                <strong>${escapeHtml(upload.stageName)} · ${escapeHtml(upload.month)} 考勤表</strong>
+                <small>${escapeHtml(upload.filename || "教师月度考勤表.xlsx")} · ${Number(upload.rowCount || 0).toLocaleString()} 条日记录 · ${Number(upload.teacherCount || 0).toLocaleString()} 位教师${Number(upload.noPunchDays || 0) ? ` · ${Number(upload.noPunchDays).toLocaleString()} 天无打卡记录` : ""}</small>
+                ${policyLine}
+                <small>上传人：${escapeHtml(upload.uploadedByName || "未记录")} · ${escapeHtml(formatDateTimeShort(upload.uploadedAt))}</small>
+              </div>
+              <div class="attendance-upload-meta">
+                <span class="status-pill ${active ? "done" : "locked"}">${active ? "当前版本" : "已被覆盖"}</span>
+              </div>
+            </article>
+          `;
+        })
+        .join("")
+    : '<div class="empty-state">该月份、该学部尚未上传考勤表。</div>';
+}
+
+async function uploadAttendanceWorkbook() {
+  if (!backendMode() || !attendanceUploadState.canUpload) return;
+  const fileInput = document.querySelector("#attendanceUploadFile");
+  const file = fileInput?.files?.[0];
+  const month = selectedAttendanceMonth();
+  const stageId = attendanceUploadState.stageId;
+  if (!stageId) {
+    showToast("请先选择学部");
+    return;
+  }
+  if (!file) {
+    showToast("请选择已填写的 .xlsx 考勤表");
+    return;
+  }
+  const payload = new FormData();
+  payload.append("month", month);
+  payload.append("stageId", stageId);
+  payload.append("attendanceFile", file, file.name);
+  attendanceUploadState = { ...attendanceUploadState, loading: true, error: "" };
+  renderAttendanceManagement();
+  try {
+    const result = await apiRequest("/api/attendance/uploads", { method: "POST", body: payload });
+    if (fileInput) fileInput.value = "";
+    await loadAttendanceUploads({ month, stageId });
+    const payrollNotice = result.invalidatedPayrollCount
+      ? `；${result.invalidatedPayrollCount} 份未锁定工资单将按新考勤重算`
+      : "";
+    showToast(`${result.replacedUploadCount ? "考勤表已更新，上一版本已保留为历史记录" : "考勤表已上传并完成校验"}${payrollNotice}`);
+  } catch (error) {
+    attendanceUploadState = { ...attendanceUploadState, loading: false, error: error.message || "考勤表上传失败" };
+    renderAttendanceManagement();
+    const details = error.details;
+    showToast(Array.isArray(details) && details.length ? `${error.message}：${details[0]}` : attendanceUploadState.error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 跟车路线：由安全部主管统一发布，生活老师端只展示本人已发布的路线班次。
+// 一趟路线由早晨接、放学送两段组成；服务端只在两段均完成后统计接送补助。
+// ---------------------------------------------------------------------------
+function transportTierLabel(tierId, tiers = transportRouteState.distanceTiers) {
+  return (tiers || []).find((tier) => tier.id === tierId)?.name || {
+    short: "短途", medium: "中途", long: "长途", extraLong: "超长途",
+  }[tierId] || tierId || "未设置";
+}
+
+function transportRouteStatusTag(status = "draft") {
+  return `<span class="status-pill ${status === "published" ? "done" : "warning"}">${status === "published" ? "已发布" : "草稿"}</span>`;
+}
+
+async function loadTransportRoutes({ termId = transportRouteState.termId } = {}) {
+  if (!backendMode() || !["security_manager", "life_teacher"].some((role) => hasAccountRole(role))) return;
+  transportRouteState = { ...transportRouteState, termId, loading: true, error: "" };
+  if (state.activeView === "transportRoutes") renderTransportRoutes();
+  try {
+    const suffix = termId ? `?termId=${encodeURIComponent(termId)}` : "";
+    const [result, transferResult] = await Promise.all([
+      apiRequest(`/api/transport-routes${suffix}`),
+      apiRequest("/api/transport-transfers"),
+    ]);
+    const termOptions = result.termOptions || [];
+    const resolvedTermId = termOptions.some((term) => term.id === termId)
+      ? termId
+      : termOptions.find((term) => term.current)?.id || termOptions[0]?.id || "";
+    transportRouteState = {
+      ...transportRouteState,
+      termId: resolvedTermId,
+      canManage: Boolean(result.canManage),
+      termOptions,
+      lifeTeachers: result.lifeTeachers || [],
+      distanceTiers: result.distanceTiers || [],
+      routes: result.routes || [],
+      transfers: transferResult.requests || [],
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    transportRouteState = {
+      ...transportRouteState,
+      loaded: true,
+      loading: false,
+      error: error.message || "跟车路线加载失败",
+    };
+  }
+  if (state.activeView === "transportRoutes") renderTransportRoutes();
+}
+
+function renderTransportRoutes() {
+  if (state.activeView !== "transportRoutes") return;
+  const list = document.querySelector("#transportRouteList");
+  const transferList = document.querySelector("#transportTransferList");
+  const termSelect = document.querySelector("#transportRouteTermSelect");
+  const hint = document.querySelector("#transportRouteHint");
+  const addButton = document.querySelector("#addTransportRoute");
+  if (!list || !transferList || !termSelect || !hint || !addButton) return;
+  if (!backendMode()) {
+    list.innerHTML = '<div class="empty-state">请登录系统后维护跟车路线。</div>';
+    transferList.innerHTML = "";
+    return;
+  }
+  if (!transportRouteState.loaded && !transportRouteState.loading) {
+    loadTransportRoutes();
+  }
+  addButton.hidden = !transportRouteState.canManage;
+  addButton.disabled = transportRouteState.loading;
+  termSelect.innerHTML = (transportRouteState.termOptions || []).length
+    ? transportRouteState.termOptions.map((term) => `<option value="${escapeHtml(term.id)}" ${term.id === transportRouteState.termId ? "selected" : ""}>${escapeHtml(term.name)} · ${escapeHtml(term.startDate)} 至 ${escapeHtml(term.endDate)}${term.current ? " · 当前" : ""}</option>`).join("")
+    : '<option value="">暂无可用正式学期</option>';
+  termSelect.disabled = transportRouteState.loading || !(transportRouteState.termOptions || []).length;
+  hint.textContent = transportRouteState.canManage
+    ? "创建后先保存为草稿；确认生活老师、时间与运行日无冲突后，再发布路线表。重新发布只替换今天及以后的未执行班次。"
+    : "只显示本人已被发布的路线；路线、补助档位和老师安排均由安全部主管维护。";
+
+  if (transportRouteState.loading && !transportRouteState.loaded) {
+    list.innerHTML = '<div class="empty-state">正在读取路线…</div>';
+    transferList.innerHTML = "";
+    return;
+  }
+  if (transportRouteState.error) {
+    list.innerHTML = `<div class="empty-state">${escapeHtml(transportRouteState.error)}</div>`;
+    transferList.innerHTML = "";
+    return;
+  }
+  const routes = transportRouteState.routes || [];
+  list.innerHTML = routes.length
+    ? routes.map((route) => `
+      <article class="transport-route-card">
+        <div class="transport-route-title">
+          <div>
+            <strong>${escapeHtml(route.name)}</strong>
+            <p>${escapeHtml(route.termName)} · ${escapeHtml(route.weekdayLabel || "未设置运行日")}</p>
+          </div>
+          ${transportRouteStatusTag(route.status)}
+        </div>
+        <div class="transport-route-meta">
+          <span><b>${escapeHtml(route.distanceLabel || transportTierLabel(route.distanceTier))}</b> · 每趟按对应档位计补助</span>
+          <span>早晨接：${escapeHtml(route.morningTime)} · 放学送：${escapeHtml(route.afternoonTime)}</span>
+          <span>生活老师：${escapeHtml(route.lifeTeacher?.name || "未安排")}${route.lifeTeacher?.stageName ? ` · ${escapeHtml(route.lifeTeacher.stageName)}` : ""}</span>
+          <span>生效：${escapeHtml(route.startDate)} 至 ${escapeHtml(route.endDate)}</span>
+          ${route.stops ? `<span>路线说明：${escapeHtml(route.stops)}</span>` : ""}
+        </div>
+        <div class="transport-route-footer">
+          <small>班次 ${Number(route.runs?.total || 0)} 趟 · 已完成 ${Number(route.runs?.completed || 0)} 趟 · 待执行 ${Number(route.runs?.scheduled || 0)} 趟${Number(route.runs?.inProgress || 0) ? ` · 执行中 ${Number(route.runs.inProgress)} 趟` : ""}</small>
+          ${transportRouteState.canManage ? `<div class="inline-actions"><button class="ghost-button compact-button" data-edit-transport-route="${escapeHtml(route.id)}" type="button">修改</button><button class="primary-button compact-button" data-publish-transport-route="${escapeHtml(route.id)}" type="button">${route.status === "published" ? "重新发布" : "发布路线表"}</button></div>` : ""}
+        </div>
+      </article>
+    `).join("")
+    : '<div class="empty-state">该学期尚未建立跟车路线。请先新建路线并发布，生活老师端才会出现排班。</div>';
+
+  const transfers = transportRouteState.transfers || [];
+  transferList.innerHTML = transfers.length
+    ? transfers.map((request) => `
+      <article class="transport-transfer-entry">
+        <div>
+          <strong>${escapeHtml(request.routeName)} · ${escapeHtml(request.date)}</strong>
+          <p>${escapeHtml(request.fromTeacherName)} → ${escapeHtml(request.toTeacherName)} · ${escapeHtml(request.statusLabel || request.status)}</p>
+          <small>申请时间：${escapeHtml(formatDateTimeShort(request.createdAt))}${request.reviewedByName ? ` · 处理人：${escapeHtml(request.reviewedByName)}` : ""}</small>
+        </div>
+        ${request.canReview ? `<div class="inline-actions"><button class="ghost-button compact-button" data-review-transport-transfer="${escapeHtml(request.id)}" data-approved="false" type="button">不批准</button><button class="primary-button compact-button" data-review-transport-transfer="${escapeHtml(request.id)}" data-approved="true" type="button">批准调班</button></div>` : ""}
+      </article>
+    `).join("")
+    : '<div class="empty-state">暂无调班申请。</div>';
+}
+
+async function openTransportRouteDialog(route = null) {
+  if (!transportRouteState.canManage) return;
+  if (!transportRouteState.loaded) await loadTransportRoutes();
+  const terms = transportRouteState.termOptions || [];
+  const selectedTermId = route?.termId || transportRouteState.termId || terms.find((term) => term.current)?.id || terms[0]?.id || "";
+  const selectedTerm = terms.find((term) => term.id === selectedTermId) || {};
+  const lifeTeachers = transportRouteState.lifeTeachers || [];
+  if (!terms.length || !lifeTeachers.length) {
+    showToast(!terms.length ? "请先维护至少一个未归档正式学期" : "当前没有可安排的在岗生活老师");
+    return;
+  }
+  await openDialog({
+    title: route ? "修改跟车路线" : "新建跟车路线",
+    description: "同一位生活老师在同一时段不可重复排班。路线发布后才会发送到生活老师端。",
+    confirmText: "保存路线",
+    fields: [
+      { name: "name", label: "路线名称", value: route?.name || "", placeholder: "例如：小学部南线 1 号", required: true },
+      { name: "termId", label: "适用学期", type: "select", value: selectedTermId, required: true, options: terms.map((term) => ({ value: term.id, label: `${term.name} · ${term.startDate} 至 ${term.endDate}` })) },
+      { name: "distanceTier", label: "路线档位", type: "select", value: route?.distanceTier || "short", required: true, options: (transportRouteState.distanceTiers || []).map((tier) => ({ value: tier.id, label: `${tier.name} · ¥${Number(tier.rate || 0)}/趟` })) },
+      { name: "lifeTeacherId", label: "跟车生活老师", type: "select", value: route?.lifeTeacher?.id || "", required: true, options: lifeTeachers.map((teacher) => ({ value: teacher.id, label: `${teacher.name} · ${teacher.stageName} · ${teacher.title}` })) },
+      { name: "morningTime", label: "早晨接时间", value: route?.morningTime || "06:50-08:20", placeholder: "HH:MM-HH:MM", required: true, hint: "例如 06:50-08:20" },
+      { name: "afternoonTime", label: "放学送时间", value: route?.afternoonTime || "16:30-18:00", placeholder: "HH:MM-HH:MM", required: true, hint: "例如 16:30-18:00" },
+      { name: "weekdays", label: "运行日", type: "multiselect", value: route?.weekdays || ["1", "2", "3", "4", "5"], required: true, options: [["1", "周一"], ["2", "周二"], ["3", "周三"], ["4", "周四"], ["5", "周五"], ["6", "周六"], ["7", "周日"]].map(([value, label]) => ({ value, label })) },
+      { name: "startDate", label: "开始日期", type: "date", value: route?.startDate || selectedTerm.startDate || "", required: true },
+      { name: "endDate", label: "结束日期", type: "date", value: route?.endDate || selectedTerm.endDate || "", required: true },
+      { name: "stops", label: "路线／接送点说明", type: "textarea", value: route?.stops || "", placeholder: "例如：学校北门—XX小区—YY小区", rows: 2 },
+      { name: "note", label: "备注", type: "textarea", value: route?.note || "", placeholder: "可填写特殊安排", rows: 2 },
+    ],
+    onConfirm: async (values) => {
+      await apiRequest("/api/transport-routes", { method: "POST", body: { ...values, ...(route ? { id: route.id } : {}) } });
+      transportRouteState = { ...transportRouteState, termId: values.termId, loaded: false };
+      await loadTransportRoutes({ termId: values.termId });
+      showToast(route ? "路线已保存；如需同步新安排，请重新发布" : "路线草稿已保存，请核对后发布");
+    },
+  });
+}
+
+async function publishTransportRoute(routeId) {
+  const route = (transportRouteState.routes || []).find((item) => item.id === routeId);
+  if (!route || !transportRouteState.canManage) return;
+  const confirmed = await confirmDialog(route.status === "published" ? "重新发布路线表" : "发布路线表", {
+    description: `发布“${route.name}”后，将通知${route.lifeTeacher?.name || "对应生活老师"}，并生成今天及以后所有运行日的早、晚跟车班次。未执行的旧班次将按本次路线表替换。`,
+    confirmText: "确认发布",
+  });
+  if (!confirmed) return;
+  try {
+    const result = await apiRequest(`/api/transport-routes/${encodeURIComponent(routeId)}/publish`, { method: "POST" });
+    await loadTransportRoutes({ termId: transportRouteState.termId });
+    showToast(`路线已发布，已生成 ${Number(result.generatedRunCount || 0)} 趟跟车班次`);
+  } catch (error) {
+    showToast(error.message || "发布路线失败");
+  }
+}
+
+async function operateLifeRouteLeg(lesson, action) {
+  if (!lesson?.routeRunId) return;
+  try {
+    await apiRequest(`/api/transport-runs/${encodeURIComponent(lesson.routeRunId)}/leg`, {
+      method: "POST",
+      body: { leg: lesson.routeLeg, action },
+    });
+    await loadBackendTeacherContext(currentTeacherId(), state.selectedScheduleWeekStart || "auto");
+    renderSchedule();
+    showToast(action === "check_in" ? "已完成签到" : "已确认该班次执行完成");
+  } catch (error) {
+    showToast(error.message || "班次操作失败");
+  }
+}
+
+async function openLifeRouteTransferDialog(lesson) {
+  if (!lesson?.routeRunId || !backendMode()) return;
+  try {
+    const result = await apiRequest("/api/transport-routes");
+    const candidates = (result.lifeTeachers || []).filter((teacher) => teacher.id !== currentTeacherId());
+    if (!candidates.length) {
+      showToast("暂无可选择的其他在岗生活老师");
+      return;
+    }
+    await openDialog({
+      title: "申请跟车调班",
+      description: `${lesson.date}「${lesson.routeName || lesson.className}」将提交给安全部主管核验冲突并处理。`,
+      confirmText: "提交申请",
+      fields: [{ name: "toTeacherId", label: "调给哪位生活老师", type: "select", required: true, options: candidates.map((teacher) => ({ value: teacher.id, label: `${teacher.name} · ${teacher.stageName} · ${teacher.title}` })) }],
+      onConfirm: async (values) => {
+        await apiRequest("/api/transport-transfers", { method: "POST", body: { runId: lesson.routeRunId, toTeacherId: values.toTeacherId } });
+        showToast("调班申请已提交，等待安全部主管处理");
+      },
+    });
+  } catch (error) {
+    showToast(error.message || "无法发起调班申请");
+  }
+}
+
+async function reviewTransportTransfer(requestId, approved) {
+  try {
+    await apiRequest(`/api/transport-transfers/${encodeURIComponent(requestId)}/review`, { method: "POST", body: { approved } });
+    await loadTransportRoutes({ termId: transportRouteState.termId });
+    showToast(approved ? "已批准调班，生活老师排班已同步" : "已处理为不批准");
+  } catch (error) {
+    showToast(error.message || "处理调班申请失败");
+  }
+}
+
 function applyBackendScheduleResult(result) {
   if (result.config) {
     state.schedulingConfig = result.config;
+    state.selectedSchedulingTermId = result.config.termId || state.selectedSchedulingTermId;
     state.selectedSchedulingDivisionId = result.config.divisionId;
     state.selectedSchedulingGradeId = result.config.gradeId;
     state.selectedScheduleWeekStart = result.config.weekStart;
@@ -6821,7 +7508,7 @@ function collectCourseRulesFromForm() {
     return {
       subjectId,
       enabled: true,
-      weeklyLessons: Number.parseInt(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0", 10),
+      weeklyLessons: Number(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0"),
       durationMinutes: Number.parseInt(document.querySelector(`[data-course-rule-duration="${subjectId}"]`)?.value || "40", 10),
       minPerClassPerDay,
       maxPerClassPerDay: normalizeCourseRuleMaxPerDay(
@@ -6937,10 +7624,12 @@ function defaultNonRegularPeriodContent(type = "selfStudy") {
   return "自习";
 }
 
-function nonRegularTeacherOptions(config, selectedTeacherId = "") {
+function nonRegularTeacherOptions(config, selectedTeacherId = "", selectedRole = "") {
   const teachers = config.nonRegularTeachers || config.teachers || [];
   return [
     `<option value="">不指定（不影响课表发布）</option>`,
+    `<option value="role:homeroom" ${selectedRole === "homeroom" ? "selected" : ""}>各班班主任（按班级自动匹配）</option>`,
+    `<option value="role:life_teacher" ${selectedRole === "life_teacher" ? "selected" : ""}>本学部生活老师（自动同步全部在职人员）</option>`,
     ...teachers.map(
       (teacher) =>
         `<option value="${escapeHtml(teacher.id)}" ${teacher.id === selectedTeacherId ? "selected" : ""}>${escapeHtml(teacher.name)} · ${escapeHtml(teacher.department || config.divisionName || "")} · ${escapeHtml(teacher.title || teacher.subject || "老师")}</option>`,
@@ -6971,8 +7660,46 @@ function minutesToTimeText(value) {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
 
+function isHighSchedulingConfig(config = state.schedulingConfig) {
+  return config?.stageId === "high" || config?.divisionId === "high";
+}
+
+function activeScheduleTemplateKey(config = state.schedulingConfig) {
+  return config?.activeScheduleTemplateKey || (isHighSchedulingConfig(config) ? "c" : "default");
+}
+
+function activeScheduleTemplatePeriods(config = state.schedulingConfig) {
+  const key = activeScheduleTemplateKey(config);
+  return config?.periodTemplates?.[key] || config?.periods || schedulingCatalog.periods;
+}
+
+function applyActiveScheduleTemplatePeriods(config, key) {
+  const nextKey = isHighSchedulingConfig(config) ? key || "c" : "default";
+  const nextPeriods = (config?.periodTemplates?.[nextKey] || config?.periods || schedulingCatalog.periods).map((period) => ({ ...period }));
+  return {
+    ...config,
+    activeScheduleTemplateKey: nextKey,
+    periods: nextPeriods,
+  };
+}
+
+function setActiveScheduleTemplate(key) {
+  state.schedulingConfig = applyActiveScheduleTemplatePeriods(state.schedulingConfig, key);
+  renderAdminScheduling();
+}
+
+function saveActiveScheduleTemplatePeriods(periods) {
+  const config = state.schedulingConfig;
+  const key = activeScheduleTemplateKey(config);
+  config.periodTemplates = {
+    ...(config.periodTemplates || {}),
+    [key]: periods.map((period) => ({ ...period })),
+  };
+  config.periods = config.periodTemplates[key].map((period) => ({ ...period }));
+}
+
 function schedulePeriodsFromConfig(config = state.schedulingConfig) {
-  return (config.periods?.length ? config.periods : schedulingCatalog.periods).map((period, index) => {
+  return (activeScheduleTemplatePeriods(config)?.length ? activeScheduleTemplatePeriods(config) : schedulingCatalog.periods).map((period, index) => {
     const { startTime, endTime } = splitSchedulePeriodTime(period);
     return {
       period: index + 1,
@@ -6985,9 +7712,29 @@ function schedulePeriodsFromConfig(config = state.schedulingConfig) {
       active: period.active !== false,
       content: period.type === "regular" ? "" : period.content || "",
       responsibleTeacherId: period.type === "regular" ? "" : period.responsibleTeacherId || "",
+      responsibleRole: period.type === "regular" ? "" : period.responsibleRole || "",
       responsibleTeacherName: period.responsibleTeacherName || "",
+      dayIndexes: normalizeScheduleDayIndexes(period.dayIndexes),
     };
   });
+}
+
+function schedulePeriodDayOptions(period, index) {
+  const selectedDays = normalizeScheduleDayIndexes(period.dayIndexes);
+  return SCHEDULE_DAY_OPTIONS.map(
+    (label, dayIndex) => `
+      <label class="period-day-chip ${dayIndex === 6 ? "sunday" : ""}">
+        <input
+          type="checkbox"
+          data-schedule-period-day
+          data-day-index="${dayIndex}"
+          ${selectedDays.includes(dayIndex) ? "checked" : ""}
+          aria-label="第 ${index + 1} 个时段在${label}生效"
+        />
+        <span>${label}</span>
+      </label>
+    `,
+  ).join("");
 }
 
 function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
@@ -7012,15 +7759,20 @@ function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
           </select>
         </label>
         <button class="ghost-button icon-danger" data-delete-schedule-period="${index}" type="button">删除</button>
+        <fieldset class="period-template-days">
+          <legend>生效星期</legend>
+          <div class="period-day-options">${schedulePeriodDayOptions(period, index)}</div>
+          <small>周日可显示并同步老师端，但只能作为固定日程，不参与自动排课或计薪。</small>
+        </fieldset>
         <div class="period-template-nonregular-fields" data-schedule-nonregular-fields ${isNonRegular ? "" : "hidden"}>
           <label class="field-label" for="periodContent-${index}">
             <span>固定内容</span>
             <input id="periodContent-${index}" data-schedule-period-content maxlength="80" value="${escapeHtml(period.content)}" placeholder="例如 ${escapeHtml(defaultNonRegularPeriodContent(period.type))}" />
           </label>
           <label class="field-label" for="periodResponsible-${index}">
-            <span>负责老师（可选）</span>
+            <span>负责岗位 / 老师（周日时段必选）</span>
             <select id="periodResponsible-${index}" data-schedule-period-responsible class="lesson-select">
-              ${nonRegularTeacherOptions(config, period.responsibleTeacherId)}
+              ${nonRegularTeacherOptions(config, period.responsibleTeacherId, period.responsibleRole)}
             </select>
           </label>
           <span class="period-template-nonregular-note">固定显示在最终课表中，不参与自动排课、冲突检测、课时或工资计算。</span>
@@ -7039,7 +7791,12 @@ function readSchedulePeriodsFromForm(options = {}) {
     const endTime = row.querySelector("[data-schedule-period-end]")?.value || "";
     const type = row.querySelector("[data-schedule-period-type]")?.value || "regular";
     const content = row.querySelector("[data-schedule-period-content]")?.value?.trim() || "";
-    const responsibleTeacherId = row.querySelector("[data-schedule-period-responsible]")?.value || "";
+    const responsibleSelection = row.querySelector("[data-schedule-period-responsible]")?.value || "";
+    const responsibleRole = responsibleSelection.startsWith("role:") ? responsibleSelection.slice(5) : "";
+    const responsibleTeacherId = responsibleRole ? "" : responsibleSelection;
+    const dayIndexes = Array.from(row.querySelectorAll("[data-schedule-period-day]:checked"))
+      .map((input) => Number.parseInt(input.dataset.dayIndex, 10))
+      .filter((dayIndex) => Number.isInteger(dayIndex));
     return {
       period: index + 1,
       label: `第 ${index + 1} 节`,
@@ -7051,6 +7808,8 @@ function readSchedulePeriodsFromForm(options = {}) {
       active: true,
       content: type === "regular" ? "" : content,
       responsibleTeacherId: type === "regular" ? "" : responsibleTeacherId,
+      responsibleRole: type === "regular" ? "" : responsibleRole,
+      dayIndexes,
     };
   });
 
@@ -7065,11 +7824,21 @@ function readSchedulePeriodsFromForm(options = {}) {
     if (startMinutes === null || endMinutes === null || startMinutes >= endMinutes) {
       throw new Error(`第 ${index + 1} 节时间无效，请确认开始和结束时间`);
     }
-    if (index > 0) {
-      const previousEnd = timeTextToMinutes(periods[index - 1].endTime);
-      if (previousEnd !== null && startMinutes < previousEnd) {
-        throw new Error(`第 ${index + 1} 节与上一节时间重叠`);
-      }
+    if (!period.dayIndexes.length) throw new Error(`第 ${index + 1} 个时段请至少选择一个生效星期`);
+    if (period.type === "regular" && period.dayIndexes.some((dayIndex) => dayIndex > 4)) {
+      throw new Error(`第 ${index + 1} 个时段包含周末；周六、周日只能设置为固定非正课日程`);
+    }
+    if (period.type !== "regular" && period.dayIndexes.includes(6) && !period.responsibleTeacherId && !period.responsibleRole) {
+      throw new Error(`第 ${index + 1} 个周日日程必须选择负责岗位或老师，发布后系统才能同步到老师终端`);
+    }
+    const overlappingIndex = periods.slice(0, index).findIndex((previous) => {
+      const previousStart = timeTextToMinutes(previous.startTime);
+      const previousEnd = timeTextToMinutes(previous.endTime);
+      const sharedDays = period.dayIndexes.some((dayIndex) => previous.dayIndexes.includes(dayIndex));
+      return sharedDays && previousStart !== null && previousEnd !== null && startMinutes < previousEnd && endMinutes > previousStart;
+    });
+    if (overlappingIndex >= 0) {
+      throw new Error(`第 ${index + 1} 个时段与第 ${overlappingIndex + 1} 个时段在同一生效日重叠`);
     }
   });
   return periods;
@@ -7077,15 +7846,15 @@ function readSchedulePeriodsFromForm(options = {}) {
 
 function addSchedulePeriodRow() {
   const periods = readSchedulePeriodsFromForm({ validate: false });
-  if (periods.length >= 12) {
-    showToast("每天最多配置 12 个可排课节次");
+  if (periods.length >= 48) {
+    showToast("每套作息最多配置 48 个日程时段");
     return;
   }
   const last = periods[periods.length - 1] || { endTime: "08:40" };
   const lastEnd = timeTextToMinutes(last.endTime) ?? 8 * 60 + 40;
   const startTime = minutesToTimeText(Math.min(lastEnd + 10, 23 * 60 + 10));
   const endTime = minutesToTimeText(Math.min((timeTextToMinutes(startTime) ?? lastEnd + 10) + 40, 23 * 60 + 59));
-  state.schedulingConfig.periods = [
+  saveActiveScheduleTemplatePeriods([
     ...periods,
     {
       period: periods.length + 1,
@@ -7096,8 +7865,9 @@ function addSchedulePeriodRow() {
       type: "regular",
       typeName: schedulePeriodTypeText("regular"),
       active: true,
+      dayIndexes: [...DEFAULT_SCHEDULE_DAY_INDEXES],
     },
-  ];
+  ]);
   renderAdminScheduling();
 }
 
@@ -7107,11 +7877,11 @@ function deleteSchedulePeriodRow(index) {
     showToast("请至少保留 1 个可排课节次");
     return;
   }
-  state.schedulingConfig.periods = periods.map((period, rowIndex) => ({
+  saveActiveScheduleTemplatePeriods(periods.map((period, rowIndex) => ({
     ...period,
     period: rowIndex + 1,
     label: `第 ${rowIndex + 1} 节`,
-  }));
+  })));
   renderAdminScheduling();
 }
 
@@ -7134,6 +7904,7 @@ async function saveSchedulePeriods() {
           termId: currentSchedulingTermId(),
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
+          highClassCategory: isHighSchedulingConfig() ? activeScheduleTemplateKey() : "",
           periods,
         },
       });
@@ -7152,7 +7923,7 @@ async function saveSchedulePeriods() {
     return;
   }
 
-  state.schedulingConfig.periods = periods;
+  saveActiveScheduleTemplatePeriods(periods);
   resetCourseDraftAfterConfigChange();
   showToast("作息时间已保存到试运行数据");
   render();
@@ -7160,6 +7931,23 @@ async function saveSchedulePeriods() {
 
 function classStructureFromConfig(config = state.schedulingConfig) {
   const classRows = config.classes || [];
+  if (isHighSchedulingConfig(config)) {
+    const highClassCounts = { a: 0, b: 0, c: 0 };
+    classRows.forEach((schoolClass) => {
+      const category = ["a", "b", "c"].includes(schoolClass.highClassCategory) ? schoolClass.highClassCategory : schoolClass.classType === "experimental" ? "b" : "c";
+      highClassCounts[category] += 1;
+    });
+    return {
+      highClassCounts: {
+        a: Number(config.classStructure?.highClassCounts?.a ?? highClassCounts.a),
+        b: Number(config.classStructure?.highClassCounts?.b ?? highClassCounts.b),
+        c: Number(config.classStructure?.highClassCounts?.c ?? highClassCounts.c),
+      },
+      totalCount: Number(config.classStructure?.totalCount ?? classRows.length),
+      regularCount: highClassCounts.c,
+      experimentalCount: highClassCounts.b,
+    };
+  }
   const inferredRegularCount = classRows.filter((schoolClass) => schoolClass.classType !== "experimental").length;
   const inferredExperimentalCount = classRows.filter((schoolClass) => schoolClass.classType === "experimental").length;
   return {
@@ -7170,6 +7958,20 @@ function classStructureFromConfig(config = state.schedulingConfig) {
 }
 
 function classStructurePreviewHtml(config, regularCount, experimentalCount) {
+  if (isHighSchedulingConfig(config)) {
+    const counts = typeof regularCount === "object" ? regularCount : classStructureFromConfig(config).highClassCounts;
+    const tags = [];
+    [
+      ["a", "A", "清北班"],
+      ["b", "B", "实验班"],
+      ["c", "C", "普通班"],
+    ].forEach(([key, code, label]) => {
+      for (let index = 1; index <= Number(counts[key] || 0); index += 1) {
+        tags.push(`<span class="class-structure-tag ${key === "a" ? "advanced" : key === "b" ? "experimental" : ""}">${escapeHtml(`${config.gradeName}${code}${index}班 · ${label}`)}</span>`);
+      }
+    });
+    return tags.length ? tags.join("") : `<span>至少保留 1 个高中班级</span>`;
+  }
   const tags = [];
   for (let index = 1; index <= regularCount; index += 1) {
     tags.push(`<span class="class-structure-tag">${escapeHtml(`${config.gradeName} ${index} 班`)}</span>`);
@@ -7182,22 +7984,31 @@ function classStructurePreviewHtml(config, regularCount, experimentalCount) {
 
 function classRoomCatalogFromConfig(config = state.schedulingConfig) {
   const counters = { regular: 0, experimental: 0 };
+  const highCounters = { a: 0, b: 0, c: 0 };
   return (config.classes || [])
     .slice()
     .sort((a, b) => Number(a.displayOrder || 0) - Number(b.displayOrder || 0))
     .map((schoolClass) => {
-      const classType = schoolClass.classType === "experimental" ? "experimental" : "regular";
+      const highClassCategory = isHighSchedulingConfig(config)
+        ? (["a", "b", "c"].includes(schoolClass.highClassCategory) ? schoolClass.highClassCategory : schoolClass.classType === "experimental" ? "b" : "c")
+        : "";
+      const classType = highClassCategory ? (highClassCategory === "b" ? "experimental" : "regular") : schoolClass.classType === "experimental" ? "experimental" : "regular";
       counters[classType] += 1;
+      if (highClassCategory) highCounters[highClassCategory] += 1;
       return {
         classType,
-        index: counters[classType],
+        highClassCategory,
+        index: highClassCategory ? highCounters[highClassCategory] : counters[classType],
         className: schoolClass.name || "",
         roomName: schoolClass.room || "",
       };
     });
 }
 
-function defaultClassRoomName(config, classType, index) {
+function defaultClassRoomName(config, classType, index, highClassCategory = "") {
+  if (isHighSchedulingConfig(config) && highClassCategory) {
+    return `${config.divisionName}${config.gradeName}${String(highClassCategory).toUpperCase()}${index}班`;
+  }
   return classType === "experimental"
     ? `${config.divisionName}${config.gradeName}实验${index}班教室`
     : `${config.divisionName}${config.gradeName}-${String(index).padStart(2, "0")}`;
@@ -7209,6 +8020,27 @@ function classRoomCatalogRows(
   experimentalCount = classStructureFromConfig(config).experimentalCount,
   sourceCatalog = classRoomCatalogFromConfig(config),
 ) {
+  if (isHighSchedulingConfig(config)) {
+    const counts = regularCount && typeof regularCount === "object" ? regularCount : classStructureFromConfig(config).highClassCounts;
+    const byKey = new Map(sourceCatalog.map((room) => [`${room.highClassCategory || ""}:${room.index}`, room]));
+    return [
+      ["a", "A", "清北班", "regular"],
+      ["b", "B", "实验班", "experimental"],
+      ["c", "C", "普通班", "regular"],
+    ].flatMap(([highClassCategory, code, label, classType]) =>
+      Array.from({ length: Number(counts[highClassCategory] || 0) }, (_, offset) => {
+        const index = offset + 1;
+        const existing = byKey.get(`${highClassCategory}:${index}`) || {};
+        return {
+          classType,
+          highClassCategory,
+          index,
+          className: `${config.gradeName}${code}${index}班 · ${label}`,
+          roomName: existing.roomName || defaultClassRoomName(config, classType, index, highClassCategory),
+        };
+      }),
+    );
+  }
   const byKey = new Map(sourceCatalog.map((room) => [`${room.classType}:${room.index}`, room]));
   const rows = [];
   for (let index = 1; index <= regularCount; index += 1) {
@@ -7248,6 +8080,7 @@ function classRoomCatalogHtml(
           <input
             data-class-room-name
             data-class-type="${escapeHtml(room.classType)}"
+            data-high-class-category="${escapeHtml(room.highClassCategory || "")}"
             data-class-index="${room.index}"
             type="text"
             value="${escapeHtml(room.roomName)}"
@@ -7413,6 +8246,20 @@ function updateRoomResourcePreview() {
 
 function updateClassStructurePreview() {
   const config = state.schedulingConfig;
+  if (isHighSchedulingConfig(config)) {
+    const highClassCounts = {
+      a: Math.max(Number.parseInt(document.querySelector("#highAClassCountInput")?.value || "0", 10) || 0, 0),
+      b: Math.max(Number.parseInt(document.querySelector("#highBClassCountInput")?.value || "0", 10) || 0, 0),
+      c: Math.max(Number.parseInt(document.querySelector("#highCClassCountInput")?.value || "0", 10) || 0, 0),
+    };
+    const preview = document.querySelector("#classStructurePreview");
+    if (preview) preview.innerHTML = classStructurePreviewHtml(config, highClassCounts);
+    const catalog = document.querySelector("#classRoomCatalog");
+    if (catalog) {
+      catalog.innerHTML = classRoomCatalogHtml(config, highClassCounts, 0, collectClassRoomCatalogFromForm());
+    }
+    return;
+  }
   const regularCount = Number.parseInt(document.querySelector("#regularClassCountInput")?.value || "0", 10);
   const experimentalCount = Number.parseInt(document.querySelector("#experimentalClassCountInput")?.value || "0", 10);
   const safeRegularCount = Number.isFinite(regularCount) ? Math.max(regularCount, 0) : 0;
@@ -7452,24 +8299,29 @@ function buildLocalSpecialRooms(config, roomCounts, roomCatalog = roomResourceCa
   });
 }
 
-function applyLocalClassStructure(regularCount, experimentalCount, classRoomCatalog = collectClassRoomCatalogFromForm()) {
+function applyLocalClassStructure(regularCount, experimentalCount, classRoomCatalog = collectClassRoomCatalogFromForm(), highClassCounts = null) {
   const config = state.schedulingConfig;
   const currentRoomCounts = roomResourceSummary(config).counts;
   const classes = [];
   const rooms = [];
-  const roomCatalogByKey = new Map(classRoomCatalog.map((room) => [`${room.classType}:${room.index}`, room]));
-  const pushClass = (classType, index, displayOrder) => {
-    const suffix = classType === "experimental" ? `E${String(index).padStart(2, "0")}` : String(index).padStart(2, "0");
+  const roomCatalogByKey = new Map(classRoomCatalog.map((room) => [`${room.highClassCategory || room.classType}:${room.index}`, room]));
+  const pushClass = (classType, index, displayOrder, highClassCategory = "") => {
+    const code = highClassCategory ? String(highClassCategory).toUpperCase() : "";
+    const suffix = highClassCategory ? `${code}${String(index).padStart(2, "0")}` : classType === "experimental" ? `E${String(index).padStart(2, "0")}` : String(index).padStart(2, "0");
     const classId = `${config.gradeId}-${suffix}`;
     const roomId = `${config.gradeId}-room-${suffix}`;
-    const name = classType === "experimental" ? `${config.gradeName}实验${index}班` : `${config.gradeName} ${index} 班`;
+    const name = highClassCategory
+      ? `${config.gradeName}${code}${index}班`
+      : classType === "experimental" ? `${config.gradeName}实验${index}班` : `${config.gradeName} ${index} 班`;
     const room =
-      roomCatalogByKey.get(`${classType}:${index}`)?.roomName ||
-      (classType === "experimental" ? `${config.gradeName}实验${index}班教室` : `${config.gradeName}-${suffix}`);
+      roomCatalogByKey.get(`${highClassCategory || classType}:${index}`)?.roomName ||
+      defaultClassRoomName(config, classType, index, highClassCategory);
     classes.push({
       id: classId,
       name,
       classType,
+      highClassCategory,
+      scheduleTemplateKey: highClassCategory || "default",
       displayOrder,
       room,
       roomId,
@@ -7482,17 +8334,28 @@ function applyLocalClassStructure(regularCount, experimentalCount, classRoomCata
       sourceClassId: classId,
     });
   };
-  for (let index = 1; index <= regularCount; index += 1) pushClass("regular", index, index);
-  for (let index = 1; index <= experimentalCount; index += 1) {
-    pushClass("experimental", index, regularCount + index);
+  if (isHighSchedulingConfig(config) && highClassCounts) {
+    let displayOrder = 0;
+    [["a", "regular"], ["b", "experimental"], ["c", "regular"]].forEach(([highClassCategory, classType]) => {
+      for (let index = 1; index <= Number(highClassCounts[highClassCategory] || 0); index += 1) {
+        displayOrder += 1;
+        pushClass(classType, index, displayOrder, highClassCategory);
+      }
+    });
+  } else {
+    for (let index = 1; index <= regularCount; index += 1) pushClass("regular", index, index);
+    for (let index = 1; index <= experimentalCount; index += 1) {
+      pushClass("experimental", index, regularCount + index);
+    }
   }
   rooms.push(...buildLocalSpecialRooms(config, currentRoomCounts));
   config.classes = classes;
   config.rooms = rooms;
   config.classCount = classes.length;
   config.classStructure = {
-    regularCount,
-    experimentalCount,
+    regularCount: highClassCounts ? Number(highClassCounts.c || 0) : regularCount,
+    experimentalCount: highClassCounts ? Number(highClassCounts.b || 0) : experimentalCount,
+    highClassCounts: highClassCounts || undefined,
     totalCount: classes.length,
   };
   config.subjects = (config.subjects || []).map((subject) => ({
@@ -7505,6 +8368,49 @@ function applyLocalClassStructure(regularCount, experimentalCount, classRoomCata
 }
 
 async function saveAdminClassStructure() {
+  if (isHighSchedulingConfig()) {
+    const highClassCounts = {
+      a: Number.parseInt(document.querySelector("#highAClassCountInput")?.value || "0", 10),
+      b: Number.parseInt(document.querySelector("#highBClassCountInput")?.value || "0", 10),
+      c: Number.parseInt(document.querySelector("#highCClassCountInput")?.value || "0", 10),
+    };
+    if (Object.values(highClassCounts).some((count) => !Number.isFinite(count) || count < 0 || count > 20)) {
+      showToast("清北班、实验班和普通班数量均需在 0-20 之间");
+      return;
+    }
+    if (highClassCounts.a + highClassCounts.b + highClassCounts.c < 1) {
+      showToast("当前年级至少保留 1 个高中班级");
+      return;
+    }
+    if (backendMode() && currentRole() === "admin") {
+      schedulingBackendState = { ...schedulingBackendState, loading: true, error: "" };
+      renderAdminScheduling();
+      try {
+        const result = await apiRequest("/api/scheduling/class-structure", {
+          method: "POST",
+          body: {
+            termId: currentSchedulingTermId(),
+            stageId: state.schedulingConfig.stageId,
+            grade: state.schedulingConfig.grade,
+            highClassCounts,
+            classRoomCatalog: collectClassRoomCatalogFromForm(),
+          },
+        });
+        applyBackendScheduleResult(result);
+        schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
+        showToast("高中 A/B/C 班级已保存，请重新配置老师并生成排课");
+      } catch (error) {
+        schedulingBackendState = { loaded: true, loading: false, error: error.message || "高中班级保存失败" };
+        showToast(schedulingBackendState.error);
+      }
+      render();
+      return;
+    }
+    applyLocalClassStructure(0, 0, collectClassRoomCatalogFromForm(), highClassCounts);
+    showToast("高中 A/B/C 班级已保存到试运行数据");
+    render();
+    return;
+  }
   const regularCount = Number.parseInt(document.querySelector("#regularClassCountInput").value || "0", 10);
   const experimentalCount = Number.parseInt(document.querySelector("#experimentalClassCountInput").value || "0", 10);
   if (!Number.isFinite(regularCount) || regularCount < 0 || regularCount > 30) {
@@ -7558,6 +8464,7 @@ async function saveAdminClassStructure() {
 function collectClassRoomCatalogFromForm() {
   return Array.from(document.querySelectorAll("[data-class-room-name]")).map((input) => ({
     classType: input.dataset.classType === "experimental" ? "experimental" : "regular",
+    highClassCategory: input.dataset.highClassCategory || "",
     index: Number.parseInt(input.dataset.classIndex || "0", 10),
     roomName: input.value.trim(),
   }));
@@ -8887,6 +9794,8 @@ function render() {
   renderStep("排课管理", renderAdminScheduling);
   renderStep("课表总览", renderAdminScheduleOverview);
   renderStep("学部校历", renderAcademicCalendar);
+  renderStep("考勤管理", renderAttendanceManagement);
+  renderStep("跟车路线", renderTransportRoutes);
   renderStep("费用预算", renderLeadershipBudget);
   renderStep("人员列表", renderPersonnelList);
   renderStep("教师导入", renderTeacherImport);
@@ -8975,6 +9884,8 @@ function renderShell() {
             ? `${account.department} · 档案管理`
             : role === "division_head"
               ? `${account.department} · ${isTeaching ? `${teacher?.subject || "任课"} · 主任兼任课` : "人事审批"}`
+              : role === "security_manager"
+                ? `${account.department} · 跟车路线与生活老师排班`
               : `${account.department} · 排课管理`;
   document.querySelector("#accountSummaryTitle").textContent = accountTitle;
   document.querySelector("#accountSummaryMeta").textContent =
@@ -9020,6 +9931,8 @@ function renderNotices() {
         ? "行政通知栏"
         : role === "system_admin"
           ? "系统通知栏"
+          : role === "security_manager"
+            ? "安全部通知栏"
           : "财务通知栏";
   const unread = notices.filter((notice) => !notice.read).length;
   count.textContent = unread ? `${unread} 条未读 · 共 ${notices.length} 条` : `${notices.length} 条`;
@@ -9115,7 +10028,7 @@ function renderDashboard() {
   const todayPanel = document.querySelector("#todayTasksPanel");
   if (todayPanel) todayPanel.hidden = true;
   const dashboardTitle = document.querySelector("#dashboardTitle");
-  if (dashboardTitle) dashboardTitle.textContent = "下一节课";
+  if (dashboardTitle) dashboardTitle.textContent = "下一项日程";
   const teacherId = isTeacherAccount() ? currentTeacherId() : state.teachers[0].id;
   const month = isTeacherAccount() ? defaultTeacherPayrollMonth() : currentSettlementMonth();
   if (backendMode() && isTeacherAccount()) {
@@ -9189,10 +10102,10 @@ function renderDashboard() {
     detail.innerHTML = `
       <strong>${nextLesson.className} · ${nextLesson.course}</strong>
       <div class="detail-grid">
-        <div class="detail-cell"><span>上课时间</span>${formatDate(nextLesson.date)} ${nextLesson.time}</div>
-        <div class="detail-cell"><span>教室</span>${nextLesson.room}</div>
-        <div class="detail-cell"><span>课时类型</span>${lessonTypeLabel[nextLesson.type]}</div>
-        <div class="detail-cell"><span>计薪</span>排给你的课自动计入课时费</div>
+        <div class="detail-cell"><span>时间</span>${formatDate(nextLesson.date)} ${nextLesson.time}</div>
+        <div class="detail-cell"><span>地点</span>${nextLesson.room || "按日程执行"}</div>
+        <div class="detail-cell"><span>日程类型</span>${lessonTypeLabel[nextLesson.type]}</div>
+        <div class="detail-cell"><span>计薪</span>${nextLesson.nonPayable ? "固定日程，不计入课时工资" : "排给你的课自动计入课时费"}</div>
       </div>
     `;
   }
@@ -9210,13 +10123,14 @@ function lifeDutyStatusTag(duty) {
 }
 
 function lifeDutyTaskRow(duty) {
+  const fixedDuty = duty.nonRegular && !duty.isLifeDuty;
   return `
     <tr>
       <td data-label="时间">${escapeHtml(duty.time)}</td>
       <td class="row-title" data-label="服务对象">${escapeHtml(duty.className)}</td>
       <td data-label="接送任务">${escapeHtml(duty.course)}</td>
-      <td data-label="服务地点">${escapeHtml(duty.room)}</td>
-      <td data-label="排班类型">学生接送</td>
+      <td data-label="服务地点">${escapeHtml(duty.room || "按日程执行")}</td>
+      <td data-label="排班类型">${fixedDuty ? "固定日程" : "学生接送"}</td>
       <td data-label="状态">${lifeDutyStatusTag(duty)}</td>
       <td class="muted" data-label="说明">非课时工作，不计入课时工资</td>
     </tr>
@@ -9236,7 +10150,7 @@ function renderLifeTeacherDashboard() {
       ? teacherPayrollState.data
       : null;
   const duties = teacherLessons(teacherId)
-    .filter((item) => item.isLifeDuty || item.type === "lifeDuty")
+    .filter((item) => item.isLifeDuty || item.type === "lifeDuty" || item.nonRegular)
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const arrivalCount = duties.filter((item) => item.dutyType === "arrival").length;
   const departureCount = duties.filter((item) => item.dutyType === "departure").length;
@@ -9263,13 +10177,13 @@ function renderLifeTeacherDashboard() {
   const title = document.querySelector("#dashboardTitle");
   const status = document.querySelector("#nextLessonStatus");
   const detail = document.querySelector("#nextLessonDetail");
-  if (title) title.textContent = "下一项接送任务";
+  if (title) title.textContent = "下一项排班任务";
   if (!nextDuty) {
     status.textContent = "本周已结束";
     status.className = "status-pill done";
     detail.innerHTML = `
       <strong>本周暂无待执行接送班次</strong>
-      <p class="muted">新的正式学期开始后，系统会按工作日自动生成早晨和放学接送排班。</p>
+      <p class="muted">安全部主管发布路线表后，早晨接与放学送班次会自动同步到这里。</p>
     `;
   } else {
     status.textContent = nextDuty.date === todayKey() ? "今日待执行" : "待执行";
@@ -9522,6 +10436,11 @@ function renderSchedule() {
     renderLifeTeacherSchedule({ summary, grid, select, termTitle, termRange, range, syncStatus });
     return;
   }
+  const lifeRouteRunList = document.querySelector("#lifeRouteRunList");
+  if (lifeRouteRunList) {
+    lifeRouteRunList.hidden = true;
+    lifeRouteRunList.innerHTML = "";
+  }
 
   const lessons = teacherLessons(currentTeacherId()).sort((a, b) =>
     `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`),
@@ -9541,7 +10460,9 @@ function renderSchedule() {
     state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   }
   const weekLessons = lessons.filter((lesson) => weekDates.includes(lesson.date));
-  const payableCount = weekLessons.filter((lesson) => lesson.status !== "cancelled").length;
+  const payableCount = weekLessons
+    .filter((lesson) => lesson.status !== "cancelled" && !lesson.nonPayable)
+    .reduce((sum, lesson) => sum + Number(lesson.units || 0), 0);
   const cancelledCount = weekLessons.filter((lesson) => lesson.status === "cancelled").length;
 
   select.innerHTML = weeks
@@ -9563,7 +10484,7 @@ function renderSchedule() {
   range.textContent = `${formatWeekRange(selectedWeek)} · 自然周排班`;
 
   summary.innerHTML = [
-    ["本周课程", `${weekLessons.length} 节`, "当前自然周"],
+    ["本周日程", `${weekLessons.length} 项`, "课程与固定安排"],
     ["计薪课时", `${payableCount} 节`, "排给你的课都计薪"],
     ["已取消", `${cancelledCount} 节`, "请假未安排代课"],
   ]
@@ -9598,7 +10519,7 @@ function renderLifeTeacherSchedule({ summary, grid, select, termTitle, termRange
   const teacherId = currentTeacherId();
   const teacher = teacherById(teacherId);
   const duties = teacherLessons(teacherId)
-    .filter((item) => item.isLifeDuty || item.type === "lifeDuty")
+    .filter((item) => item.isLifeDuty || item.type === "lifeDuty" || item.nonRegular)
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const weekOptions = availableScheduleWeeks(duties, teacherId);
   const weeks = weekOptions.map((week) => week.weekStart);
@@ -9611,8 +10532,10 @@ function renderLifeTeacherSchedule({ summary, grid, select, termTitle, termRange
     state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   }
   const weekDuties = duties.filter((item) => weekDates.includes(item.date));
+  const routeRunList = document.querySelector("#lifeRouteRunList");
   const arrivalCount = weekDuties.filter((item) => item.dutyType === "arrival").length;
   const departureCount = weekDuties.filter((item) => item.dutyType === "departure").length;
+  const fixedCount = weekDuties.filter((item) => item.nonRegular && !item.isLifeDuty).length;
   const studentCount = Math.max(0, Number(teacher?.salaryProfile?.roles?.lifeTeacherStudentCount || 0));
 
   if (syncStatus) {
@@ -9639,6 +10562,7 @@ function renderLifeTeacherSchedule({ summary, grid, select, termTitle, termRange
     ["本周接送班次", `${weekDuties.length} 个`, "工作日早晨、放学各一班"],
     ["早晨接送", `${arrivalCount} 个`, "学生到校接送"],
     ["放学接送", `${departureCount} 个`, "学生离校接送"],
+    ["固定日程", `${fixedCount} 项`, "含周日非课时安排"],
     ["负责学生", `${studentCount} 名`, "人事档案维护"],
   ]
     .map(
@@ -9662,6 +10586,57 @@ function renderLifeTeacherSchedule({ summary, grid, select, termTitle, termRange
   const selectedIndex = weekDates.indexOf(state.selectedScheduleDate);
   grid.innerHTML = scheduleWeeklyCalendarHtml(weekDates, grouped, state.selectedScheduleDate, weekDuties);
   focusWeeklyCalendarDate(grid, selectedIndex);
+
+  if (!routeRunList) return;
+  routeRunList.hidden = false;
+  const routeRuns = [...weekDuties.reduce((rows, duty) => {
+    if (!duty.routeRunId) return rows;
+    const run = rows.get(duty.routeRunId) || {
+      id: duty.routeRunId,
+      routeName: duty.routeName || duty.className,
+      date: duty.date,
+      distanceTier: duty.distanceTier,
+      status: duty.transportRunStatus || "scheduled",
+      morning: null,
+      afternoon: null,
+    };
+    run[duty.routeLeg] = duty;
+    rows.set(duty.routeRunId, run);
+    return rows;
+  }, new Map()).values()].sort((left, right) => `${left.date}:${left.routeName}`.localeCompare(`${right.date}:${right.routeName}`, "zh-CN"));
+  const legHtml = (duty, label) => {
+    if (!duty) return "";
+    const status = duty.routeLegStatus || "scheduled";
+    const statusLabel = { scheduled: "待签到", checked_in: "已签到", completed: "已完成", cancelled: "已取消" }[status] || status;
+    const canCheckIn = duty.date === todayKey() && status === "scheduled";
+    const canComplete = duty.date === todayKey() && status === "checked_in";
+    return `
+      <div class="life-route-leg">
+        <div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(duty.time)} · ${escapeHtml(statusLabel)}</span></div>
+        ${canCheckIn ? `<button class="ghost-button compact-button" data-life-route-leg="${escapeHtml(duty.backendId)}" data-life-route-action="check_in" type="button">签到</button>` : ""}
+        ${canComplete ? `<button class="primary-button compact-button" data-life-route-leg="${escapeHtml(duty.backendId)}" data-life-route-action="complete" type="button">确认完成</button>` : ""}
+      </div>
+    `;
+  };
+  routeRunList.innerHTML = routeRuns.length
+    ? `
+      <div class="life-route-run-heading"><strong>本周跟车班次</strong><span>每趟路线需完成早晨接与放学送，才计入接送补助。</span></div>
+      <div class="life-route-run-grid">
+        ${routeRuns.map((run) => {
+          const canTransfer = run.date >= todayKey() && run.status === "scheduled";
+          const statusLabel = { scheduled: "待执行", in_progress: "执行中", completed: "已完成", cancelled: "已取消" }[run.status] || run.status;
+          return `
+            <article class="life-route-run-card">
+              <div class="life-route-run-title"><div><strong>${escapeHtml(run.routeName)}</strong><span>${escapeHtml(run.date)} · ${escapeHtml(transportTierLabel(run.distanceTier))}</span></div><span class="status-pill ${run.status === "completed" ? "done" : run.status === "in_progress" ? "warning" : "locked"}">${escapeHtml(statusLabel)}</span></div>
+              ${legHtml(run.morning, "早晨接")}
+              ${legHtml(run.afternoon, "放学送")}
+              ${canTransfer ? `<div class="life-route-run-actions"><button class="ghost-button compact-button" data-life-route-transfer="${escapeHtml(run.morning?.backendId || run.afternoon?.backendId || "")}" type="button">申请调班</button></div>` : ""}
+            </article>
+          `;
+        }).join("")}
+      </div>
+    `
+    : '<div class="empty-state">本周暂无已发布的跟车班次。请等待安全部主管发布路线表。</div>';
 }
 
 function termStatusText(status = "planned", term = null) {
@@ -9857,23 +10832,47 @@ function renderAdminScheduling() {
 
   document.querySelector("#adminDivisionSelect").innerHTML = schedulingDivisionOptions(config.divisionId);
   document.querySelector("#adminGradeSelect").innerHTML = schedulingGradeOptions(config.divisionId, config.gradeId);
+  renderSchedulingTermSelector(config);
   const classStructure = classStructureFromConfig(config);
-  document.querySelector("#regularClassCountInput").value = classStructure.regularCount;
-  document.querySelector("#experimentalClassCountInput").value = classStructure.experimentalCount;
-  document.querySelector("#classStructureHelp").textContent =
-    `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；下方普通教室目录会用于班级课表、签到教室和换教室。`;
-  document.querySelector("#classStructurePreview").innerHTML = classStructurePreviewHtml(
-    config,
-    classStructure.regularCount,
-    classStructure.experimentalCount,
-  );
-  document.querySelector("#classRoomCatalog").innerHTML = classRoomCatalogHtml(
-    config,
-    classStructure.regularCount,
-    classStructure.experimentalCount,
-  );
+  const highScheduling = isHighSchedulingConfig(config);
+  document.querySelector("#standardClassStructureControls").hidden = highScheduling;
+  document.querySelector("#highClassStructureControls").hidden = !highScheduling;
+  if (highScheduling) {
+    const highClassCounts = classStructure.highClassCounts || { a: 0, b: 0, c: 0 };
+    document.querySelector("#highAClassCountInput").value = highClassCounts.a;
+    document.querySelector("#highBClassCountInput").value = highClassCounts.b;
+    document.querySelector("#highCClassCountInput").value = highClassCounts.c;
+    document.querySelector("#classStructureHelp").textContent =
+      `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；A 类为清北班、B 类为实验班、C 类为普通班，每类可绑定独立作息表。`;
+    document.querySelector("#classStructurePreview").innerHTML = classStructurePreviewHtml(config, highClassCounts);
+    document.querySelector("#classRoomCatalog").innerHTML = classRoomCatalogHtml(config, highClassCounts, 0);
+  } else {
+    document.querySelector("#regularClassCountInput").value = classStructure.regularCount;
+    document.querySelector("#experimentalClassCountInput").value = classStructure.experimentalCount;
+    document.querySelector("#classStructureHelp").textContent =
+      `${config.divisionName}${config.gradeName}当前 ${classStructure.totalCount} 个班；下方普通教室目录会用于班级课表、签到教室和换教室。`;
+    document.querySelector("#classStructurePreview").innerHTML = classStructurePreviewHtml(
+      config,
+      classStructure.regularCount,
+      classStructure.experimentalCount,
+    );
+    document.querySelector("#classRoomCatalog").innerHTML = classRoomCatalogHtml(
+      config,
+      classStructure.regularCount,
+      classStructure.experimentalCount,
+    );
+  }
+  const templateWrap = document.querySelector("#scheduleTemplateSelectorWrap");
+  templateWrap.hidden = !highScheduling;
+  if (highScheduling) {
+    const activeKey = activeScheduleTemplateKey(config);
+    document.querySelector("#scheduleTemplateSelect").innerHTML = (config.scheduleTemplateOptions || [])
+      .map((template) => `<option value="${escapeHtml(template.key)}" ${template.key === activeKey ? "selected" : ""}>${escapeHtml(template.label)} · ${Number(template.classCount || 0)} 个班</option>`)
+      .join("");
+  }
+  const activeTemplate = (config.scheduleTemplateOptions || []).find((item) => item.key === activeScheduleTemplateKey(config));
   document.querySelector("#periodTemplateHelp").textContent =
-    `${config.divisionName}${config.gradeName}当前正课 ${regularSchedulePeriods(config).length} 个自动排课节次，非正课 ${(schedulePeriodsFromConfig(config).filter((period) => period.type !== "regular")).length} 个固定显示时段；午休、大课间通过相邻节次之间的空档体现。`;
+    `${highScheduling ? `${activeTemplate?.label || "当前班级类别"}：` : ""}${config.divisionName}${config.gradeName}当前正课 ${regularSchedulePeriods(config).length} 个自动排课节次，非正课 ${(schedulePeriodsFromConfig(config).filter((period) => period.type !== "regular")).length} 个固定显示时段；午休、大课间通过相邻节次之间的空档体现。高中共享老师和专用教室按实际钟点校验冲突。`;
   document.querySelector("#periodTemplateList").innerHTML = schedulePeriodTemplateHtml(config);
   document.querySelector("#roomResourceHelp").textContent =
     `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室；下方目录名称会用于排课、换教室和教室二维码。`;
@@ -9883,7 +10882,9 @@ function renderAdminScheduling() {
   document.querySelector("#adminSchedulingTitle").textContent = `${config.divisionName}${config.gradeName}自动排课`;
   document.querySelector("#adminSchedulingIntro").textContent =
     `当前为${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}，共 ${config.classCount} 个班，按自然周 ${formatWeekRange(config.weekStart)} 生成课表。`;
-  renderTermManagement();
+  // 教学学期由学部主任在“学部校历”维护。排课页只保留已有正式学期的选择器，
+  // 不再展示旧的学期新建、切换或归档入口。
+  document.querySelector("#termManagementPanel").hidden = true;
   document.querySelector("#adminScopeText").textContent =
     `${config.divisionName}${config.gradeName} ${config.classCount} 个班，${config.subjects
       .map((subject) => subject.name)
@@ -9984,7 +10985,10 @@ function renderAdminScheduling() {
     .join("");
   renderScheduleAdjustmentPanel(selectedClassAssignments, selectedAssignment, draft);
   renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
-  document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassDisplayAssignments, { readonly: false });
+  document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassDisplayAssignments, {
+    readonly: false,
+    periods: schedulePeriodsForSchedulingClass(config, selectedClassId),
+  });
 
   const generateButton = document.querySelector("#generateSchedule");
   generateButton.disabled = schedulingBackendState.loading || !readiness.canGenerate;
@@ -9997,6 +11001,7 @@ function renderAdminScheduling() {
   confirmButton.title = readiness.publishReason || "";
   document.querySelector("#saveCourseRules").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
+  document.querySelector("#saveHighClassStructure").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveSchedulePeriods").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#addSchedulePeriod").disabled = termReadOnly || schedulingBackendState.loading;
   document.querySelector("#saveRoomResources").disabled = termReadOnly || schedulingBackendState.loading;
@@ -10107,7 +11112,7 @@ function renderAdminScheduleOverview() {
     <article class="metric">
       <span>自然周</span>
       <strong>${escapeHtml(formatWeekRange(config.weekStart))}</strong>
-      <small>${config.periods.length} 个节次</small>
+      <small>${schedulePeriodsForSchedulingClass(config, selectedClassId).length} 个节次</small>
     </article>
     <article class="metric">
       <span>本班课时</span>
@@ -10121,7 +11126,10 @@ function renderAdminScheduleOverview() {
     </article>
   `;
   grid.innerHTML = selectedClassAssignments.length
-    ? adminScheduleGrid(selectedClassAssignments, { readonly: true })
+    ? adminScheduleGrid(selectedClassAssignments, {
+        readonly: true,
+        periods: schedulePeriodsForSchedulingClass(config, selectedClassId),
+      })
     : currentVersion
       ? `<div class="empty-state schedule-overview-empty">当前学部年级已有发布版本 V${escapeHtml(currentVersion.versionNumber)}，但课表明细暂未载入。请回到“排课管理”重新读取当前学部年级。</div>`
       : `<div class="empty-state schedule-overview-empty">当前学部年级还没有课表，请先到“排课管理”生成草稿或发布正式课表。</div>`;
@@ -10225,7 +11233,7 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
     : `<option value="">暂无日期</option>`;
 
   periodSelect.innerHTML = selectedAssignment
-    ? state.schedulingConfig.periods
+    ? schedulePeriodsForSchedulingClass(state.schedulingConfig, selectedAssignment.classId)
         .map(
           (period) => `
             <option value="${period.period}" ${period.period === selectedAssignment.period ? "selected" : ""}>
@@ -11147,7 +12155,8 @@ function adminCourseRuleItem(rule) {
             type="number"
             min="0"
             max="12"
-            value="${Number(rule.weeklyLessons || 0)}"
+            step="0.5"
+            value="${Number(rule.sourceWeeklyLessons ?? rule.weeklyLessons ?? 0)}"
           />
         </label>
         <label class="field-label compact-field" for="courseDuration-${subjectId}">
@@ -11464,7 +12473,7 @@ function adminSubjectConfigItem(config) {
                   (subject) => `
                     <th>
                       <strong>${escapeHtml(subject.name)}</strong>
-                      <span>每周 ${Number(subject.weeklyLessons || 0)} 节</span>
+                      <span>每周 ${Number(subject.sourceWeeklyLessons ?? subject.weeklyLessons ?? 0)} 节</span>
                     </th>
                   `,
                 )
@@ -11973,13 +12982,19 @@ function conflictItem(conflict) {
 function configuredNonRegularScheduleItems(config, classId = "") {
   const className = (config.classes || []).find((schoolClass) => schoolClass.id === classId)?.name || "";
   const teachers = config.nonRegularTeachers || config.teachers || [];
-  return (config.periods || [])
+  return schedulePeriodsForSchedulingClass(config, classId)
     .filter((period) => period.type !== "regular" && period.active !== false)
     .flatMap((period) =>
-      weekDateKeys(config.weekStart)
-        .slice(0, 5)
-        .map((date) => {
+      normalizeScheduleDayIndexes(period.dayIndexes)
+        .map((dayIndex) => {
+          const date = weekDateKeys(config.weekStart)[dayIndex];
           const teacher = teachers.find((item) => item.id === period.responsibleTeacherId);
+          const roleName =
+            period.responsibleRole === "homeroom"
+              ? "各班班主任"
+              : period.responsibleRole === "life_teacher"
+                ? "本学部生活老师"
+                : "";
           return {
             id: `NONREG-PREVIEW-${classId}-${date}-${period.period}`,
             nonRegular: true,
@@ -11991,7 +13006,7 @@ function configuredNonRegularScheduleItems(config, classId = "") {
             type: period.type,
             typeName: schedulePeriodTypeText(period.type),
             subjectName: period.content || defaultNonRegularPeriodContent(period.type),
-            teacherName: teacher?.name || period.responsibleTeacherName || "未指定负责人",
+            teacherName: teacher?.name || roleName || period.responsibleTeacherName || "未指定负责人",
             room: "固定非正课时段",
           };
         }),
@@ -11999,7 +13014,7 @@ function configuredNonRegularScheduleItems(config, classId = "") {
 }
 
 function adminScheduleGrid(assignments, options = {}) {
-  const weekDates = weekDateKeys(state.schedulingConfig.weekStart).slice(0, 5);
+  const weekDates = weekDateKeys(state.schedulingConfig.weekStart);
   const grouped = weekDates.reduce((map, date) => {
     map.set(date, new Map());
     return map;
@@ -12012,7 +13027,7 @@ function adminScheduleGrid(assignments, options = {}) {
     dayMap.get(periodKey).push(assignment);
   });
 
-  const dayNames = ["周一", "周二", "周三", "周四", "周五"];
+  const dayNames = SCHEDULE_DAY_OPTIONS;
   return weekDates
     .map((date, index) => {
       const dayMap = grouped.get(date);
@@ -12025,7 +13040,8 @@ function adminScheduleGrid(assignments, options = {}) {
             <small>${dayCount ? `${dayCount} 节课` : "未排课"}</small>
           </header>
           <div class="schedule-items admin-schedule-slots">
-            ${state.schedulingConfig.periods
+            ${(options.periods || state.schedulingConfig.periods || [])
+              .filter((period) => schedulePeriodAppliesOnDay(period, index))
               .map((period) => {
                 const periodAssignments = dayMap.get(Number(period.period)) || [];
                 return `
@@ -12035,7 +13051,7 @@ function adminScheduleGrid(assignments, options = {}) {
                     data-schedule-drop-period="${period.period}"
                   >
                     <div class="schedule-slot-label">
-                      <strong>第 ${period.period} 节</strong>
+                      <strong>${period.type === "regular" ? `第 ${period.period} 节` : escapeHtml(period.typeName || schedulePeriodTypeText(period.type))}</strong>
                       <span>${escapeHtml(period.time)}</span>
                       <em data-schedule-drop-hint></em>
                     </div>
@@ -12049,7 +13065,7 @@ function adminScheduleGrid(assignments, options = {}) {
                   </div>
                 `;
               })
-              .join("")}
+              .join("") || `<div class="schedule-empty compact">当天无日程时段</div>`}
           </div>
         </article>
       `;
@@ -13676,7 +14692,7 @@ function renderPayrollHistoryTable(data = null) {
 }
 
 function renderPayrollHistory() {
-  if (!isFinanceRole()) return;
+  if (!canViewPayrollHistory()) return;
   applyPayrollExportAccess();
   if (!backendMode()) {
     renderPayrollHistoryControls();
@@ -14456,6 +15472,7 @@ function actionCell(lesson) {
   if (lesson.status === "cancelled") {
     return `<span class="muted">${escapeHtml(lesson.cancelReason || "已取消，不计薪")}</span>`;
   }
+  if (lesson.nonPayable) return `<span class="muted">固定日程，不计课时工资</span>`;
   return `<span class="muted">计入课时费</span>`;
 }
 
@@ -14466,6 +15483,9 @@ function switchView(viewName) {
     return;
   }
   state.activeView = viewName;
+  // 长页面之间切换时回到页面顶部；否则手机端从报表/排课页切到另一个模块会停在
+  // 上一页的滚动高度，看起来像新页面缺了标题和上半部分内容。
+  window.scrollTo({ top: 0, left: 0, behavior: "instant" });
   render();
   // 审批中心首次进入时按需加载模板与列表
   if (viewName === "approvalSettings" && backendMode() && !oaAdminState.templates.length) {
@@ -14476,6 +15496,12 @@ function switchView(viewName) {
   }
   if (viewName === "academicCalendar" && backendMode()) {
     if (!academicCalendarState.loaded && !academicCalendarState.loading) loadAcademicCalendar();
+  }
+  if (viewName === "attendanceManagement" && backendMode()) {
+    if (!attendanceUploadState.loaded && !attendanceUploadState.loading) loadAttendanceUploads();
+  }
+  if (viewName === "transportRoutes" && backendMode()) {
+    if (!transportRouteState.loaded && !transportRouteState.loading) loadTransportRoutes();
   }
   // 统计报表首次进入时按需加载，避免每次 render 都打接口
   if (viewName === "reports" && backendMode()) {
@@ -14590,11 +15616,11 @@ async function authenticate(username, password) {
       loginButton.disabled = false;
       return;
     } catch (error) {
-      const demoAccepted = authenticateDemo(trimmedUsername, password, error.message || "后端登录失败");
       loginButton.disabled = false;
-      if (!demoAccepted && error.message) {
-        document.querySelector("#loginError").textContent = error.message;
-      }
+      // 通过 http(s) 打开时，登录必须以服务端认证结果为准。过去这里会在 401 后
+      // 悄悄切回内置 Demo 账号，造成“页面能进去、实际却在看浏览器假数据”的假成功。
+      // 纯文件模式仍由下方的离线账号逻辑支持演示。
+      document.querySelector("#loginError").textContent = error.message || "后端登录失败";
       return;
     }
   }
@@ -14604,6 +15630,16 @@ async function authenticate(username, password) {
 }
 
 async function quickLoginDemo(username) {
+  // 总校财务已由真实名册人员接管，继续提交旧 finance / 123456 既会失败，
+  // 更不能把真实临时口令写进浏览器代码。点击时只帮用户填入正式用户名，
+  // 密码仍由本人输入；学校内网环境会整体隐藏这一开发区。
+  if (apiEnabled() && username === "finance") {
+    document.querySelector("#loginUsername").value = "fy260907-0019";
+    document.querySelector("#loginPassword").value = "";
+    document.querySelector("#loginError").textContent = "总校财务账号已由诸新龙接管，请输入本人当前密码";
+    document.querySelector("#loginPassword").focus();
+    return;
+  }
   const password = "123456";
   document.querySelector("#loginUsername").value = username;
   document.querySelector("#loginPassword").value = password;
@@ -14668,11 +15704,12 @@ function openDialog(config = {}) {
         } else if (field.type === "multiselect") {
           // 多选用勾选列表而非 <select multiple>：后者要按住 Ctrl 才能多选，
           // 教务不会知道这一点，最后只抄送出去一个人。
+          const selectedValues = new Set((Array.isArray(field.value) ? field.value : []).map((value) => String(value)));
           control = `<div class="dialog-checklist" data-dialog-field="${escapeHtml(field.name)}" data-multi="1">${(field.options || [])
             .map(
               (opt, i) =>
                 `<label class="dialog-check"><input type="checkbox" value="${escapeHtml(opt.value)}" ${
-                  i === 0 && field.autoFirst ? "checked" : ""
+                  selectedValues.has(String(opt.value)) || (!selectedValues.size && i === 0 && field.autoFirst) ? "checked" : ""
                 } /><span>${escapeHtml(opt.label)}</span></label>`,
             )
             .join("")}</div>`;
@@ -15083,6 +16120,42 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const editTransportRouteButton = event.target.closest("[data-edit-transport-route]");
+  if (editTransportRouteButton) {
+    const route = (transportRouteState.routes || []).find((item) => item.id === editTransportRouteButton.dataset.editTransportRoute);
+    if (route) await openTransportRouteDialog(route);
+    return;
+  }
+
+  const publishTransportRouteButton = event.target.closest("[data-publish-transport-route]");
+  if (publishTransportRouteButton) {
+    await publishTransportRoute(publishTransportRouteButton.dataset.publishTransportRoute);
+    return;
+  }
+
+  const reviewTransportTransferButton = event.target.closest("[data-review-transport-transfer]");
+  if (reviewTransportTransferButton) {
+    await reviewTransportTransfer(
+      reviewTransportTransferButton.dataset.reviewTransportTransfer,
+      reviewTransportTransferButton.dataset.approved === "true",
+    );
+    return;
+  }
+
+  const lifeRouteLegButton = event.target.closest("[data-life-route-leg]");
+  if (lifeRouteLegButton) {
+    const lesson = state.lessons.find((item) => item.backendId === lifeRouteLegButton.dataset.lifeRouteLeg);
+    if (lesson) await operateLifeRouteLeg(lesson, lifeRouteLegButton.dataset.lifeRouteAction);
+    return;
+  }
+
+  const lifeRouteTransferButton = event.target.closest("[data-life-route-transfer]");
+  if (lifeRouteTransferButton) {
+    const lesson = state.lessons.find((item) => item.backendId === lifeRouteTransferButton.dataset.lifeRouteTransfer);
+    if (lesson) await openLifeRouteTransferDialog(lesson);
+    return;
+  }
+
   if (event.target.closest("#addSalaryManualItem")) {
     addSalaryManualItemFromInputs();
     return;
@@ -15340,8 +16413,10 @@ const NAV_ICON_PATHS = {
   tasks: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
   schedule: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/>',
   adminScheduling: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M9 15l2 2 4-4"/>',
+  transportRoutes: '<path d="M3 18h18"/><path d="M5 18V9l7-5 7 5v9"/><path d="M9 18v-5h6v5"/><path d="M3 9h18"/>',
   adminScheduleOverview: '<rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/>',
   academicCalendar: '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M8 14h3M8 18h8"/>',
+  attendanceManagement: '<path d="M7 3h10l4 4v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M17 3v5h5M9 13l2 2 4-4M9 18h6"/>',
   personnel: '<circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16.5 4.9a3.5 3.5 0 0 1 0 6.2M17.8 14.3c2 .8 3.2 2.6 3.2 5.7"/>',
   teacherImport: '<path d="M12 15V4m0 0 4 4m-4-4L8 8"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
   notifications: '<path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 20a2 2 0 0 0 4 0"/>',
@@ -17745,8 +18820,10 @@ const APPROVAL_BUILDER_APPROVER_ACCOUNT_FALLBACK = [
   { accountId: "ACC-HEAD-MIDDLE", name: "初中部负责人", department: "初中部", title: "初中部主任", role: "division_head", scopeStageIds: ["middle"] },
   { accountId: "ACC-HEAD-HIGH", name: "高中部负责人", department: "高中部", title: "高中部主任", role: "division_head", scopeStageIds: ["high"] },
   { accountId: "ACC-SCHEDULER-KINDERGARTEN", name: "幼儿园排课负责人", department: "幼儿园", title: "幼儿园排课负责人", role: "admin", scopeStageIds: ["kindergarten"] },
-  { accountId: "ACC-SCHEDULER-PRIMARY", name: "小学部排课负责人", department: "小学部", title: "小学部排课负责人", role: "admin", scopeStageIds: ["primary"] },
-  { accountId: "ACC-SCHEDULER-MIDDLE", name: "初中部排课负责人", department: "初中部", title: "初中部排课负责人", role: "admin", scopeStageIds: ["middle"] },
+  { accountId: "ACC-SCHEDULER-PRIMARY", name: "小学部排课负责人（高段）", department: "小学部", title: "小学部排课负责人（4-6年级）", role: "admin", scopeStageIds: ["primary"], schedulingGradeIds: ["elementary-g4", "elementary-g5", "elementary-g6"] },
+  { accountId: "ACC-SCHEDULER-PRIMARY-LOW", name: "小学部排课负责人（低段）", department: "小学部", title: "小学部排课负责人（1-3年级）", role: "admin", scopeStageIds: ["primary"], schedulingGradeIds: ["elementary-g1", "elementary-g2", "elementary-g3"] },
+  { accountId: "ACC-SCHEDULER-MIDDLE", name: "初中部排课负责人（一）", department: "初中部", title: "初中部排课负责人", role: "admin", scopeStageIds: ["middle"], schedulingGradeIds: ["middle-g1", "middle-g2", "middle-g3"] },
+  { accountId: "ACC-SCHEDULER-MIDDLE-CO", name: "初中部排课负责人（二）", department: "初中部", title: "初中部排课负责人", role: "admin", scopeStageIds: ["middle"], schedulingGradeIds: ["middle-g1", "middle-g2", "middle-g3"] },
   { accountId: "ACC-SCHEDULER-HIGH", name: "高中部排课负责人", department: "高中部", title: "高中部排课负责人", role: "admin", scopeStageIds: ["high"] },
 ];
 
@@ -19582,8 +20659,10 @@ if (apiEnabled()) loadHealthTermName();
 function buildSectionNav(viewSelector) {
   const view = document.querySelector(viewSelector);
   if (!view || view.querySelector(".section-nav")) return;
-  const panels = [...view.querySelectorAll("section.panel")].filter((panel) =>
-    panel.querySelector(".panel-heading h2"),
+  // 隐藏的面板不能生成跳转项。教学期创建面板已经从排课账号界面移除；若仍把它
+  // 收进目录，就会留下一个写着“教学学期管理”却点不到任何内容的假入口。
+  const panels = [...view.querySelectorAll("section.panel")].filter(
+    (panel) => !panel.hidden && panel.querySelector(".panel-heading h2"),
   );
   if (panels.length < 4) return;
   const nav = document.createElement("nav");
@@ -19644,6 +20723,7 @@ document.querySelector("#generateSchedule").addEventListener("click", generateAd
 document.querySelector("#confirmSchedule").addEventListener("click", confirmAndPublishSchedule);
 document.querySelector("#refreshSchedulePrecheck").addEventListener("click", refreshBackendSchedulePrecheck);
 document.querySelector("#saveClassStructure").addEventListener("click", saveAdminClassStructure);
+document.querySelector("#saveHighClassStructure").addEventListener("click", saveAdminClassStructure);
 document.querySelector("#saveRoomResources").addEventListener("click", saveAdminRoomResources);
 document.querySelector("#addRoomResourceType").addEventListener("click", addRoomResourceType);
 document.querySelector("#roomResourceTypeControls").addEventListener("input", updateRoomResourcePreview);
@@ -19904,6 +20984,19 @@ document.querySelector("#adminGradeSelect").addEventListener("change", async (ev
   }
 });
 
+document.querySelector("#adminSchedulingTermSelect").addEventListener("change", async (event) => {
+  state.selectedSchedulingTermId = event.target.value;
+  state.selectedSchedulingClassId = "";
+  state.selectedScheduleAssignmentId = "";
+  state.scheduleReplanScope = emptyScheduleReplanScope();
+  schedulingBackendState = { ...schedulingBackendState, loaded: false, loading: false, error: "", job: null, precheck: null };
+  if (backendMode() && currentRole() === "admin") {
+    await loadBackendSchedulingContext();
+  } else {
+    render();
+  }
+});
+
 document.querySelector("#overviewDivisionSelect").addEventListener("change", async (event) => {
   applySchedulingSelection(event.target.value);
   if (backendMode() && canViewSchedulingOverview()) {
@@ -19933,6 +21026,28 @@ document.querySelector("#academicCalendarTypeFilter").addEventListener("change",
   renderAcademicCalendar();
 });
 
+document.querySelector("#attendanceMonthInput").addEventListener("change", (event) => {
+  attendanceUploadState = { ...attendanceUploadState, month: event.target.value || currentSettlementMonth(), loaded: false, error: "" };
+  loadAttendanceUploads({ month: attendanceUploadState.month, stageId: attendanceUploadState.stageId });
+});
+
+document.querySelector("#attendanceStageSelect").addEventListener("change", (event) => {
+  attendanceUploadState = { ...attendanceUploadState, stageId: event.target.value || "", loaded: false, error: "" };
+  loadAttendanceUploads({ month: selectedAttendanceMonth(), stageId: attendanceUploadState.stageId });
+});
+
+document.querySelector("#attendanceUploadButton").addEventListener("click", () => {
+  uploadAttendanceWorkbook();
+});
+
+document.querySelector("#addTransportRoute")?.addEventListener("click", () => {
+  openTransportRouteDialog();
+});
+
+document.querySelector("#transportRouteTermSelect")?.addEventListener("change", (event) => {
+  loadTransportRoutes({ termId: event.target.value || "" });
+});
+
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-edit-academic-calendar]");
   if (button) {
@@ -19951,6 +21066,12 @@ document.addEventListener("click", async (event) => {
 
 document.querySelector("#regularClassCountInput").addEventListener("input", updateClassStructurePreview);
 document.querySelector("#experimentalClassCountInput").addEventListener("input", updateClassStructurePreview);
+["#highAClassCountInput", "#highBClassCountInput", "#highCClassCountInput"].forEach((selector) => {
+  document.querySelector(selector).addEventListener("input", updateClassStructurePreview);
+});
+document.querySelector("#scheduleTemplateSelect").addEventListener("change", (event) => {
+  setActiveScheduleTemplate(event.target.value);
+});
 document.querySelector("#addSchedulePeriod").addEventListener("click", addSchedulePeriodRow);
 document.querySelector("#saveSchedulePeriods").addEventListener("click", saveSchedulePeriods);
 
@@ -20188,6 +21309,9 @@ if (backendMode()) {
   }
   if (currentRole() === "system_admin") {
     loadPersonnelPage({ page: personnelPage.page });
+  }
+  if (currentRole() === "security_manager") {
+    loadTransportRoutes();
   }
 }
 

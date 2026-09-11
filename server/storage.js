@@ -56,12 +56,26 @@ import {
 } from "./terms.js";
 import { accountStageScopeIds } from "./accessScope.js";
 import { accountHasRole, accountRoleList } from "./accountRoles.js";
+import { attendanceSettlementForTeacher } from "./attendance.js";
+import {
+  completedTransportCountsForTeacherMonth,
+  ensureTransportRouteData,
+  routeDutyEventsForTeacherWeek,
+  transportRouteScheduleWeeks,
+} from "./transportRoutes.js";
 
 const DEFAULT_TEACHER_COUNT = 1000;
 const DEFAULT_PASSWORD = "123456";
-const DATA_DIR = fileURLToPath(new URL("./data", import.meta.url));
-const DATA_FILE = path.join(DATA_DIR, "phase1-db.json");
-const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const DEFAULT_DATA_DIR = fileURLToPath(new URL("./data", import.meta.url));
+// 集成测试必须使用独立数据文件，否则真实名单导入、账号接管或测试中的
+// 人事修改会互相污染。生产与普通开发不配置时仍沿用原目录。
+const DATA_FILE = process.env.SCHOOL_DATA_FILE
+  ? path.resolve(process.env.SCHOOL_DATA_FILE)
+  : path.join(DEFAULT_DATA_DIR, "phase1-db.json");
+const DATA_DIR = path.dirname(DATA_FILE);
+const BACKUP_DIR = process.env.SCHOOL_BACKUP_DIR
+  ? path.resolve(process.env.SCHOOL_BACKUP_DIR)
+  : path.join(DATA_DIR, "backups");
 const MAX_BACKUP_FILES = 50;
 const SESSION_TTL_HOURS = 12;
 const NOTIFICATION_AUDIENCES = new Set(["all", "teacher", "finance", "admin", "system_admin", "hr"]);
@@ -450,6 +464,16 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       department: "总校人事行政处",
       status: "active",
     },
+    {
+      id: "ACC-SECURITY-MANAGER",
+      username: "security_manager",
+      passwordHash: defaultPasswordHash,
+      role: "security_manager",
+      name: "安全部主管",
+      title: "安全部主管",
+      department: "安全部",
+      status: "active",
+    },
     // 财务分四摊：三个学部各管本部任课老师，总校财务管行政后勤人员。
     // 沿用 finance 这个用户名做总校财务，避免既有登录与脚本失效。
     {
@@ -541,6 +565,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       roles: ["division_head", "teacher"],
       teacherId: "T-HEAD-KINDERGARTEN",
       scopeStageIds: ["kindergarten"],
+      payrollReadDivision: true,
       name: "幼儿园主任",
       title: "幼儿园主任",
       department: "幼儿园",
@@ -554,6 +579,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       roles: ["division_head", "teacher"],
       teacherId: "T-HEAD-PRIMARY",
       scopeStageIds: ["primary"],
+      payrollReadDivision: true,
       name: "小学部负责人",
       title: "小学部主任",
       department: "小学部",
@@ -567,6 +593,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       roles: ["division_head", "teacher"],
       teacherId: "T-HEAD-MIDDLE",
       scopeStageIds: ["middle"],
+      payrollReadDivision: true,
       name: "初中部负责人",
       title: "初中部主任",
       department: "初中部",
@@ -580,6 +607,7 @@ function createTeachersAndAccounts(teacherCount, defaultPasswordHash) {
       roles: ["division_head", "teacher"],
       teacherId: "T-HEAD-HIGH",
       scopeStageIds: ["high"],
+      payrollReadDivision: true,
       name: "高中部负责人",
       title: "高中部主任",
       department: "高中部",
@@ -923,6 +951,14 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     // 历史遗留：扫码签到取消后不再有写入方，保留空集合是为了让旧库里
     // 已有的签到流水仍能被导出和审计，不至于在升级时被当作未知集合丢掉
     attendanceRecords: [],
+    // 月度教师考勤：由学部主任按学部、按月上传四次打卡记录。
+    // 导入记录与明细分开，既可保留覆盖历史，也为后续薪资规则提供标准化数据源。
+    attendanceUploads: [],
+    attendancePunchRecords: [],
+    // 安全部维护的接送路线、逐日跟车班次与调班留痕。班次完成后才会进入生活老师接送补助。
+    transportRoutes: [],
+    transportRouteRuns: [],
+    transportRouteTransferRequests: [],
     payrollRules: createDefaultPayrollRules(),
     scheduleDrafts: [],
     scheduleVersions: [],
@@ -1035,7 +1071,7 @@ function backfillDemoAccountMatrix(db, defaults) {
     "ACC-HEAD-KINDERGARTEN", "ACC-HEAD-PRIMARY", "ACC-HEAD-MIDDLE", "ACC-HEAD-HIGH",
     "ACC-SCHEDULER-KINDERGARTEN", "ACC-SCHEDULER-PRIMARY", "ACC-SCHEDULER-MIDDLE", "ACC-SCHEDULER-HIGH",
     "ACC-DEMO-TEACHER-KINDERGARTEN", "ACC-DEMO-TEACHER-PRIMARY", "ACC-DEMO-TEACHER-MIDDLE", "ACC-DEMO-TEACHER-HIGH",
-    "ACC-DEMO-LIFE-PRIMARY", "ACC-DEMO-LIFE-MIDDLE", "ACC-DEMO-LIFE-HIGH",
+    "ACC-DEMO-LIFE-PRIMARY", "ACC-DEMO-LIFE-MIDDLE", "ACC-DEMO-LIFE-HIGH", "ACC-SECURITY-MANAGER",
   ].forEach((id) => {
     const item = defaultById.get(id);
     if (!item || (db.accounts || []).some((account) => account.id === id || account.username === item.username)) return;
@@ -1045,6 +1081,9 @@ function backfillDemoAccountMatrix(db, defaults) {
 
   ["T-K0001", ...LIFE_TEACHER_DEMO_CONFIGS.map((item) => item.teacherId)].forEach((teacherId) => {
     const teacher = (defaults.teachers || []).find((item) => item.id === teacherId);
+    // 快捷登录账号可以在真实名册导入后改绑真实人员。只有仍有账号明确引用
+    // 这个旧演示档案时才补档，避免每次启动又把已清理的模拟教师写回数据库。
+    if (!(db.accounts || []).some((account) => account.teacherId === teacherId)) return;
     if (!teacher || (db.teachers || []).some((item) => item.id === teacher.id)) return;
     db.teachers.push(teacher);
     changed = true;
@@ -1234,6 +1273,11 @@ function ensureDivisionHeadTeachingCapabilities(db) {
       account.teacherId = config.teacherId;
       changed = true;
     }
+    // 学部主任只读本学部工资，用于月度确认和年度汇总；不授予核算或导出权限。
+    if (account.payrollReadDivision !== true) {
+      account.payrollReadDivision = true;
+      changed = true;
+    }
 
     let teacher = teachers.find((item) => item.id === config.teacherId);
     if (!teacher) {
@@ -1318,6 +1362,11 @@ export function normalizeDatabase(db) {
     "academicCalendarPeriods",
     "lessonInstances",
     "attendanceRecords",
+    "attendanceUploads",
+    "attendancePunchRecords",
+    "transportRoutes",
+    "transportRouteRuns",
+    "transportRouteTransferRequests",
     "scheduleDrafts",
     "scheduleVersions",
     "workloadConfirmations",
@@ -1357,6 +1406,7 @@ export function normalizeDatabase(db) {
   if (ensureAcademicCalendarPeriods(db)) {
     changed = true;
   }
+  ensureTransportRouteData(db);
   if (normalizeTeacherAssignments(db)) {
     changed = true;
   }
@@ -2522,6 +2572,9 @@ function termUsageCounts(db, termId = "") {
     workloadConfirmations: count("workloadConfirmations"),
     payrollDetails: count("payrollDetails"),
     payrollBatches: count("payrollBatches"),
+    transportRoutes: count("transportRoutes"),
+    transportRouteRuns: count("transportRouteRuns"),
+    transportRouteTransferRequests: count("transportRouteTransferRequests"),
     oaRequests,
   };
 }
@@ -2670,7 +2723,11 @@ export function publicAccount(account, db) {
     financeScopeName: financeScopeLabel(financeScopeFor(account)),
     financeReadAll: Boolean(account.financeReadAll),
     financeReadScope: financeReadScopeFor(account) || "",
+    payrollReadAll: Boolean(account.payrollReadAll),
+    payrollReadDivision: Boolean(account.payrollReadDivision),
+    payrollExportAll: Boolean(account.payrollExportAll),
     scopeStageIds: Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [],
+    schedulingGradeIds: Array.isArray(account.schedulingGradeIds) ? account.schedulingGradeIds.map(String) : [],
   };
 }
 
@@ -3323,6 +3380,12 @@ export function queryTeacherAssignments(db, options = {}) {
     }));
 }
 
+function teacherCanTeachSubject(teacher, subjectId) {
+  if (!teacher || !subjectId) return false;
+  if (teacher.primarySubjectId === subjectId) return true;
+  return Array.isArray(teacher.teachableSubjectIds) && teacher.teachableSubjectIds.includes(subjectId);
+}
+
 export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
   const term = currentTerm(db, options.termId);
   ensureEditableTerm(term, "修改任课配置");
@@ -3385,7 +3448,7 @@ export function updateTeacherAssignment(db, options = {}, actorAccount = null) {
       (teacher) =>
         teacher.status !== "active" ||
         teacher.stageId !== stageId ||
-        teacher.primarySubjectId !== subjectId,
+        !teacherCanTeachSubject(teacher, subjectId),
     );
   if (invalidTeacher) {
     const error = new Error(`${invalidTeacher.name} 不属于当前学部或学科，不能作为该科任课老师`);
@@ -3464,7 +3527,7 @@ export function queryTeachers(db, query = {}, options = {}) {
       const gradeValues = strictGrade ? teacherAssignedGradeValues(db, teacher) : teacherGradeValues(db, teacher);
       if (!gradeValues.includes(grade)) return false;
     }
-    if (subjectId && teacher.primarySubjectId !== subjectId) return false;
+    if (subjectId && !teacherCanTeachSubject(teacher, subjectId)) return false;
     if (!search) return true;
     return [
       teacher.id,
@@ -3473,6 +3536,7 @@ export function queryTeachers(db, query = {}, options = {}) {
       teacher.stageName,
       gradeCoverageText(db, teacher),
       teacher.primarySubjectName,
+      ...(Array.isArray(teacher.teachableSubjectNames) ? teacher.teachableSubjectNames : []),
       teacher.phone,
     ]
       .join(" ")
@@ -3697,6 +3761,13 @@ function publicLesson(db, lesson) {
   };
 }
 
+function lessonBelongsToTeacher(lesson, teacherId) {
+  return (
+    lesson?.teacherId === teacherId ||
+    (Array.isArray(lesson?.responsibleTeacherIds) && lesson.responsibleTeacherIds.includes(teacherId))
+  );
+}
+
 // 生活老师不参与教务排课，也不会产生课时记录。老师端展示的「排班」是
 // 根据所在正式学期自动生成的学生接送班次：每个工作日早、晚各一班。
 // 这些班次只用于工作安排展示，明确标记为 nonPayable，绝不能混入课时或工资。
@@ -3720,67 +3791,32 @@ export function lifeTeacherDutyEventsForWeek(db, teacherId, weekStart, options =
   if (!isLifeTeacher(teacher) || !term) return [];
 
   const startKey = weekStart || startOfNaturalWeek(term.startDate);
-  const { studentCount, serviceScope } = lifeTeacherDutyMeta(teacher);
-  const base = {
-    teacherId,
-    termId: term.id,
-    className: serviceScope,
-    roomId: "life-service-gate",
-    room: "校门接送点",
-    type: "lifeDuty",
-    units: 0,
-    status: "scheduled",
-    nonPayable: true,
-    isLifeDuty: true,
-    studentCount,
-    source: "life-duty-schedule",
-  };
-  const shifts = [
-    {
-      suffix: "arrival",
-      time: "06:50-08:20",
-      subjectName: "早晨接送学生",
-      dutyType: "arrival",
-      note: "生活老师排班：学生到校接送，不计入课时工资。",
-    },
-    {
-      suffix: "departure",
-      time: "16:30-18:00",
-      subjectName: "放学接送学生",
-      dutyType: "departure",
-      note: "生活老师排班：学生放学接送，不计入课时工资。",
-    },
-  ];
-
-  return Array.from({ length: 5 }, (_, dayOffset) => addDays(startKey, dayOffset))
-    .filter((date) => date >= term.startDate && date <= term.endDate)
-    .flatMap((date) =>
-      shifts.map((shift) => ({
-        ...base,
-        ...shift,
-        id: `LIFE-DUTY-${teacherId}-${date}-${shift.suffix}`,
-        date,
-      })),
-    );
+  // 原来的固定早晚两班已移除：生活老师排班以安全部发布的真实路线为准。
+  // 未发布路线时老师端保持“等待排班”，不会虚构出工作记录或补助。
+  return routeDutyEventsForTeacherWeek(db, teacherId, startKey)
+    .filter((event) => event.termId === term.id);
 }
 
 function lifeTeacherScheduleWeeks(db, teacher, term) {
-  if (!term?.startDate || !term?.endDate) return [];
-  const firstWeekStart = startOfNaturalWeek(term.startDate);
-  const weeks = [];
-  for (let weekStart = firstWeekStart; weekStart <= term.endDate; weekStart = addDays(weekStart, 7)) {
-    const dutyCount = lifeTeacherDutyEventsForWeek(db, teacher.id, weekStart, { termId: term.id }).length;
-    if (dutyCount) {
-      weeks.push({
-        weekStart,
-        lessonCount: dutyCount,
-        publishedCount: dutyCount,
-        latestDate: addDays(weekStart, 4),
-        isLifeDutySchedule: true,
-      });
-    }
-  }
-  return weeks;
+  const weekMap = new Map(
+    transportRouteScheduleWeeks(db, teacher.id, term).map((week) => [week.weekStart, { ...week }]),
+  );
+  (db.lessonInstances || [])
+    .filter(
+      (lesson) =>
+        lessonBelongsToTeacher(lesson, teacher.id) &&
+        lesson.nonRegular &&
+        (!lesson.termId || lesson.termId === term.id),
+    )
+    .forEach((lesson) => {
+      const weekStart = startOfNaturalWeek(lesson.date);
+      const current = weekMap.get(weekStart) || { weekStart, lessonCount: 0, publishedCount: 0, latestDate: lesson.date };
+      current.lessonCount += 1;
+      current.publishedCount += 1;
+      if (!current.latestDate || lesson.date > current.latestDate) current.latestDate = lesson.date;
+      weekMap.set(weekStart, current);
+    });
+  return Array.from(weekMap.values()).sort((left, right) => left.weekStart.localeCompare(right.weekStart));
 }
 
 export function teacherLessonsForWeek(db, teacherId, weekStart, options = {}) {
@@ -3789,12 +3825,23 @@ export function teacherLessonsForWeek(db, teacherId, weekStart, options = {}) {
   const endKey = addDays(startKey, 6);
   const teacher = findTeacher(db, teacherId);
   if (isLifeTeacher(teacher)) {
-    return lifeTeacherDutyEventsForWeek(db, teacherId, startKey, { termId: term.id });
+    const routeDuties = lifeTeacherDutyEventsForWeek(db, teacherId, startKey, { termId: term.id });
+    const fixedDuties = db.lessonInstances
+      .filter(
+        (lesson) =>
+          lessonBelongsToTeacher(lesson, teacherId) &&
+          lesson.nonRegular &&
+          (!lesson.termId || lesson.termId === term.id) &&
+          lesson.date >= startKey &&
+          lesson.date <= endKey,
+      )
+      .map((lesson) => publicLesson(db, lesson));
+    return [...routeDuties, ...fixedDuties].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   }
   return db.lessonInstances
     .filter(
       (lesson) =>
-        lesson.teacherId === teacherId &&
+        lessonBelongsToTeacher(lesson, teacherId) &&
         (!lesson.termId || lesson.termId === term.id) &&
         lesson.date >= startKey &&
         lesson.date <= endKey,
@@ -3809,7 +3856,7 @@ export function teacherScheduleWeeks(db, teacherId, options = {}) {
   if (isLifeTeacher(teacher)) return lifeTeacherScheduleWeeks(db, teacher, term);
   const weekMap = new Map();
   db.lessonInstances
-    .filter((lesson) => lesson.teacherId === teacherId && (!lesson.termId || lesson.termId === term.id))
+    .filter((lesson) => lessonBelongsToTeacher(lesson, teacherId) && (!lesson.termId || lesson.termId === term.id))
     .forEach((lesson) => {
       const weekStart = startOfNaturalWeek(lesson.date);
       const current = weekMap.get(weekStart) || {
@@ -3927,6 +3974,7 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   const term = termForMonth(db, month, teacher.stageId);
   const calendarSettlement = calendarSettlementForMonth(db, month, teacher.stageId);
   const leaveSettlement = approvedLeaveSettlementForMonth(db, teacherId, month);
+  const attendanceSettlement = attendanceSettlementForTeacher(db, teacherId, month);
 
   const lessons = [...(lessonsByTeacherForMonth(db, month).get(teacherId) || [])]
     .filter((lesson) => !lesson.nonPayable)
@@ -3958,9 +4006,17 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
           workStatus: employee.workStatus || "employed",
         }
       : null,
-    monthlyAssessment: findMonthlyAssessment(db, teacherId, month),
+    // 接送补助只认安全部发布且“早接、晚送均已完成”的实际跟车班次，
+    // 不再使用手工月度考核中的接送数量，避免同一趟被重复计薪。
+    monthlyAssessment: isLifeTeacher(teacher)
+      ? {
+          ...(findMonthlyAssessment(db, teacherId, month) || {}),
+          lifeTeacherTransport: completedTransportCountsForTeacherMonth(db, teacherId, month),
+        }
+      : findMonthlyAssessment(db, teacherId, month),
     calendarSettlement,
     leaveSettlement,
+    attendanceSettlement,
   });
   return {
     ...payroll,
@@ -4050,6 +4106,18 @@ export function invalidateOpenPayrollDetailsForTeacher(db, teacherId, month) {
   return invalidateOpenPayrollDetails(
     db,
     (detail) => detail.teacherId === teacherId && (!month || detail.month === month),
+  );
+}
+
+// 考勤表重传会改变初中部该月的自动考勤扣款。已锁定工资不得暗改；
+// 尚未锁定的工资单删除后会按新考勤版本重算，避免旧考勤和新工资同时存在。
+export function invalidateOpenPayrollDetailsForStage(db, stageId, month) {
+  const teacherIds = new Set(
+    (db.teachers || []).filter((teacher) => teacher.stageId === stageId).map((teacher) => teacher.id),
+  );
+  return invalidateOpenPayrollDetails(
+    db,
+    (detail) => teacherIds.has(detail.teacherId) && (!month || detail.month === month),
   );
 }
 
@@ -5116,29 +5184,43 @@ export function approveMonthlyWorkload(db, teacherId, month = "2026-06", step = 
 
 export function validatePhase1Readiness(db) {
   const startedAt = Date.now();
-  const teacherAccounts = db.accounts.filter((account) => account.role === "teacher");
+  const teacherAccounts = db.accounts.filter((account) => accountHasRole(account, "teacher"));
   const activeTeachers = db.teachers.filter((teacher) => teacher.status === "active");
-  const sampleAccount = db.accounts.find((account) => account.username === "teacher0001");
+  const activeTeacherIds = new Set(activeTeachers.map((teacher) => teacher.id));
+  const linkedActiveTeacherIds = new Set(
+    teacherAccounts
+      .filter((account) => account.status === "active" && activeTeacherIds.has(account.teacherId))
+      .map((account) => account.teacherId),
+  );
+  const sampleAccount = teacherAccounts.find(
+    (account) => account.status === "active" && activeTeacherIds.has(account.teacherId),
+  );
   const permissionSampleTeacher = db.teachers.find((teacher) => teacher.id === sampleAccount?.teacherId);
   const pageStart = Date.now();
-  const firstPage = queryTeachers(db, { page: 1, pageSize: 50, month: "2026-06" });
+  // 就绪检查模拟行政名册分页，不应误用财务模式为全部教师逐人试算工资。
+  const firstPage = queryTeachers(db, { page: 1, pageSize: 50 }, { includeFinance: false });
   const pageMs = Date.now() - pageStart;
   const conflictSample = db.scheduleDrafts.some((draft) => draft.status === "published" && !draft.conflicts?.length);
-  const generatedPayrollCount = ensurePayrollDetails(db).filter((detail) => detail.month === "2026-06").length;
+  const readinessTerm = currentTerm(db);
+  const readinessMonth = String(readinessTerm?.settlementMonth || readinessTerm?.startDate || new Date().toISOString()).slice(0, 7);
+  const generatedPayrollCount = ensurePayrollDetails(db).filter((detail) => detail.month === readinessMonth).length;
   const lockedPayrollCount = ensurePayrollDetails(db).filter(
-    (detail) => detail.month === "2026-06" && detail.status === "locked",
+    (detail) => detail.month === readinessMonth && detail.status === "locked",
   ).length;
+  let payrollPreviewReady = false;
+  let payrollPreviewError = "";
+  try {
+    payrollPreviewReady = Boolean(sampleAccount?.teacherId && teacherPayrollPreview(db, sampleAccount.teacherId, readinessMonth));
+  } catch (error) {
+    payrollPreviewError = error.message || "工资试算失败";
+  }
 
   const checks = [
     {
       key: "teacher_accounts",
-      label: "老师账号 teacher0001 至 teacher1000 可登录",
-      passed:
-        teacherAccounts.length >= 1000 &&
-        Boolean(sampleAccount) &&
-        sampleAccount.status === "active" &&
-        verifyPassword(DEFAULT_PASSWORD, sampleAccount.passwordHash),
-      detail: `当前老师账号 ${teacherAccounts.length} 个，样例账号 ${sampleAccount?.username || "缺失"}`,
+      label: "在职教师已建立可登录账号",
+      passed: activeTeachers.length > 0 && linkedActiveTeacherIds.size >= activeTeachers.length,
+      detail: `在职教师 ${activeTeachers.length} 人，已绑定启用账号 ${linkedActiveTeacherIds.size} 人，样例账号 ${sampleAccount?.username || "缺失"}`,
     },
     {
       key: "teacher_permission",
@@ -5178,9 +5260,11 @@ export function validatePhase1Readiness(db) {
     },
     {
       key: "payroll_lock",
-      label: "月度薪资明细可按老师生成并锁定",
-      passed: generatedPayrollCount > 0 || lockedPayrollCount > 0,
-      detail: `已生成 ${generatedPayrollCount} 份，已锁定 ${lockedPayrollCount} 份`,
+      label: "月度工资试算与审批锁定流程可用",
+      passed: payrollPreviewReady,
+      detail: payrollPreviewReady
+        ? `${readinessMonth} 工资试算正常；已生成 ${generatedPayrollCount} 份，已锁定 ${lockedPayrollCount} 份（无工资单不影响新环境就绪）`
+        : payrollPreviewError || "未找到可用于工资试算的在职教师账号",
     },
   ];
 

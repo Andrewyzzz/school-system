@@ -5,9 +5,13 @@
 // 起一个真实服务，用真实 HTTP 请求去看响应头，而不是读源码里的字符串。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const PORT = 4791 + (process.pid % 100);
 const BASE = `http://127.0.0.1:${PORT}`;
+const testDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "school-security-headers-"));
 
 // 撞库检测的阈值调低，否则要发 60 次请求才测得出来
 const child = spawn(process.execPath, ["server/server.js"], {
@@ -16,6 +20,8 @@ const child = spawn(process.execPath, ["server/server.js"], {
     PORT: String(PORT),
     LOGIN_FAIL_MAX_PER_IP: "5",
     NODE_ENV: "test",
+    DB_DRIVER: "json",
+    SCHOOL_DATA_FILE: path.join(testDataDir, "phase1-db.json"),
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
@@ -240,6 +246,7 @@ try {
   child.kill("SIGTERM");
   await new Promise((r) => setTimeout(r, 300));
   if (!child.killed) child.kill("SIGKILL");
+  await fs.rm(testDataDir, { recursive: true, force: true });
 }
 
 if (failure) {

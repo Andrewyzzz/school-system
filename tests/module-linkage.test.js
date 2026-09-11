@@ -9,12 +9,22 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 const PORT = 4820 + (process.pid % 60);
 const BASE = `http://127.0.0.1:${PORT}`;
+const testDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "school-module-linkage-"));
 
 const child = spawn(process.execPath, ["server/server.js"], {
-  env: { ...process.env, PORT: String(PORT), HR_ENCRYPTION_KEY: "0".repeat(64), NODE_ENV: "test" },
+  env: {
+    ...process.env,
+    PORT: String(PORT),
+    HR_ENCRYPTION_KEY: "0".repeat(64),
+    NODE_ENV: "test",
+    DB_DRIVER: "json",
+    SCHOOL_DATA_FILE: path.join(testDataDir, "phase1-db.json"),
+  },
   stdio: ["ignore", "pipe", "pipe"],
 });
 let log = "";
@@ -54,8 +64,9 @@ try {
   const hr = await login("hr");
   const finance = await login("finance_primary");
   const totalFinance = await login("finance");
+  const divisionHead = await login("head_primary");
   const teacher = await login("teacher");
-  assert.ok(admin && systemAdmin && hr && finance && totalFinance, "演示账号应能登录");
+  assert.ok(admin && systemAdmin && hr && finance && totalFinance && divisionHead, "演示账号应能登录");
 
   const get = (path, token) =>
     fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -162,6 +173,8 @@ try {
       ["/api/reports/weekly-workload?format=excel", totalFinance, 200, "总校财务可以导出工作量台账"],
       ["/api/reports/annual-salary?format=excel", finance, 403, "学部财务不能导出薪资报表"],
       ["/api/reports/annual-salary?format=excel", totalFinance, 200, "总校财务可以导出薪资报表"],
+      ["/api/reports/annual-salary", divisionHead, 200, "学部主任应能查看本学部年度薪资"],
+      ["/api/reports/annual-salary?format=excel", divisionHead, 403, "学部主任只能查看本学部年度薪资，不能导出"],
       ["/api/payroll/history?month=2026-06", systemAdmin, 403, "总校人事行政不应读工资记录"],
       ["/api/payroll/export?month=2026-06", systemAdmin, 403, "总校人事行政不应导出工资记录"],
       [`/api/teachers/${linked.teacherId}/payroll?month=2026-06`, systemAdmin, 403, "总校人事行政不应读取个人工资单"],
@@ -312,7 +325,6 @@ try {
       "updateTeacherSalaryProfile",
       "upsertMonthlyAssessment",
       "generatePayrollBatch",
-      "lockPayrollBatch",
       "commitEntityImport",
       "transitionLedger",
     ];
@@ -326,6 +338,16 @@ try {
         `${fn} 改的是跨模块数据，调用后必须 broadcastEvent，否则别的角色要刷新页面才看得到（验收 4.5）`,
       );
     }
+
+    // 批量锁薪现在只能由 OA 审批／执行副作用触发；旧的直锁路由已明确返回 409。
+    // 因此事件必须在 OA 动作保存完成后广播，不能要求副作用函数在保存前自行广播。
+    const oaActionAt = source.indexOf('const actionMatch = url.pathname.match(/^\\/api\\/oa\\/requests');
+    assert.ok(oaActionAt > 0, "应能找到 OA 审批动作路由");
+    assert.match(
+      source.slice(oaActionAt, oaActionAt + 2200),
+      /appliedResult\?\.type[\s\S]*broadcastEvent\("payroll"\)/,
+      "工资审批或执行落库后必须广播 payroll 事件",
+    );
   }
 } catch (error) {
   failure = error;
@@ -333,6 +355,7 @@ try {
   child.kill("SIGTERM");
   await new Promise((r) => setTimeout(r, 300));
   if (!child.killed) child.kill("SIGKILL");
+  await fs.rm(testDataDir, { recursive: true, force: true });
 }
 
 if (failure) {

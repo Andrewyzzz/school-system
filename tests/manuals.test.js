@@ -87,6 +87,11 @@ for (const m of MANUALS) {
   for (const m of html.matchAll(/data-view="\w+" data-role="[^"]*"[^>]*>\s*<span[^>]*>[^<]*<\/span>\s*([^\n<]+)/g)) {
     navLabels.add(m[1].trim());
   }
+  // “我的课表”需要由生活老师登录后动态改成“我的排班”，所以文字放在
+  // 带 id 的第二层 span 中。也把这类动态菜单默认文案纳入核对。
+  for (const m of html.matchAll(/<span id="[^"]+">([^<\n]+)<\/span>/g)) {
+    navLabels.add(m[1].trim());
+  }
   assert.ok(navLabels.size >= 20, `应能解析出侧边栏菜单，实际 ${navLabels.size} 个`);
 
   const missing = [];
@@ -111,7 +116,7 @@ for (const m of MANUALS) {
   const REQUIRED = {
     "操作手册-人事模块.md": ["人员档案", "组织与岗位", "人事审批", "人事审计", "审批中心"],
     "操作手册-排课模块.md": ["排课管理", "课表总览", "基础数据", "我的课表"],
-    "操作手册-工资结算模块.md": ["薪资结算", "财务首页", "工资记录", "薪资配置", "工资确认", "账套管理", "统计报表"],
+    "操作手册-工资结算模块.md": ["薪资结算", "薪资总览", "工资记录", "薪资配置", "工资确认", "账套管理", "统计报表"],
     "操作手册-账套.md": ["账套管理", "审批中心"],
   };
   Object.entries(REQUIRED).forEach(([file, menus]) => {

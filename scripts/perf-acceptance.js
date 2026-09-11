@@ -161,15 +161,41 @@ console.log(`每项热身 ${WARMUP} 次后取 ${ROUNDS} 次样本\n`);
 
 let admin;
 let finance;
+let hqFinance;
 let teacher;
 try {
   admin = (await login("sysadmin")) || (await login("admin"));
   finance = await login("finance_primary");
+  // 工资和薪资报表导出已收口为仅总校财务；性能脚本不能再拿学部财务测导出。
+  hqFinance =
+    (await login(
+      process.env.PERF_HQ_FINANCE_USERNAME || "finance",
+      process.env.PERF_HQ_FINANCE_PASSWORD || "123456",
+    )) ||
+    (await login("fy260907-0019"));
   teacher = await login("teacher");
 } catch (error) {
   fail(`无法登录，服务是否已启动？${error.message}`);
 }
 if (!admin) fail("管理员登录失败");
+if (!finance) fail("学部财务登录失败");
+if (!hqFinance) fail("总校财务登录失败；可通过 PERF_HQ_FINANCE_USERNAME / PERF_HQ_FINANCE_PASSWORD 指定验收账号");
+if (!teacher) fail("教师登录失败");
+
+// 工资明细也必须拿当前库确实有记录的月份测试。固定写 2026-06 会在迁移后的
+// 真实数据里导出 0 行，得到一个看似很快、实际上没有意义的数字。
+let samplePayrollMonth = process.env.PERF_PAYROLL_MONTH || "";
+if (!samplePayrollMonth) {
+  try {
+    const annual = JSON.parse((await request("GET", "/api/reports/annual-salary?year=2026", hqFinance)).head || "{}");
+    const monthIndex = Array.from({ length: 12 }, (_, index) => 11 - index).find((index) =>
+      (annual.rows || []).some((row) => row.monthly?.[index] !== null && row.monthly?.[index] !== undefined),
+    );
+    if (monthIndex !== undefined) samplePayrollMonth = `2026-${String(monthIndex + 1).padStart(2, "0")}`;
+  } catch {
+    /* 无可用工资数据时由下方空数据提示说明 */
+  }
+}
 
 // 取一个真实存在的班级，并找出它确实有课的那一周，用于按真实用法计时。
 //
@@ -197,6 +223,22 @@ if (sampleClassId) {
     sampleWeek = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
   }
 }
+// 数据迁移后的第一个班级可能恰好没有发布课表；再从演示教师本人课表取一个
+// 真实有课的自然周，避免周工作量测试落到硬编码的旧试运行月份。
+if (!sampleWeek && teacher) {
+  try {
+    const teacherGrid = JSON.parse((await request("GET", "/api/schedule/grid", teacher)).head || "{}");
+    const firstLesson = teacherGrid.grid?.cells?.flat(3)?.find((cell) => cell?.date);
+    if (firstLesson?.date) {
+      const [y, m, d] = firstLesson.date.split("-").map(Number);
+      const dt = new Date(y, m - 1, d);
+      dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+      sampleWeek = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    }
+  } catch {
+    /* 无可用课次时由下方空数据提示说明 */
+  }
+}
 if (!sampleClassId) console.log("  ⚠ 未能取到班级，课表导出将按全校口径计时\n");
 
 // --- 列表查询（验收 4.6：≤2 秒）---
@@ -208,7 +250,7 @@ const listCases = [
   ["账套清单", "GET", "/api/ledgers", admin],
   ["审批单列表", "GET", "/api/oa/requests?scope=all&pageSize=20", admin],
   ["老师本人课表", "GET", "/api/schedule/grid", teacher],
-  ["周教学工作量台账", "GET", "/api/reports/weekly-workload?weekStart=2026-06-15&includeIdle=false", finance],
+  ["周教学工作量台账", "GET", `/api/reports/weekly-workload?weekStart=${sampleWeek || "2026-06-15"}&includeIdle=false`, finance],
   ["年度薪资汇总", "GET", "/api/reports/annual-salary?year=2026", finance],
 ];
 
@@ -228,9 +270,9 @@ const exportCases = [
   // 全校整学年，那是没人会做的操作，拿它计时等于在测一个不存在的场景。
   ["课表 Excel 导出（单班单周）", "GET", `/api/schedule/export?dimension=class&targetId=${sampleClassId}${sampleWeek ? `&weekStart=${sampleWeek}` : ""}`, admin],
   ["课表 Excel 导出（单班整学期）", "GET", `/api/schedule/export?dimension=class&targetId=${sampleClassId}`, admin],
-  ["周工作量台账导出", "GET", "/api/reports/weekly-workload?weekStart=2026-06-15&format=excel", finance],
-  ["年度薪资汇总导出", "GET", "/api/reports/annual-salary?year=2026&format=excel", finance],
-  ["应发工资明细表导出", "GET", "/api/payroll/export?month=2026-06&format=excel", finance],
+  ["周工作量台账导出", "GET", `/api/reports/weekly-workload?weekStart=${sampleWeek || "2026-06-15"}&format=excel`, hqFinance],
+  ["年度薪资汇总导出", "GET", "/api/reports/annual-salary?year=2026&format=excel", hqFinance],
+  ["应发工资明细表导出", "GET", `/api/payroll/export?month=${samplePayrollMonth || "2026-06"}&format=excel`, hqFinance],
   ["教学资源台账导出", "GET", "/api/resource-ledger?format=excel", admin],
   ["班级批量导出", "GET", "/api/data-porting/classes/export", admin],
   ["教室批量导出", "GET", "/api/data-porting/rooms/export", admin],

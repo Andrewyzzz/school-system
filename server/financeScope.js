@@ -72,10 +72,40 @@ export function financeReadScopeFor(account) {
  */
 export function canExportAllPayrollDetails(account) {
   return Boolean(
-    account?.role === "finance" &&
+    (account?.role === "finance" &&
       financeScopeFor(account) === HEADQUARTERS_SCOPE &&
-      account.financeReadAll,
+      account.financeReadAll &&
+      account.payrollExportAll !== false) ||
+      (account?.role === "principal" && account.payrollReadAll && account.payrollExportAll) ||
+      (account?.role === "payroll_exporter" && account.payrollReadAll && account.payrollExportAll),
   );
+}
+
+// 经授权的校领导或总校人事行政，薪资权限与财务权限严格分开：
+// 只读取全校薪资，不进入核算、复核、锁定、工资规则或人员薪酬档案维护流程。
+export function canViewAllPayrollDetails(account) {
+  return Boolean(
+    (account?.role === "finance" &&
+      financeScopeFor(account) === HEADQUARTERS_SCOPE &&
+      account.financeReadAll) ||
+      ((account?.role === "principal" || account?.role === "system_admin" || account?.role === "payroll_viewer" || account?.role === "payroll_exporter") &&
+        account.payrollReadAll),
+  );
+}
+
+// 学部主任只读本人学部的工资记录。范围必须精确到一个教学学部，不能以空范围
+// 回退到全校，也不具备任何导出或薪资核算权限。
+export function divisionPayrollScopeFor(account) {
+  if (account?.role !== "division_head" || !account?.payrollReadDivision) return "";
+  const scopes = Array.isArray(account?.scopeStageIds)
+    ? [...new Set(account.scopeStageIds.map(String).filter(Boolean))]
+    : [];
+  if (scopes.length !== 1) return "";
+  return FINANCE_SCOPES.some((item) => item.type === "division" && item.id === scopes[0]) ? scopes[0] : "";
+}
+
+export function canViewDivisionPayrollDetails(account) {
+  return Boolean(divisionPayrollScopeFor(account));
 }
 
 export function canFinanceReadTeacher(db, account, teacherId) {

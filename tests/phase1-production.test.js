@@ -266,7 +266,9 @@ updateGradeCourseRules(
     grade: 1,
     rules: newTermClassConfig.courseRules.map((rule) => ({
       ...rule,
-      weeklyLessons: rule.subjectId === "pe" ? 1 : rule.weeklyLessons,
+      // 课程规则现在以 sourceWeeklyLessons 为编辑值，weeklyLessons 是按单双周
+      // 派生的本周值；测试修改时必须与真实表单提交口径一致。
+      sourceWeeklyLessons: rule.subjectId === "pe" ? 1 : rule.sourceWeeklyLessons,
     })),
   },
   termAdmin,

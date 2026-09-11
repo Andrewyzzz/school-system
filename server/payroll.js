@@ -994,6 +994,49 @@ function manualComponents(profile) {
   return components;
 }
 
+function attendanceDeductionComponent(attendanceSettlement = null, { assessmentSalary = 0, grossBeforeAttendance = 0 } = {}) {
+  const fixedDeduction = Number(attendanceSettlement?.totalDeduction || 0);
+  const performanceDeductionRate = Math.max(0, Math.min(1, Number(attendanceSettlement?.performanceDeductionRate || 0)));
+  const performanceDeduction = roundMoney(Math.max(0, Number(assessmentSalary || 0)) * performanceDeductionRate);
+  const absenceDailyFraction = Math.max(0, Number(attendanceSettlement?.absenceDailyFraction || 0));
+  const dynamicAbsenceDeduction = roundMoney(
+    Math.max(0, Number(grossBeforeAttendance || 0)) * absenceDailyFraction * Math.max(0, Number(attendanceSettlement?.absenceDays || 0)),
+  );
+  const totalDeduction = roundMoney(fixedDeduction + performanceDeduction + dynamicAbsenceDeduction);
+  if (!attendanceSettlement?.applies || !Number.isFinite(totalDeduction) || totalDeduction <= 0) return null;
+  const parts = [];
+  if (Number(attendanceSettlement.lateEarlyCount || 0) > 0 && performanceDeductionRate > 0 && attendanceSettlement.requiresPayrollContext) {
+    parts.push(`${attendanceSettlement.attendanceLabel || "迟到／早退"} ${attendanceSettlement.lateEarlyCount} 次`);
+  } else if (Number(attendanceSettlement.lateEarlyCount || 0) > 0) {
+    parts.push(`${attendanceSettlement.attendanceLabel || "迟到／早退"} ${attendanceSettlement.lateEarlyCount} 次，扣 ${roundMoney(attendanceSettlement.lateEarlyDeduction || 0)} 元`);
+  }
+  if (Number(attendanceSettlement.missingPunchCount || 0) > 0) {
+    parts.push(`未补卡 ${attendanceSettlement.missingPunchCount} 次，扣 ${roundMoney(attendanceSettlement.missingPunchDeduction || 0)} 元`);
+  }
+  if (Number(attendanceSettlement.absenceDays || 0) > 0) {
+    if (absenceDailyFraction > 0) {
+      parts.push(`旷工 ${attendanceSettlement.absenceDays} 天 × 当月工资总额 1/22，扣 ${dynamicAbsenceDeduction} 元`);
+    } else {
+      parts.push(`无故旷工 ${attendanceSettlement.absenceDays} 天 × ${roundMoney(attendanceSettlement.absenceRate || 300)} 元，扣 ${roundMoney(attendanceSettlement.absenceDeduction || 0)} 元`);
+    }
+  }
+  if (Number(attendanceSettlement.seriousOccurrenceCount || 0) > 0) {
+    parts.push(`超时迟到／早退 ${attendanceSettlement.seriousOccurrenceCount} 次`);
+  }
+  if (Number(attendanceSettlement.missedClassCount || 0) > 0) {
+    parts.push(`旷课 ${attendanceSettlement.missedClassCount} 节（对应课次须标为已取消，不计课时工资）`);
+  }
+  if (performanceDeductionRate > 0) {
+    parts.push(`考核工资 ${roundMoney(assessmentSalary)} 元 × 考勤违纪扣除 ${Math.round(performanceDeductionRate * 100)}%，扣 ${performanceDeduction} 元`);
+  }
+  return {
+    name: attendanceSettlement.componentName || "考勤扣款",
+    basis: `${attendanceSettlement.policyName || "考勤制度"}：${parts.join("；")}`,
+    amount: -roundMoney(totalDeduction),
+    category: "deduction",
+  };
+}
+
 const LIFE_TEACHER_KIND_LABELS = {
   lower: "低段生活老师",
   upper: "高段生活老师",
@@ -1069,7 +1112,7 @@ function lifeTeacherTransportComponent(monthlyAssessment, scheme) {
   };
 }
 
-function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrationFactor = 1, prorationNote = "", monthlyAssessment = null, hrFacts = null, calendarSettlement = null, leaveSettlement = null } = {}) {
+function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrationFactor = 1, prorationNote = "", monthlyAssessment = null, hrFacts = null, calendarSettlement = null, leaveSettlement = null, attendanceSettlement = null } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
   const defaults = defaultLifeTeacherSalaryProfile(teacher);
@@ -1124,7 +1167,12 @@ function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrat
     { name: "待岗工资", basis: `最低工资标准 ${minimumWageForScheme(scheme)} 元 × 80%`, amount: roundMoney(minimumWageForScheme(scheme) * 0.8), category: "fixed" },
     ...(standbyHousing ? [{ name: "住房补贴", basis: "生活老师住房补贴；待岗人员全额保留", amount: roundMoney(standbyHousing), category: "allowance" }] : []),
   ];
-  const components = workStatus === "standby" ? standbyComponents : employmentType === "agreement" ? [{ name: "协议工资", basis: agreementBasis, amount: agreementAmount, category: "fixed" }] : normalComponents;
+  const payrollComponents = workStatus === "standby" ? standbyComponents : employmentType === "agreement" ? [{ name: "协议工资", basis: agreementBasis, amount: agreementAmount, category: "fixed" }] : normalComponents;
+  const attendanceDeduction = attendanceDeductionComponent(attendanceSettlement, {
+    assessmentSalary: payrollComponents.find((component) => component.name === "考核工资")?.amount || 0,
+    grossBeforeAttendance: payrollComponents.reduce((sum, component) => sum + Number(component.amount || 0), 0),
+  });
+  const components = [...payrollComponents, attendanceDeduction].filter(Boolean);
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
   const tax = roundMoney(Math.max(grossPay - Number(normalizedRules.taxThreshold || 0), 0) * Number(normalizedRules.taxRate || 0));
   const amountOf = (name) => roundMoney(components.find((item) => item.name === name)?.amount || 0);
@@ -1138,6 +1186,7 @@ function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrat
     grossPay, tax, netPay: roundMoney(grossPay - tax), components, lines: [],
     calendarSettlement: { tag: hasHolidaySettlement ? "holiday" : "teaching", totalDays: totalCalendarDays, teachingDays, holidayDays, holidayRate: hasHolidaySettlement ? (employmentType === "agreement" ? 0.8 : holidayRate) : 1, managementLevel, employmentType, holidayEntries: calendarSettlement?.holidayEntries || [] },
     leaveSettlement: leaveSettlement ? { ...leaveSettlement, applied: employmentType === "normal" && Number(leaveSettlement.policyLeaveDays || 0) > 0 } : null,
+    attendanceSettlement: attendanceSettlement ? { ...attendanceSettlement, applied: Boolean(attendanceSettlement.applies) } : null,
   };
 }
 
@@ -1161,6 +1210,8 @@ export function calculateDedicatedTeacherPayroll({
   // 已最终审批的请假，按该自然月内实际占用的上午／下午折算。
   // 这里只接收已去重的结算事实，避免工资引擎再去依赖 OA 数据结构。
   leaveSettlement = null,
+  // 已导入且仍为当前版本的月度考勤结算事实。目前仅初中部有已确认的自动扣款规则。
+  attendanceSettlement = null,
 } = {}) {
   const normalizedRules = normalizePayrollRules(payrollRules);
   const scheme = normalizedRules.teacherSalaryScheme;
@@ -1175,6 +1226,7 @@ export function calculateDedicatedTeacherPayroll({
       hrFacts,
       calendarSettlement,
       leaveSettlement,
+      attendanceSettlement,
     });
   }
   const defaults = defaultTeacherSalaryProfile(teacher);
@@ -1357,11 +1409,16 @@ export function calculateDedicatedTeacherPayroll({
         ]
       : []),
   ];
-  const components = workStatus === "standby"
+  const payrollComponents = workStatus === "standby"
     ? standbyComponents
     : employmentType === "agreement"
       ? [{ name: "协议工资", basis: agreementBasis, amount: agreementAmount, category: "fixed" }]
       : standardComponents;
+  const attendanceDeduction = attendanceDeductionComponent(attendanceSettlement, {
+    assessmentSalary: payrollComponents.find((component) => component.name === "考核工资")?.amount || 0,
+    grossBeforeAttendance: payrollComponents.reduce((sum, component) => sum + Number(component.amount || 0), 0),
+  });
+  const components = [...payrollComponents, attendanceDeduction].filter(Boolean);
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
   const tax = roundMoney(Math.max(grossPay - Number(normalizedRules.taxThreshold || 0), 0) * Number(normalizedRules.taxRate || 0));
   const netPay = roundMoney(grossPay - tax);
@@ -1413,6 +1470,9 @@ export function calculateDedicatedTeacherPayroll({
           ...leaveSettlement,
           applied: employmentType === "normal" && Number(leaveSettlement.policyLeaveDays || 0) > 0,
         }
+      : null,
+    attendanceSettlement: attendanceSettlement
+      ? { ...attendanceSettlement, applied: Boolean(attendanceSettlement.applies) }
       : null,
   };
 }

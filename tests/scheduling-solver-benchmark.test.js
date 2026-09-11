@@ -58,6 +58,16 @@ function runScenario(definition) {
       grade: definition.grade,
       regularCount: definition.regularCount,
       experimentalCount: definition.experimentalCount || 0,
+      // 高中已改为 A（清北）/B（实验）/C（普通）三类班。基准测试仍沿用
+      // 旧参数会被兼容层解释为“保持现有班数”，导致实际压力规模悄悄缩水。
+      highClassCounts:
+        definition.stageId === "high"
+          ? definition.highClassCounts || {
+              a: 0,
+              b: definition.experimentalCount || 0,
+              c: definition.regularCount,
+            }
+          : undefined,
     },
     admin,
   );
@@ -116,6 +126,7 @@ function assertAggregatedRoomCapacityPrecheck() {
       grade: 11,
       regularCount: 14,
       experimentalCount: 2,
+      highClassCounts: { a: 0, b: 2, c: 14 },
     },
     admin,
   );

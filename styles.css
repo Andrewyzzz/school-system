@@ -1119,6 +1119,12 @@ button[hidden] {
   align-items: end;
 }
 
+/* 这两个区域由当前学部动态切换；组件的 display:grid/flex 不能覆盖 hidden。 */
+.class-structure-controls[hidden],
+#scheduleTemplateSelectorWrap[hidden] {
+  display: none !important;
+}
+
 .room-resource-controls {
   grid-template-columns: repeat(5, minmax(92px, 1fr)) auto;
 }
@@ -1193,6 +1199,77 @@ button[hidden] {
   border-radius: 7px;
   background: rgba(243, 151, 0, 0.08);
   border: 1px dashed rgba(196, 116, 0, 0.34);
+}
+
+.period-template-days {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 32, 104, 0.1);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.period-template-days legend {
+  padding: 0 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.period-template-days small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.period-day-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.period-day-chip {
+  position: relative;
+  cursor: pointer;
+}
+
+.period-day-chip input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.period-day-chip span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  min-height: 30px;
+  padding: 4px 9px;
+  border: 1px solid rgba(0, 32, 104, 0.16);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.period-day-chip input:checked + span {
+  border-color: rgba(50, 111, 255, 0.48);
+  background: rgba(50, 111, 255, 0.1);
+  color: var(--brand);
+}
+
+.period-day-chip.sunday input:checked + span {
+  border-color: rgba(243, 151, 0, 0.5);
+  background: rgba(243, 151, 0, 0.12);
+  color: #b56a00;
 }
 
 .period-template-nonregular-fields[hidden] {
@@ -1305,6 +1382,10 @@ button[hidden] {
 .term-management-panel {
   display: grid;
   gap: 14px;
+}
+
+.term-management-panel[hidden] {
+  display: none !important;
 }
 
 .term-current-card {
@@ -1618,6 +1699,103 @@ button[hidden] {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+.attendance-management-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.attendance-management-toolbar {
+  display: grid;
+  grid-template-columns: minmax(148px, 0.7fr) minmax(160px, 0.8fr) minmax(260px, 1.6fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.attendance-management-toolbar .field-label,
+.attendance-file-field {
+  margin: 0;
+}
+
+.attendance-file-field {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.attendance-file-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px dashed #b8c3d4;
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.attendance-file-field small,
+.attendance-management-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.attendance-management-note {
+  margin: -4px 2px 0;
+}
+
+.attendance-upload-list {
+  display: grid;
+  gap: 10px;
+}
+
+.attendance-upload-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--primary);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.attendance-upload-entry.is-replaced {
+  border-left-color: #98a2b3;
+  opacity: 0.76;
+}
+
+.attendance-upload-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.attendance-upload-copy strong {
+  font-size: 15px;
+}
+
+.attendance-upload-copy small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.attendance-upload-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .schedule-adjust-panel,
@@ -6028,6 +6206,19 @@ td {
     width: 100%;
   }
 
+  .attendance-management-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance-upload-entry {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+  }
+
+  .attendance-upload-meta {
+    justify-content: flex-start;
+  }
+
   .term-current-card {
     display: grid;
   }
@@ -7086,6 +7277,19 @@ tbody tr:hover {
 
 .nav-item span svg {
   display: block;
+}
+
+/* “我的课表／我的排班表”是可动态切换的文字标签，不是导航图标。 */
+.nav-item #scheduleNavLabel {
+  display: inline;
+  width: auto;
+  height: auto;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  white-space: nowrap;
 }
 
 /* ---- 移动端头部与导航补丁 ---- */
@@ -9187,3 +9391,45 @@ body.dialog-open { overflow: hidden; }
 .dialog-check { display: flex; align-items: center; gap: 8px; padding: 5px 4px; cursor: pointer; }
 .dialog-check:hover { background: var(--surface-muted, #f0f4f8); border-radius: 6px; }
 .dialog-check input { margin: 0; width: auto; }
+
+/* --- 安全部跟车路线 / 生活老师排班 -------------------------------------- */
+.transport-route-toolbar {
+  display: flex; align-items: end; gap: 18px; padding: 14px 0 16px;
+  border-bottom: 1px solid var(--border-soft, #e3e7ee); margin-bottom: 14px;
+}
+.transport-route-toolbar .field-label { min-width: 330px; }
+.transport-route-toolbar .muted { margin: 0 0 8px; line-height: 1.5; }
+.transport-route-list, .transport-transfer-list { display: grid; gap: 12px; }
+.transport-route-card, .transport-transfer-entry, .life-route-run-card {
+  border: 1px solid var(--border-soft, #e3e7ee); border-radius: 12px; background: var(--surface, #fff); padding: 16px;
+}
+.transport-route-title, .transport-route-footer, .transport-transfer-entry, .life-route-run-title, .life-route-leg {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.transport-route-title strong, .transport-transfer-entry strong, .life-route-run-title strong { font-size: 16px; color: var(--text, #172033); }
+.transport-route-title p, .transport-transfer-entry p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.transport-route-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; margin: 14px 0; color: var(--muted); font-size: 13px; }
+.transport-route-meta b { color: var(--text, #172033); }
+.transport-route-footer { border-top: 1px solid var(--border-soft, #e3e7ee); padding-top: 12px; color: var(--muted); }
+.inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.transport-transfer-panel { margin-top: 18px; }
+.transport-transfer-entry small { display: block; margin-top: 5px; color: var(--muted); }
+
+.life-route-run-list { margin-top: 18px; }
+.life-route-run-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+.life-route-run-heading strong { font-size: 16px; }
+.life-route-run-heading span { color: var(--muted); font-size: 13px; }
+.life-route-run-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.life-route-run-title { align-items: flex-start; margin-bottom: 10px; }
+.life-route-run-title span:not(.status-pill) { display: block; color: var(--muted); font-size: 13px; margin-top: 4px; }
+.life-route-leg { padding: 10px 0; border-top: 1px solid var(--border-soft, #e3e7ee); }
+.life-route-leg strong { display: block; font-size: 14px; }
+.life-route-leg span { display: block; font-size: 12px; color: var(--muted); margin-top: 3px; }
+.life-route-run-actions { padding-top: 10px; border-top: 1px solid var(--border-soft, #e3e7ee); text-align: right; }
+
+@media (max-width: 820px) {
+  .transport-route-toolbar, .life-route-run-heading { align-items: stretch; flex-direction: column; }
+  .transport-route-toolbar .field-label { min-width: 0; }
+  .transport-route-meta, .life-route-run-grid { grid-template-columns: 1fr; }
+  .transport-route-footer, .transport-transfer-entry { align-items: flex-start; flex-direction: column; }
+}
