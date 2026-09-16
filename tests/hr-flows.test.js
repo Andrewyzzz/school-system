@@ -17,6 +17,7 @@ const {
   scanHrFlowTimeouts,
   setEmployeeStatus,
   teacherEligibility,
+  updateEmployee,
   withdrawHrFlow,
 } = await import("../server/hr.js");
 const { buildSchedulingConfig } = await import("../server/scheduling.js");
@@ -32,6 +33,7 @@ function actor(db, username) {
 const db = createInitialData({ teacherCount: 12 });
 const hr = actor(db, "hr");
 const sysadmin = actor(db, "sysadmin");
+const principal = actor(db, "principal");
 const headPrimary = actor(db, "head_primary");
 const headMiddle = actor(db, "head_middle");
 const context = { clientIp: "10.0.0.9", userAgent: "hr-flows-test" };
@@ -103,6 +105,21 @@ assert.equal(newAccount.mustChangePassword, true);
 const newEmployee = employeeByTeacherId(db, newTeacher.id);
 assert.equal(newEmployee.status, "probation", "新入职默认试用期");
 assert.equal(newEmployee.salaryTemplateId, "TPL-TEACHER-STD", "应自动套用岗位默认薪资模板");
+
+// ---- 2.0 行政兼课基准：仅总校人事 + 行政可维护，且保留在人事档案事实中 ----
+assert.throws(
+  () => updateEmployee(db, newEmployee.id, { administrativeTeachingLoad: "oneThird" }, headPrimary, context),
+  /仅总校人事 \+ 行政可以维护行政兼课基准/,
+);
+const administrativeTeachingUpdated = updateEmployee(
+  db,
+  newEmployee.id,
+  { administrativeTeachingLoad: "oneThird" },
+  sysadmin,
+  context,
+);
+assert.equal(administrativeTeachingUpdated.administrativeTeachingLoad, "oneThird");
+assert.equal(administrativeTeachingUpdated.administrativeTeachingLoadLabel, "1/3 工作量");
 
 // ---- 2.1 生活老师：仅小学／初中／高中，入职不要求任教学科 ----
 assert.throws(
@@ -184,26 +201,29 @@ assert.equal(transferredTeacher.stageId, "middle", "跨学部调岗应同步教�
 const rejectTarget = db.employees.find(
   (employee) => employee.orgUnitId === "ORG-STAGE-primary" && employee.teacherId && employee.status === "active",
 );
-const rejectFlow = createHrFlow(
-  db,
-  hr,
-  { flowType: "offboard", employeeId: rejectTarget.id, effectiveDate: "2026-08-31", reason: "个人原因" },
-  context,
+assert.throws(
+  () => createHrFlow(db, hr, { flowType: "offboard", employeeId: rejectTarget.id, effectiveDate: "2026-08-31", reason: "越权测试" }, context),
+  /仅可由所属学部主任发起/,
+  "总校人事只审批离职，不应代替学部主任发起",
 );
+const rejectFlow = createHrFlow(db, headPrimary, { flowType: "offboard", employeeId: rejectTarget.id, effectiveDate: "2026-08-31", reason: "个人原因" }, context);
 assert.equal(rejectTarget.status, "offboarding");
 assert.equal(teacherEligibility(db, rejectTarget.teacherId).inTeachingPool, false, "离职中冻结新增排课");
-assert.throws(() => approveHrFlowStep(db, rejectFlow.id, "reject", "", headPrimary, context), /必须填写意见/);
-approveHrFlowStep(db, rejectFlow.id, "reject", "挽留成功", headPrimary, context);
+assert.equal(queryHrFlows(db, { todo: "1" }, hr).some((flow) => flow.id === rejectFlow.id), true, "总校人事应先收到离职审批待办");
+assert.equal(queryHrFlows(db, { todo: "1" }, principal).some((flow) => flow.id === rejectFlow.id), false, "校长应在总校人事通过后再收到离职待办");
+assert.throws(() => approveHrFlowStep(db, rejectFlow.id, "reject", "", headPrimary, context), /不在您的处理范围/);
+assert.throws(() => approveHrFlowStep(db, rejectFlow.id, "reject", "", hr, context), /必须填写意见/);
+approveHrFlowStep(db, rejectFlow.id, "reject", "挽留成功", hr, context);
 assert.equal(rejectFlow.status, "rejected");
 assert.equal(rejectTarget.status, "active", "拒绝后恢复原状态");
 
 const withdrawFlow = createHrFlow(
   db,
-  hr,
+  headPrimary,
   { flowType: "offboard", employeeId: rejectTarget.id, effectiveDate: "2026-08-31", reason: "再次发起" },
   context,
 );
-withdrawHrFlow(db, withdrawFlow.id, hr);
+withdrawHrFlow(db, withdrawFlow.id, headPrimary);
 assert.equal(withdrawFlow.status, "withdrawn");
 assert.equal(rejectTarget.status, "active");
 
@@ -233,8 +253,12 @@ const offboard = createHrFlow(
   { flowType: "offboard", employeeId: offboardTarget.id, effectiveDate: "2026-08-31", reason: "合同到期不续签" },
   context,
 );
-approveHrFlowStep(db, offboard.id, "approve", "学部确认", headPrimary, context);
-approveHrFlowStep(db, offboard.id, "approve", "总校批准", sysadmin, context);
+assert.throws(() => approveHrFlowStep(db, offboard.id, "approve", "越权审批", headPrimary, context), /不在您的处理范围/);
+approveHrFlowStep(db, offboard.id, "approve", "总校人事审批通过", hr, context);
+assert.equal(offboard.currentStep, 1, "总校人事通过后才流转校长审批");
+assert.throws(() => approveHrFlowStep(db, offboard.id, "approve", "越权终审", sysadmin, context), /不在您的处理范围/);
+assert.equal(queryHrFlows(db, { todo: "1" }, principal).some((flow) => flow.id === offboard.id), true, "校长应收到终审待办");
+approveHrFlowStep(db, offboard.id, "approve", "校长审批通过", principal, context);
 assert.equal(offboard.status, "approved");
 assert.equal(offboardTarget.status, "left");
 assert.equal(offboardTarget.leftAt, "2026-08-31");
@@ -303,7 +327,7 @@ assert.equal(suspendAccount.status, "active");
 // ---- 8. 超时提醒（3 个工作日） ----
 const staleFlow = createHrFlow(
   db,
-  hr,
+  headPrimary,
   { flowType: "offboard", employeeId: prorationTarget.id, effectiveDate: "2026-12-31", reason: "超时测试" },
   context,
 );
@@ -313,7 +337,7 @@ assert.equal(notifiedCount, 1, "超期流程应产生提醒");
 assert.ok(db.notifications.some((item) => item.title.includes("审批超时提醒")));
 assert.ok(staleFlow.timeoutNotifiedAt, "应记录已提醒，避免重复");
 assert.equal(scanHrFlowTimeouts(db, { now: new Date("2026-07-08T10:00:00+08:00") }), 0, "同一停留只提醒一次");
-withdrawHrFlow(db, staleFlow.id, hr);
+withdrawHrFlow(db, staleFlow.id, headPrimary);
 
 // ---- 9. 待办统计与审计 scope ----
 assert.equal(typeof countHrTodos(db, sysadmin), "number");

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDatabaseFromPostgres, persistDatabaseToPostgres, resetPostgresStore } from "./db/postgresStore.js";
 import {
+  ADMINISTRATIVE_TEACHING_LOAD_LABELS,
   EMPLOYMENT_TYPE_LABELS,
   MANAGEMENT_LEVEL_LABELS,
   WORK_STATUS_LABELS,
@@ -965,6 +966,9 @@ export function createInitialData({ teacherCount = DEFAULT_TEACHER_COUNT } = {})
     workloadConfirmations: [],
     payrollDetails: [],
     payrollBatches: [],
+    // 经校长审批的“班级人数 + 班主任 + 生活老师负责学生数”学期快照。
+    // 人事档案的长期任命不再直接决定这两项人数相关津贴；工资按这里的已审批口径读取。
+    classSizeConfirmations: [],
     termBudgets: [],
     termBudgetUsageEntries: [],
     sessions: [],
@@ -1152,6 +1156,7 @@ export const TERM_SCOPED_COLLECTIONS = [
   "roomResourceOverrides",
   "schedulePeriodTemplates",
   "gradeCourseRules",
+  "gradeCourseCyclePairs",
   "scheduleConstraints",
   "teacherAssignments",
   "teacherScheduleRules",
@@ -1353,6 +1358,7 @@ export function normalizeDatabase(db) {
     "teachers",
     "accounts",
     "gradeCourseRules",
+    "gradeCourseCyclePairs",
     "schedulePeriodTemplates",
     "scheduleConstraints",
     "teacherScheduleRules",
@@ -1372,6 +1378,7 @@ export function normalizeDatabase(db) {
     "workloadConfirmations",
     "payrollDetails",
     "payrollBatches",
+    "classSizeConfirmations",
     "termBudgets",
     "termBudgetUsageEntries",
     "sessions",
@@ -2286,6 +2293,7 @@ function mergedSourceTermRows(rows = [], sourceTermId = "", keyFn = (row) => row
 function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
   const sourceClasses = sourceTermRows(db.classes || [], sourceTermId).filter((schoolClass) => schoolClass.active !== false);
   const sourceCourseRules = sourceTermRows(db.gradeCourseRules || [], sourceTermId);
+  const sourceCourseCyclePairs = sourceTermRows(db.gradeCourseCyclePairs || [], sourceTermId);
   const sourceAssignments = sourceTermRows(db.teacherAssignments || [], sourceTermId);
   const sourceTeacherRules = sourceTermRows(db.teacherScheduleRules || [], sourceTermId);
   const sourceConstraints = sourceTermRows(db.scheduleConstraints || [], sourceTermId);
@@ -2293,6 +2301,7 @@ function copiedConfigSummary(db, sourceTermId = currentTerm(db).id) {
   const sourcePeriodTemplates = sourceTermRows(db.schedulePeriodTemplates || [], sourceTermId);
   return {
     courseRuleCount: sourceCourseRules.length,
+    courseCyclePairCount: sourceCourseCyclePairs.length,
     teacherAssignmentCount: sourceAssignments.filter(
       (assignment) => Object.values(assignment.classTeacherIds || {}).flat().length > 0,
     ).length,
@@ -2359,6 +2368,13 @@ function cloneTermConfigRows(db, sourceTermId, targetTerm, actorAccount = null) 
     sourceTermRows(db.gradeCourseRules || [], sourceTermId).map((row) => ({
       ...withScope(row),
       id: scopedStorageConfigId("CR", targetTerm.id, row.stageId, row.grade, row.subjectId),
+    })),
+  );
+  replaceTargetRows(
+    "gradeCourseCyclePairs",
+    sourceTermRows(db.gradeCourseCyclePairs || [], sourceTermId).map((row, index) => ({
+      ...withScope(row),
+      id: scopedStorageConfigId("CYCLE", targetTerm.id, row.stageId, row.grade, index + 1),
     })),
   );
   replaceTargetRows(
@@ -2588,6 +2604,7 @@ function removeTermConfigRows(db, termId = "") {
     "classes",
     "rooms",
     "gradeCourseRules",
+    "gradeCourseCyclePairs",
     "teacherAssignments",
     "scheduleConstraints",
     "teacherScheduleRules",
@@ -2725,7 +2742,10 @@ export function publicAccount(account, db) {
     financeReadScope: financeReadScopeFor(account) || "",
     payrollReadAll: Boolean(account.payrollReadAll),
     payrollReadDivision: Boolean(account.payrollReadDivision),
-    payrollExportAll: Boolean(account.payrollExportAll),
+    // 总校财务的既有账号并未逐个写入 payrollExportAll；服务端权限口径中
+    // “未明确禁止”即保留总校财务的导出与配置权限。这里若用 Boolean()
+    // 会把 undefined 变成 false，使前端错误隐藏“薪资配置”。
+    payrollExportAll: account.payrollExportAll !== false,
     scopeStageIds: Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [],
     schedulingGradeIds: Array.isArray(account.schedulingGradeIds) ? account.schedulingGradeIds.map(String) : [],
   };
@@ -2910,9 +2930,12 @@ export function resetAccountPassword(db, accountId, newPassword = DEFAULT_PASSWO
     error.statusCode = 404;
     throw error;
   }
-  // 管理员重置也走同一套强度校验：否则管理员把全校口令重置成 123456，
-  // 前面对用户自助改密的约束就白设了。
-  const weakness = validatePasswordStrength(newPassword, account);
+  // 123456 只允许作为管理员发放的一次性临时口令。重置后 mustChangePassword
+  // 会在服务端挡住全部业务接口，用户必须先换成符合强度要求的新密码；其他
+  // 自定义重置口令仍走完整强度校验。这样“恢复默认密码”入口可用，同时不会
+  // 让弱口令账号直接进入工资、人事等业务页面。
+  const temporaryDefaultPassword = String(newPassword) === DEFAULT_PASSWORD;
+  const weakness = temporaryDefaultPassword ? "" : validatePasswordStrength(newPassword, account);
   if (weakness) {
     const error = new Error(weakness);
     error.statusCode = 400;
@@ -3058,6 +3081,9 @@ function publicPersonnelRows(db) {
     const managementLevel = MANAGEMENT_LEVEL_LABELS[employee?.managementLevel] ? employee.managementLevel : "ordinary";
     const employmentType = EMPLOYMENT_TYPE_LABELS[employee?.employmentType] ? employee.employmentType : "normal";
     const workStatus = WORK_STATUS_LABELS[employee?.workStatus] ? employee.workStatus : "employed";
+    const administrativeTeachingLoad = ADMINISTRATIVE_TEACHING_LOAD_LABELS[employee?.administrativeTeachingLoad]
+      ? employee.administrativeTeachingLoad
+      : "none";
     return {
       id: `teacher:${teacher.id}`,
       personType: "teacher",
@@ -3084,6 +3110,8 @@ function publicPersonnelRows(db) {
       employmentTypeLabel: EMPLOYMENT_TYPE_LABELS[employmentType],
       workStatus,
       workStatusLabel: WORK_STATUS_LABELS[workStatus],
+      administrativeTeachingLoad,
+      administrativeTeachingLoadLabel: ADMINISTRATIVE_TEACHING_LOAD_LABELS[administrativeTeachingLoad],
       tags: employeeTags(employee),
       status: teacher.status || activeAccount?.status || "active",
       accountStatus: activeAccount?.status || "未开通账号",
@@ -3096,6 +3124,9 @@ function publicPersonnelRows(db) {
       const employee = employeesByAccountId.get(account.id);
       const managementLevel = MANAGEMENT_LEVEL_LABELS[employee?.managementLevel] ? employee.managementLevel : "ordinary";
       const workStatus = WORK_STATUS_LABELS[employee?.workStatus] ? employee.workStatus : "employed";
+      const administrativeTeachingLoad = ADMINISTRATIVE_TEACHING_LOAD_LABELS[employee?.administrativeTeachingLoad]
+        ? employee.administrativeTeachingLoad
+        : "none";
       return {
         id: `account:${account.id}`,
         personType: "account",
@@ -3126,6 +3157,8 @@ function publicPersonnelRows(db) {
         managementLevelLabel: MANAGEMENT_LEVEL_LABELS[managementLevel],
         workStatus,
         workStatusLabel: WORK_STATUS_LABELS[workStatus],
+        administrativeTeachingLoad,
+        administrativeTeachingLoadLabel: ADMINISTRATIVE_TEACHING_LOAD_LABELS[administrativeTeachingLoad],
         tags: employeeTags(employee),
         status: account.status || "active",
         accountStatus: account.status || "active",
@@ -3864,10 +3897,12 @@ export function teacherScheduleWeeks(db, teacherId, options = {}) {
         lessonCount: 0,
         publishedCount: 0,
         latestDate: lesson.date,
+        cycleWeek: lesson.cycleWeek || "",
       };
       current.lessonCount += 1;
       if (lesson.source === "backend-scheduling") current.publishedCount += 1;
       if (lesson.date > current.latestDate) current.latestDate = lesson.date;
+      if (!current.cycleWeek && lesson.cycleWeek) current.cycleWeek = lesson.cycleWeek;
       weekMap.set(weekStart, current);
     });
   return Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
@@ -3903,6 +3938,8 @@ export function queryTeacherLessonRecords(db, teacherId, month = "2026-06") {
         room: lessonRoomName(db, lesson),
         type: lesson.type,
         units: Number(lesson.units || 1),
+        nonRegularPayItemName: lesson.nonRegularPayItemName || "",
+        nonRegularPayRate: Number(lesson.nonRegularPayRate || 0),
         payable: !cancelled,
         status: lesson.status,
         // 取消的课要说清楚为什么，教师才知道该找谁问
@@ -3910,6 +3947,8 @@ export function queryTeacherLessonRecords(db, teacherId, month = "2026-06") {
           ? lesson.cancelReason || "已取消，不计薪"
           : lesson.outboundOriginalPay
             ? `外出期间由${lesson.outboundSubstituteTeacherName || "代课老师"}代课，原课时工资照发`
+            : lesson.nonRegularPayItemName
+              ? `${lesson.nonRegularPayItemName}：${Number(lesson.nonRegularPayRate || 0)} 元/节`
             : "计入课时费",
       };
     });
@@ -3983,6 +4022,11 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
   // 人事事实（职称、学历、兼岗任命）以人事档案为准，薪资引擎只读取不存储；
   // 月度考核由学部/人事按月录入，财务不可改。
   const employee = (db.employees || []).find((item) => item.teacherId === teacherId) || null;
+  // 班主任及生活老师的“人数”不是长期人事字段：每学期由主任发起、校长审批后
+  // 冻结。只要该学期已有确认单，就不再采信人事档案里残留的手工人数，避免人事
+  // 后续修改档案意外改写已确认学期的工资口径。
+  const termScopedRoles = classSizeRolesForPayroll(db, { teacher, employee, term });
+  const hasTermScopedClassSize = Boolean(latestClassSizeConfirmation(db, term.id, teacher.stageId));
   const payroll = calculateDedicatedTeacherPayroll({
     teacher,
     lessons,
@@ -3991,19 +4035,20 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     getRoomName: (lesson) => lessonRoomName(db, lesson),
     fixedProrationFactor: proration.factor,
     prorationNote: proration.note,
-    hrFacts: employee
+    hrFacts: employee || hasTermScopedClassSize
       ? {
-          titleGrade: employee.titleGrade || "",
-          degree: employee.degree || "",
-          roles: employee.teacherRoles || null,
-          positionId: employee.positionId || "",
-          positionName: (db.positions || []).find((position) => position.id === employee.positionId)?.name || "",
-          hiredAt: employee.hiredAt || teacher.hiredAt || "",
-          status: employee.status || "",
-          managementLevel: employee.managementLevel || "ordinary",
-          employmentType: employee.employmentType || "normal",
-          agreementMonthlySalary: Number(employee.agreementMonthlySalary || 0),
-          workStatus: employee.workStatus || "employed",
+          titleGrade: employee?.titleGrade || "",
+          degree: employee?.degree || "",
+          roles: termScopedRoles,
+          positionId: employee?.positionId || "",
+          positionName: (db.positions || []).find((position) => position.id === employee?.positionId)?.name || "",
+          hiredAt: employee?.hiredAt || teacher.hiredAt || "",
+          status: employee?.status || "",
+          managementLevel: employee?.managementLevel || "ordinary",
+          employmentType: employee?.employmentType || "normal",
+          agreementMonthlySalary: Number(employee?.agreementMonthlySalary || 0),
+          workStatus: employee?.workStatus || "employed",
+          administrativeTeachingLoad: employee?.administrativeTeachingLoad || "none",
         }
       : null,
     // 接送补助只认安全部发布且“早接、晚送均已完成”的实际跟车班次，
@@ -4022,6 +4067,157 @@ export function teacherPayrollPreview(db, teacherId, month = "2026-06") {
     ...payroll,
     termId: term.id,
     termName: term.name,
+  };
+}
+
+function latestClassSizeConfirmation(db, termId, stageId) {
+  return (db.classSizeConfirmations || [])
+    .filter((item) => item.termId === termId && item.stageId === stageId)
+    .sort((left, right) => String(right.approvedAt || right.updatedAt || "").localeCompare(String(left.approvedAt || left.updatedAt || "")))[0] || null;
+}
+
+function isLifeTeacherForClassSize(teacher = null, employee = null) {
+  return Boolean(
+    String(employee?.positionId || "") === "POS-LIFE-TEACHER" ||
+    String(teacher?.salaryProfile?.salaryCategory || "") === "lifeTeacher",
+  );
+}
+
+function classSizeRolesForPayroll(db, { teacher, employee, term } = {}) {
+  const fallbackRoles = {
+    ...(teacher?.salaryProfile?.roles || {}),
+    ...(employee?.teacherRoles || {}),
+  };
+  if (!teacher || !term?.id) return fallbackRoles;
+  const confirmation = latestClassSizeConfirmation(db, term.id, teacher.stageId);
+  // 兼容已发生的历史工资：在该学期尚未走人数确认前，维持原有的人事档案口径。
+  if (!confirmation) return fallbackRoles;
+  if (isLifeTeacherForClassSize(teacher, employee)) {
+    const assignment = (confirmation.lifeTeacherAssignments || []).find((item) => item.teacherId === teacher.id);
+    return {
+      ...fallbackRoles,
+      // 生活老师允许跨班负责，只按本确认单记录的“负责学生总数”计，不做班级归属校验。
+      lifeTeacherStudentCount: Number(assignment?.studentCount || 0),
+    };
+  }
+  const homeroomClasses = (confirmation.classConfirmations || []).filter((item) => item.homeroomTeacherId === teacher.id);
+  return {
+    ...fallbackRoles,
+    // 该学期已经确认后，班主任津贴只认确认单中的班级任命；没被选择即为 0，
+    // 不再因人事档案里的旧勾选继续发放。
+    homeroom: homeroomClasses.length > 0,
+    homeroomStudentCount: homeroomClasses.reduce((sum, item) => sum + Math.max(0, Number(item.studentCount || 0)), 0),
+  };
+}
+
+// 校长审批通过后，写入一份“学期 + 学部”唯一的现行人数快照。旧确认单本身仍
+// 保留在 OA 历史中；这里替换的是当前可计算口径，允许在工资未锁定前通过新的
+// 审批单更正。已锁定月份绝不允许补改，以免历史工资出现静默变化。
+export function applyApprovedClassSizeConfirmation(db, payload = {}) {
+  const formData = payload.formData || {};
+  const termId = String(formData.termId || "").trim();
+  const stageId = String(formData.stageId || "").trim();
+  const term = (db.terms || []).find((item) => item.id === termId);
+  if (!term || !stageId) {
+    const error = new Error("班级人数确认缺少有效的学期或学部");
+    error.statusCode = 400;
+    throw error;
+  }
+  const stageTeacherIds = new Set((db.teachers || []).filter((teacher) => teacher.stageId === stageId).map((teacher) => teacher.id));
+  const lockedDetails = (db.payrollDetails || []).filter(
+    (detail) =>
+      detail.status === "locked" &&
+      stageTeacherIds.has(detail.teacherId) &&
+      termForMonth(db, detail.month, stageId)?.id === termId,
+  );
+  if (lockedDetails.length) {
+    const months = [...new Set(lockedDetails.map((item) => item.month))].sort();
+    const error = new Error(`该学期 ${months.join("、")} 工资已锁定，不能再修改班级人数确认`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const classConfirmations = Array.isArray(formData.classConfirmations) ? formData.classConfirmations : [];
+  const lifeTeacherAssignments = Array.isArray(formData.lifeTeacherAssignments) ? formData.lifeTeacherAssignments : [];
+  const totalStudentCount = classConfirmations.reduce((sum, item) => sum + Math.max(0, Number(item.studentCount || 0)), 0);
+  const lifeTeacherStudentTotal = lifeTeacherAssignments.reduce((sum, item) => sum + Math.max(0, Number(item.studentCount || 0)), 0);
+  if (lifeTeacherStudentTotal > totalStudentCount) {
+    const error = new Error("生活老师负责学生合计不能超过本学部学生总数");
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const existingIndex = (db.classSizeConfirmations || []).findIndex(
+    (item) => item.termId === termId && item.stageId === stageId,
+  );
+  const previous = existingIndex >= 0 ? db.classSizeConfirmations[existingIndex] : null;
+  const confirmation = {
+    id: previous?.id || `CLASS-SIZE-${termId}-${stageId}`,
+    termId,
+    termName: term.name || formData.termName || "",
+    schoolYear: term.schoolYear || "",
+    stageId,
+    stageName: formData.stageName || (db.stages || []).find((item) => item.id === stageId)?.name || stageId,
+    classConfirmations: classConfirmations.map((item) => ({ ...item })),
+    lifeTeacherAssignments: lifeTeacherAssignments.map((item) => ({ ...item })),
+    totalStudentCount,
+    lifeTeacherStudentTotal,
+    sourceRequestId: payload.requestId || "",
+    approvedAt: now,
+    approvedByName: payload.actorName || "",
+    submittedByAccountId: payload.applicantAccountId || "",
+    submittedByName: payload.applicantName || "",
+    version: Number(previous?.version || 0) + 1,
+    createdAt: previous?.createdAt || now,
+    updatedAt: now,
+  };
+  if (!Array.isArray(db.classSizeConfirmations)) db.classSizeConfirmations = [];
+  db.meta = db.meta || {};
+  if (existingIndex >= 0) db.classSizeConfirmations[existingIndex] = confirmation;
+  else db.classSizeConfirmations.push(confirmation);
+
+  // 班级结构读模型同步展示已确认的人数与班主任；真正的历史口径由上面的快照保存。
+  const byClassId = new Map(classConfirmations.map((item) => [item.classId, item]));
+  (db.classes || []).forEach((classItem) => {
+    const item = byClassId.get(classItem.id);
+    if (!item) return;
+    classItem.studentCount = Number(item.studentCount || 0);
+    classItem.homeroomTeacherId = item.homeroomTeacherId || "";
+    classItem.homeroomTeacherName = item.homeroomTeacherName || "";
+    classItem.classSizeConfirmedTermId = termId;
+    classItem.updatedAt = now;
+  });
+  const invalidatedCount = invalidateOpenPayrollDetails(
+    db,
+    (detail) => stageTeacherIds.has(detail.teacherId) && termForMonth(db, detail.month, stageId)?.id === termId,
+  );
+  appendAuditLog(db, {
+    actorAccountId: payload.applicantAccountId || "",
+    actorName: payload.actorName || "审批流程",
+    action: "class_size_confirmation_applied",
+    entityType: "class_size_confirmation",
+    entityId: confirmation.id,
+    details: {
+      termId,
+      stageId,
+      sourceRequestId: payload.requestId || "",
+      classCount: classConfirmations.length,
+      totalStudentCount,
+      lifeTeacherStudentTotal,
+      invalidatedPayrollDetails: invalidatedCount,
+    },
+  });
+  return {
+    type: "class_size_confirmation",
+    confirmationId: confirmation.id,
+    termId,
+    termName: confirmation.termName,
+    stageId,
+    stageName: confirmation.stageName,
+    classCount: classConfirmations.length,
+    totalStudentCount,
+    lifeTeacherStudentTotal,
+    invalidatedPayrollDetails: invalidatedCount,
+    version: confirmation.version,
   };
 }
 
@@ -4927,7 +5123,9 @@ function payrollLineCategories(lines = []) {
         amount: 0,
         basisSet: new Set(),
       };
-      current.units += Number(line.units || 0);
+      // 行政兼课的基准内正课仍会出现在课表中，但不计入可发课时；
+      // payroll line 的 payableUnits 因此优先于原始课次 units。
+      current.units += Number(line.payableUnits ?? line.units ?? 0);
       current.amount += Number(line.amount || 0);
       if (line.basis) current.basisSet.add(line.basis);
       categoryMap.set(key, current);
@@ -5006,7 +5204,9 @@ export function teacherMonthlyWorkload(db, teacherId, month = "2026-06") {
         subjectName: lesson.subjectName,
         room: lessonRoomName(db, lesson),
         type: lesson.type,
-        units: lesson.units,
+        // 行政兼课基准内课程的计薪课时为 0；保留 scheduledUnits 供教师核对课表。
+        units: Number(payrollLine?.payableUnits ?? lesson.units ?? 0),
+        scheduledUnits: Number(lesson.units || 0),
         status: lesson.status,
         amount: payrollLine?.amount || 0,
         ruleName: payrollLine?.ruleName || workloadTypeLabel(lesson.type),

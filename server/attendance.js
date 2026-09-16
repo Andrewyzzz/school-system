@@ -4,7 +4,12 @@ import { accountHasRole } from "./accountRoles.js";
 import { accountStageScopeIds } from "./accessScope.js";
 
 // 月度考勤导入：负责把主管上传的考勤结果规范化、校验和留存。
-// 小学、初中、高中已启用各自已确认的规则；其余学部先留存数据，等待制度确认。
+//
+// 2026-09 起，四个学部统一适用《深圳市富源学校考勤休假管理制度》中的
+// 违纪认定和绩效扣减口径。各学部、部门的作息时间仍可不同，因此导入表同时
+// 留存原始四次打卡和按本部门作息换算后的迟到／早退／脱岗分钟数；统一引擎
+// 只依据分钟数和旷工、旷课事实作出违纪等级判断，不再存在“小学/初中/高中
+// 各扣各的”三套薪酬规则。
 const MAX_ATTENDANCE_ROWS = 60000;
 const MAX_XLSX_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
@@ -21,20 +26,13 @@ const REQUIRED_HEADERS = {
   note: ["备注"],
 };
 
-const PRIMARY_MAKEUP_HEADERS = {
-  morningIn: ["上午上班补卡状态", "上午上班补卡"],
-  morningOut: ["上午下班补卡状态", "上午下班补卡"],
-  afternoonIn: ["下午上班补卡状态", "下午上班补卡"],
-  afternoonOut: ["下午下班补卡状态", "下午下班补卡"],
-};
-
-const HIGH_ATTENDANCE_HEADERS = {
-  arrivalStatus: ["到岗状态", "到岗考勤"],
+const UNIFIED_ATTENDANCE_HEADERS = {
   lateMinutes: ["迟到分钟"],
-  checkoutStatus: ["签退状态", "离岗状态", "签退考勤"],
   earlyLeaveMinutes: ["早退分钟"],
-  missedClassCount: ["旷课节数"],
-  absenceWorkDays: ["旷工天数"],
+  awayMinutes: ["脱岗分钟", "私自脱岗分钟"],
+  missedClassCount: ["旷课节数", "空堂节数"],
+  absenceDays: ["旷工天数"],
+  exemptionStatus: ["免责认定", "考勤免责"],
 };
 
 const PUNCH_FIELDS = ["morningIn", "morningOut", "afternoonIn", "afternoonOut"];
@@ -292,38 +290,23 @@ function canonicalShouldAttend(value) {
   return null;
 }
 
-function canonicalMakeupStatus(value) {
-  const source = normalizeText(value).toLowerCase();
-  if (["正常", "有打卡", "原始打卡"].includes(source)) return "normal";
-  if (["已补卡", "补卡", "是", "y", "yes", "1"].includes(source)) return "madeUp";
-  if (["未补卡", "缺卡", "否", "n", "no", "0"].includes(source)) return "unmade";
-  return "";
-}
-
-function canonicalHighArrivalStatus(value) {
-  const source = normalizeText(value).toLowerCase();
-  if (["准时", "正常", "按时"].includes(source)) return "onTime";
-  if (["迟到"].includes(source)) return "late";
-  return "";
-}
-
-function canonicalHighCheckoutStatus(value) {
-  const source = normalizeText(value).toLowerCase();
-  if (["准时", "正常", "按时"].includes(source)) return "normal";
-  if (["早退"].includes(source)) return "early";
-  if (["未签退"].includes(source)) return "unsigned";
-  if (["已补签", "已补卡", "补签", "补卡"].includes(source)) return "madeUp";
-  return "";
-}
-
-function canonicalWholeNumber(value) {
+function canonicalNonNegativeNumber(value, { halfDay = false } = {}) {
   if (value === "" || value === null || value === undefined) return 0;
   const source = normalizeText(value);
-  if (!/^\d+$/.test(source)) return null;
-  return Number(source);
+  if (!/^\d+(?:\.5)?$/.test(source)) return null;
+  const number = Number(source);
+  if (!halfDay && !Number.isInteger(number)) return null;
+  return number;
 }
 
-function headerMap(rows, { requiresPrimaryMakeup = false, requiresHighAttendance = false } = {}) {
+function canonicalExemptionStatus(value) {
+  const source = normalizeText(value).toLowerCase();
+  if (["", "无", "正常", "否", "n", "no", "0"].includes(source)) return "normal";
+  if (["免责", "免于认定", "已批准请假", "已批准外出", "学校公务", "专项培训", "临时工作调度", "是", "y", "yes", "1"].includes(source)) return "exempt";
+  return "";
+}
+
+function headerMap(rows) {
   const headerIndex = rows.findIndex((row) => {
     const values = row.map(normalizeHeader);
     return REQUIRED_HEADERS.employeeNo.some((header) => values.includes(normalizeHeader(header))) &&
@@ -334,28 +317,20 @@ function headerMap(rows, { requiresPrimaryMakeup = false, requiresHighAttendance
   }
   const headers = rows[headerIndex].map(normalizeHeader);
   const map = {};
-  const requiredKeys = requiresHighAttendance
-    ? ["employeeNo", "teacherName", "date", "shouldAttend", "note"]
-    : Object.keys(REQUIRED_HEADERS);
+  const requiredKeys = Object.keys(REQUIRED_HEADERS);
   for (const key of requiredKeys) {
     const candidates = REQUIRED_HEADERS[key];
     const column = headers.findIndex((header) => candidates.map(normalizeHeader).includes(header));
     if (column < 0) throw attendanceError(`缺少“${candidates[0]}”列，请下载最新模板后填写`);
     map[key] = column;
   }
-  const makeupMap = {};
-  for (const [key, candidates] of Object.entries(PRIMARY_MAKEUP_HEADERS)) {
+  const unifiedMap = {};
+  for (const [key, candidates] of Object.entries(UNIFIED_ATTENDANCE_HEADERS)) {
     const column = headers.findIndex((header) => candidates.map(normalizeHeader).includes(header));
-    if (requiresPrimaryMakeup && column < 0) throw attendanceError(`缺少“${candidates[0]}”列，请下载最新的小学部考勤模板后填写`);
-    makeupMap[key] = column;
+    if (column < 0) throw attendanceError(`缺少“${candidates[0]}”列，请下载最新的“全校统一月度考勤模板”后填写`);
+    unifiedMap[key] = column;
   }
-  const highMap = {};
-  for (const [key, candidates] of Object.entries(HIGH_ATTENDANCE_HEADERS)) {
-    const column = headers.findIndex((header) => candidates.map(normalizeHeader).includes(header));
-    if (requiresHighAttendance && column < 0) throw attendanceError(`缺少“${candidates[0]}”列，请下载最新的高中部考勤模板后填写`);
-    highMap[key] = column;
-  }
-  return { headerIndex, map, makeupMap, highMap };
+  return { headerIndex, map, unifiedMap };
 }
 
 function hasRowContent(row = []) {
@@ -364,9 +339,7 @@ function hasRowContent(row = []) {
 
 export function parseAttendanceWorkbook(buffer, { stageId = "" } = {}) {
   const rows = xlsxRows(buffer);
-  const requiresPrimaryMakeup = stageId === "primary";
-  const requiresHighAttendance = stageId === "high";
-  const { headerIndex, map, makeupMap, highMap } = headerMap(rows, { requiresPrimaryMakeup, requiresHighAttendance });
+  const { headerIndex, map, unifiedMap } = headerMap(rows);
   const records = [];
   const problems = [];
   for (let index = headerIndex + 1; index < rows.length; index += 1) {
@@ -377,28 +350,20 @@ export function parseAttendanceWorkbook(buffer, { stageId = "" } = {}) {
     const teacherName = normalizeText(row[map.teacherName]);
     const date = canonicalDate(row[map.date]);
     const shouldAttend = canonicalShouldAttend(row[map.shouldAttend]);
-    const rawTimes = requiresHighAttendance
-      ? { morningIn: "", morningOut: "", afternoonIn: "", afternoonOut: "" }
-      : {
-        morningIn: row[map.morningIn],
-        morningOut: row[map.morningOut],
-        afternoonIn: row[map.afternoonIn],
-        afternoonOut: row[map.afternoonOut],
-      };
+    const rawTimes = {
+      morningIn: row[map.morningIn],
+      morningOut: row[map.morningOut],
+      afternoonIn: row[map.afternoonIn],
+      afternoonOut: row[map.afternoonOut],
+    };
     const times = Object.fromEntries(Object.entries(rawTimes).map(([key, value]) => [key, canonicalTime(value)]));
-    const rawMakeupStatuses = Object.fromEntries(
-      PUNCH_FIELDS.map((field) => [field, makeupMap[field] >= 0 ? row[makeupMap[field]] : ""]),
-    );
-    const makeupStatuses = Object.fromEntries(
-      Object.entries(rawMakeupStatuses).map(([field, value]) => [field, canonicalMakeupStatus(value)]),
-    );
-    const highAttendance = {
-      arrivalStatus: requiresHighAttendance ? canonicalHighArrivalStatus(row[highMap.arrivalStatus]) : "",
-      lateMinutes: requiresHighAttendance ? canonicalWholeNumber(row[highMap.lateMinutes]) : 0,
-      checkoutStatus: requiresHighAttendance ? canonicalHighCheckoutStatus(row[highMap.checkoutStatus]) : "",
-      earlyLeaveMinutes: requiresHighAttendance ? canonicalWholeNumber(row[highMap.earlyLeaveMinutes]) : 0,
-      missedClassCount: requiresHighAttendance ? canonicalWholeNumber(row[highMap.missedClassCount]) : 0,
-      absenceWorkDays: requiresHighAttendance ? canonicalWholeNumber(row[highMap.absenceWorkDays]) : 0,
+    const unifiedAttendance = {
+      lateMinutes: canonicalNonNegativeNumber(row[unifiedMap.lateMinutes]),
+      earlyLeaveMinutes: canonicalNonNegativeNumber(row[unifiedMap.earlyLeaveMinutes]),
+      awayMinutes: canonicalNonNegativeNumber(row[unifiedMap.awayMinutes]),
+      missedClassCount: canonicalNonNegativeNumber(row[unifiedMap.missedClassCount]),
+      absenceDays: canonicalNonNegativeNumber(row[unifiedMap.absenceDays], { halfDay: true }),
+      exemptionStatus: canonicalExemptionStatus(row[unifiedMap.exemptionStatus]),
     };
     if (!employeeNo || !teacherName || !date || shouldAttend === null) {
       problems.push(`第 ${excelRow} 行：教师工号、教师姓名、考勤日期和应出勤均为必填；应出勤请填“是”或“否”`);
@@ -407,29 +372,13 @@ export function parseAttendanceWorkbook(buffer, { stageId = "" } = {}) {
     for (const [field, raw] of Object.entries(rawTimes)) {
       if (normalizeText(raw) && !times[field]) problems.push(`第 ${excelRow} 行：${REQUIRED_HEADERS[field][0]}格式应为 HH:MM`);
     }
-    if (requiresPrimaryMakeup && shouldAttend === true) {
-      PUNCH_FIELDS.forEach((field) => {
-        const status = makeupStatuses[field];
-        if (!status) {
-          problems.push(`第 ${excelRow} 行：${PRIMARY_MAKEUP_HEADERS[field][0]}请填“正常”“已补卡”或“未补卡”`);
-        } else if (times[field] && status !== "normal") {
-          problems.push(`第 ${excelRow} 行：${REQUIRED_HEADERS[field][0]}已有打卡时间，对应补卡状态应填“正常”`);
-        } else if (!times[field] && status === "normal") {
-          problems.push(`第 ${excelRow} 行：${REQUIRED_HEADERS[field][0]}为空，对应补卡状态应填“已补卡”或“未补卡”`);
-        }
-      });
-    }
-    if (requiresHighAttendance && shouldAttend === true) {
-      const numericFields = ["lateMinutes", "earlyLeaveMinutes", "missedClassCount", "absenceWorkDays"];
-      if (!highAttendance.arrivalStatus) problems.push(`第 ${excelRow} 行：到岗状态请填“准时”或“迟到”`);
-      if (!highAttendance.checkoutStatus) problems.push(`第 ${excelRow} 行：签退状态请填“准时”“早退”“未签退”或“已补签”`);
-      numericFields.forEach((field) => {
-        if (highAttendance[field] === null) problems.push(`第 ${excelRow} 行：${HIGH_ATTENDANCE_HEADERS[field][0]}应为不小于 0 的整数`);
-      });
-      if (highAttendance.arrivalStatus === "onTime" && highAttendance.lateMinutes !== 0) problems.push(`第 ${excelRow} 行：到岗状态为“准时”时，迟到分钟必须填 0`);
-      if (highAttendance.arrivalStatus === "late" && !(highAttendance.lateMinutes > 0)) problems.push(`第 ${excelRow} 行：到岗状态为“迟到”时，请填写实际迟到分钟数`);
-      if (["normal", "madeUp", "unsigned"].includes(highAttendance.checkoutStatus) && highAttendance.earlyLeaveMinutes !== 0) problems.push(`第 ${excelRow} 行：签退状态不是“早退”时，早退分钟必须填 0`);
-      if (highAttendance.checkoutStatus === "early" && !(highAttendance.earlyLeaveMinutes > 0)) problems.push(`第 ${excelRow} 行：签退状态为“早退”时，请填写实际早退分钟数`);
+    ["lateMinutes", "earlyLeaveMinutes", "awayMinutes", "missedClassCount", "absenceDays"].forEach((field) => {
+      if (unifiedAttendance[field] === null) {
+        problems.push(`第 ${excelRow} 行：${UNIFIED_ATTENDANCE_HEADERS[field][0]}应为不小于 0 的${field === "absenceDays" ? "整数或 0.5" : "整数"}`);
+      }
+    });
+    if (!unifiedAttendance.exemptionStatus) {
+      problems.push(`第 ${excelRow} 行：${UNIFIED_ATTENDANCE_HEADERS.exemptionStatus[0]}请填“正常”或制度认可的免责事由`);
     }
     records.push({
       employeeNo,
@@ -437,8 +386,7 @@ export function parseAttendanceWorkbook(buffer, { stageId = "" } = {}) {
       date,
       shouldAttend,
       ...times,
-      makeupStatuses,
-      highAttendance,
+      unifiedAttendance,
       note: normalizeText(row[map.note]),
       sourceRow: excelRow,
     });
@@ -604,6 +552,14 @@ export function activeAttendanceRecords(db, { month, stageId, teacherId = "" } =
   );
 }
 
+/*
+ * 历史三学部独立规则保留在源码中仅供已归档记录的字段兼容说明。
+ * 自 2026-09 起不再执行；统一引擎位于本文件末尾。
+ *
+ * 旧逻辑曾按学部设置固定金额／固定比例扣款，与全校制度“仅扣考核工资、
+ * 月度上限 20%、最低工资保护”的口径不一致，不能再作为薪资依据。
+ */
+/* legacy-attendance-policies
 // 小学部按导入表中的迟到、明确未补卡和全天旷工计费；不推断应打卡日，也不处理早退或特殊值班日。
 const PRIMARY_ATTENDANCE_POLICY = {
   stageId: "primary",
@@ -901,5 +857,249 @@ export function attendanceSettlementForUpload(db, upload = {}) {
     seriousOccurrenceCount: settlements.reduce((sum, settlement) => sum + Number(settlement.seriousOccurrenceCount || 0), 0),
     missedClassCount: settlements.reduce((sum, settlement) => sum + Number(settlement.missedClassCount || 0), 0),
     totalDeduction: settlements.reduce((sum, settlement) => sum + settlement.totalDeduction, 0),
+  };
+}
+*/
+
+// ---------------------------------------------------------------------------
+// 全校统一考勤制度（2026-09 起直接切换）
+// ---------------------------------------------------------------------------
+
+export const UNIFIED_ATTENDANCE_POLICY = {
+  version: "SZFY-ATTENDANCE-2026-09",
+  name: "深圳市富源学校考勤休假管理制度",
+  componentName: "全校统一考勤绩效扣减",
+  effectiveFrom: "2026-09-01",
+  // 迟到、早退、私自脱岗：≤10 分钟为轻微，>10 且 ≤30 分钟为一般，>30 分钟为较重。
+  minuteBoundaries: { minorMax: 10, generalMax: 30 },
+  // 同一类型在当月内按最高匹配档位计；多类违纪相加后，月度绩效扣款仍封顶 20%。
+  deductionRates: {
+    minor: { 1: 0.03, 2: 0.08 },
+    general: { 1: 0.1, 2: 0.18, 3: 0.2 },
+    serious: 0.2,
+    severe: 0.2,
+    monthlyCap: 0.2,
+  },
+};
+
+function noAttendanceSettlement() {
+  return {
+    applies: false,
+    requiresPayrollContext: true,
+    policyVersion: UNIFIED_ATTENDANCE_POLICY.version,
+    policyName: UNIFIED_ATTENDANCE_POLICY.name,
+    componentName: UNIFIED_ATTENDANCE_POLICY.componentName,
+    attendanceLabel: "考勤违纪",
+    minorCount: 0,
+    generalCount: 0,
+    seriousCount: 0,
+    severeCount: 0,
+    lateEarlyCount: 0,
+    seriousOccurrenceCount: 0,
+    missedClassCount: 0,
+    absenceDays: 0,
+    performanceDeductionRate: 0,
+    requestedPerformanceDeductionRate: 0,
+    totalDeduction: 0,
+    events: [],
+    absenceDates: [],
+    reviewFlags: [],
+  };
+}
+
+function leaveDatesForTeacher(db, teacherId, month) {
+  const accountIds = new Set(
+    (db.accounts || []).filter((account) => account.teacherId === teacherId).map((account) => account.id),
+  );
+  const dates = new Set();
+  const [year, monthNumber] = String(month || "").split("-").map(Number);
+  if (!Number.isInteger(year) || !Number.isInteger(monthNumber)) return dates;
+  const monthStart = `${month}-01`;
+  const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const monthEnd = `${month}-${String(daysInMonth).padStart(2, "0")}`;
+  (db.oaRequests || []).forEach((request) => {
+    // 已通过的请假与外出属于正式手续，不能再被推断为旷工。
+    if (request.status !== "approved" || !["leave", "outbound"].includes(request.templateKey) || !accountIds.has(request.applicantAccountId)) return;
+    const start = normalizeText(request.formData?.startDate);
+    const end = normalizeText(request.formData?.endDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || end < start) return;
+    const first = start > monthStart ? start : monthStart;
+    const last = end < monthEnd ? end : monthEnd;
+    if (first > last) return;
+    const cursor = new Date(`${first}T00:00:00Z`);
+    const until = new Date(`${last}T00:00:00Z`);
+    while (cursor <= until) {
+      dates.add(cursor.toISOString().slice(0, 10));
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  });
+  return dates;
+}
+
+function noPunch(record) {
+  return !record.morningIn && !record.morningOut && !record.afternoonIn && !record.afternoonOut;
+}
+
+function boundedNumber(value, { halfDay = false } = {}) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number < 0) return 0;
+  if (halfDay) return Math.round(number * 2) / 2;
+  return Math.floor(number);
+}
+
+function legacyUnifiedInput(record = {}) {
+  const declared = record.unifiedAttendance || {};
+  const high = record.highAttendance || {};
+  // 已存入的高中旧表可继续读取，但从切换日起新导入一律使用 unifiedAttendance。
+  return {
+    lateMinutes: boundedNumber(declared.lateMinutes || high.lateMinutes),
+    earlyLeaveMinutes: boundedNumber(declared.earlyLeaveMinutes || high.earlyLeaveMinutes),
+    awayMinutes: boundedNumber(declared.awayMinutes),
+    missedClassCount: boundedNumber(declared.missedClassCount || high.missedClassCount),
+    absenceDays: boundedNumber(declared.absenceDays || high.absenceWorkDays, { halfDay: true }),
+    exemptionStatus: declared.exemptionStatus === "exempt" ? "exempt" : "normal",
+  };
+}
+
+function violationLevelForMinutes(minutes) {
+  if (minutes <= 0) return "";
+  if (minutes <= UNIFIED_ATTENDANCE_POLICY.minuteBoundaries.minorMax) return "minor";
+  if (minutes <= UNIFIED_ATTENDANCE_POLICY.minuteBoundaries.generalMax) return "general";
+  return "serious";
+}
+
+function minuteEvents(record, input) {
+  const sources = [
+    ["迟到", input.lateMinutes],
+    ["早退", input.earlyLeaveMinutes],
+    ["私自脱岗", input.awayMinutes],
+  ];
+  return sources
+    .filter(([, minutes]) => minutes > 0)
+    .map(([label, minutes]) => ({
+      date: record.date,
+      type: `${label} ${minutes} 分钟`,
+      category: violationLevelForMinutes(minutes),
+      minutes,
+      source: label,
+    }));
+}
+
+function rateForCount(rules, count) {
+  if (count <= 0) return 0;
+  if (count >= 3 && rules[3] !== undefined) return Number(rules[3]);
+  if (count >= 2 && rules[2] !== undefined) return Number(rules[2]);
+  return Number(rules[1] || 0);
+}
+
+function rollingReviewFlags(db, teacherId, month, settlement) {
+  // 先把当月事实完整结构化保存。跨月、跨学期、12 个月的处分流程由人事在
+  // 人事审批中复核，系统只给出提示，绝不自动执行处分或停用账号。
+  const twelveMonthFlags = [];
+  const currentSerious = settlement.seriousCount + settlement.severeCount;
+  if (currentSerious >= 1) twelveMonthFlags.push("本月存在较重或严重考勤违纪，需人事复核处置材料");
+  if (settlement.severeCount >= 1) twelveMonthFlags.push("本月存在全天旷工，需核对违规课时及后续处置");
+  // 预留 db 参数，后续累积台账上线后在此合并连续 12 个月的正式已确认记录。
+  void db;
+  void teacherId;
+  void month;
+  return twelveMonthFlags;
+}
+
+export function attendanceSettlementForTeacher(db, teacherId, month) {
+  const teacher = (db.teachers || []).find((item) => item.id === teacherId);
+  if (!teacher) return noAttendanceSettlement();
+  const leaveDates = leaveDatesForTeacher(db, teacherId, month);
+  const records = activeAttendanceRecords(db, { month, stageId: teacher.stageId, teacherId })
+    .filter((record) => record.shouldAttend !== false)
+    .sort((left, right) => String(left.date).localeCompare(String(right.date)));
+  if (!records.length) return noAttendanceSettlement();
+
+  const events = [];
+  const absenceDates = [];
+  let absenceDays = 0;
+  let missedClassCount = 0;
+  records.forEach((record) => {
+    const input = legacyUnifiedInput(record);
+    const formallyExcused = input.exemptionStatus === "exempt" || leaveDates.has(record.date);
+    if (formallyExcused) return;
+    events.push(...minuteEvents(record, input));
+    const classCount = boundedNumber(input.missedClassCount);
+    if (classCount > 0) {
+      missedClassCount += classCount;
+      events.push({ date: record.date, type: `旷课／空堂 ${classCount} 节`, category: "serious", count: classCount, source: "旷课" });
+    }
+    let days = boundedNumber(input.absenceDays, { halfDay: true });
+    // 表内明确应出勤且四次均无打卡、又没有已批准手续时，作为全天旷工待认定；
+    // 这样不会把“缺一条打卡”误作旷工，也不会依赖旧的“未补卡扣钱”规则。
+    if (!days && noPunch(record)) days = 1;
+    if (days >= 1) {
+      absenceDays += days;
+      absenceDates.push(record.date);
+      events.push({ date: record.date, type: `全天旷工 ${days} 天`, category: "severe", days, source: "旷工" });
+    } else if (days === 0.5) {
+      absenceDays += days;
+      absenceDates.push(record.date);
+      events.push({ date: record.date, type: "半天旷工", category: "serious", days, source: "旷工" });
+    }
+  });
+
+  const minorCount = events.filter((item) => item.category === "minor").length;
+  const generalCount = events.filter((item) => item.category === "general").length;
+  const seriousCount = events.filter((item) => item.category === "serious").length;
+  const severeCount = events.filter((item) => item.category === "severe").length;
+  const requestedPerformanceDeductionRate = Math.min(
+    UNIFIED_ATTENDANCE_POLICY.deductionRates.monthlyCap,
+    rateForCount(UNIFIED_ATTENDANCE_POLICY.deductionRates.minor, minorCount) +
+      rateForCount(UNIFIED_ATTENDANCE_POLICY.deductionRates.general, generalCount) +
+      (seriousCount ? UNIFIED_ATTENDANCE_POLICY.deductionRates.serious : 0) +
+      (severeCount ? UNIFIED_ATTENDANCE_POLICY.deductionRates.severe : 0),
+  );
+  const settlement = {
+    applies: true,
+    requiresPayrollContext: true,
+    policyVersion: UNIFIED_ATTENDANCE_POLICY.version,
+    policyName: UNIFIED_ATTENDANCE_POLICY.name,
+    componentName: UNIFIED_ATTENDANCE_POLICY.componentName,
+    attendanceLabel: "迟到、早退、脱岗、旷课或旷工",
+    minorCount,
+    generalCount,
+    seriousCount,
+    severeCount,
+    lateEarlyCount: minorCount + generalCount + seriousCount,
+    seriousOccurrenceCount: seriousCount,
+    missedClassCount,
+    absenceDays,
+    performanceDeductionRate: Number(requestedPerformanceDeductionRate.toFixed(6)),
+    requestedPerformanceDeductionRate: Number(requestedPerformanceDeductionRate.toFixed(6)),
+    totalDeduction: 0,
+    events,
+    absenceDates: [...new Set(absenceDates)].sort(),
+  };
+  settlement.reviewFlags = rollingReviewFlags(db, teacherId, month, settlement);
+  return settlement;
+}
+
+export function attendanceSettlementForUpload(db, upload = {}) {
+  if (upload.status !== "active") return { applies: false, lateEarlyCount: 0, absenceDays: 0, totalDeduction: 0 };
+  const teacherIds = new Set(
+    activeAttendanceRecords(db, { month: upload.month, stageId: upload.stageId }).map((record) => record.teacherId),
+  );
+  const settlements = [...teacherIds].map((teacherId) => attendanceSettlementForTeacher(db, teacherId, upload.month));
+  return {
+    applies: true,
+    requiresPayrollContext: true,
+    policyVersion: UNIFIED_ATTENDANCE_POLICY.version,
+    policyName: UNIFIED_ATTENDANCE_POLICY.name,
+    componentName: UNIFIED_ATTENDANCE_POLICY.componentName,
+    attendanceLabel: "全校统一考勤违纪",
+    minorCount: settlements.reduce((sum, settlement) => sum + settlement.minorCount, 0),
+    generalCount: settlements.reduce((sum, settlement) => sum + settlement.generalCount, 0),
+    seriousOccurrenceCount: settlements.reduce((sum, settlement) => sum + settlement.seriousCount, 0),
+    severeCount: settlements.reduce((sum, settlement) => sum + settlement.severeCount, 0),
+    lateEarlyCount: settlements.reduce((sum, settlement) => sum + settlement.lateEarlyCount, 0),
+    missedClassCount: settlements.reduce((sum, settlement) => sum + settlement.missedClassCount, 0),
+    absenceDays: settlements.reduce((sum, settlement) => sum + settlement.absenceDays, 0),
+    totalDeduction: 0,
   };
 }

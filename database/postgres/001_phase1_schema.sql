@@ -246,7 +246,7 @@ CREATE TABLE IF NOT EXISTS schedule_period_templates (
   period_no integer NOT NULL CHECK (period_no > 0),
   start_time time NOT NULL,
   end_time time NOT NULL,
-  period_type text NOT NULL DEFAULT 'regular' CHECK (period_type IN ('regular', 'self_study', 'activity', 'evening_study')),
+  period_type text NOT NULL DEFAULT 'regular' CHECK (period_type IN ('regular', 'self_study', 'morning_study', 'activity', 'evening_study')),
   active boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),

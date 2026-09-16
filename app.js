@@ -158,6 +158,32 @@ const SCHEDULE_ROOM_TYPES = {
   music: "音乐室",
 };
 
+// 自定义计薪活动必须按一个实际年级配置单价。同名活动可以在不同年级各建一条，
+// 排课时系统只显示当前年级的条目，防止把低年级或其他学部的单价误带进工资。
+const CUSTOM_PAY_ACTIVITY_GRADES = schedulingCatalog.divisions.flatMap((division) =>
+  division.grades.map((grade) => ({
+    stageId: division.id === "elementary" ? "primary" : division.id,
+    gradeId: grade.id,
+    gradeName: grade.name,
+    label: `${division.name} · ${grade.name}`,
+  })),
+);
+
+function customPayActivityGradeOptions(selectedGradeId = "") {
+  const selected = String(selectedGradeId || "");
+  return [
+    `<option value="" ${selected ? "" : "selected"}>请选择适用年级</option>`,
+    ...CUSTOM_PAY_ACTIVITY_GRADES.map(
+      (grade) =>
+        `<option value="${escapeHtml(grade.gradeId)}" ${grade.gradeId === selected ? "selected" : ""}>${escapeHtml(grade.label)}</option>`,
+    ),
+  ].join("");
+}
+
+function customPayActivityGradeById(gradeId = "") {
+  return CUSTOM_PAY_ACTIVITY_GRADES.find((grade) => grade.gradeId === String(gradeId || "")) || null;
+}
+
 const DEFAULT_SCHEDULE_ROOM_RESOURCES = [
   { type: "lab", label: "实验室", unit: "间", max: 20 },
   { type: "computer", label: "机房", unit: "间", max: 20 },
@@ -292,6 +318,8 @@ const initialState = {
   selectedSchedulingTermId: "",
   selectedSchedulingClassId: "P1C01",
   selectedScheduleOverviewClassId: "",
+  selectedSchedulingCycleWeek: "odd",
+  selectedScheduleOverviewCycleWeek: "odd",
   selectedScheduleAssignmentId: "",
   scheduleReplanScope: {
     classId: "",
@@ -875,6 +903,7 @@ let schedulingBackendState = {
   job: null,
   precheck: null,
 };
+let schedulePeriodEditorState = null;
 let termManagementState = {
   terms: [],
   currentTerm: null,
@@ -1003,7 +1032,7 @@ const views = {
     el: document.querySelector("#hrOrgView"),
   },
   hrFlows: {
-    role: "hr,system_admin,division_head",
+    role: "hr,system_admin,division_head,principal",
     title: "人事审批",
     el: document.querySelector("#hrFlowsView"),
   },
@@ -1285,7 +1314,7 @@ function connectEventStream() {
   // 审批流变化：刷新待办数（若在审批页则重载列表）
   eventStream.addEventListener("hr-flow", () => {
     if (!backendMode()) return;
-    if (["hr", "system_admin", "division_head"].includes(currentRole())) {
+    if (["hr", "system_admin", "division_head", "principal"].includes(currentRole())) {
       if (state.activeView === "hrFlows") {
         loadHrFlows({ status: hrFlowsState.status, todoOnly: hrFlowsState.todoOnly });
       } else {
@@ -1649,9 +1678,12 @@ function normalizeBackendLesson(lesson) {
     type: lesson.type || "regular",
     units: Number.isFinite(Number(lesson.units)) ? Number(lesson.units) : 1,
     status: lesson.status,
+    cycleWeek: lesson.cycleWeek || "",
     isLifeDuty: Boolean(lesson.isLifeDuty),
     nonRegular: Boolean(lesson.nonRegular),
     nonPayable: Boolean(lesson.nonPayable),
+    nonRegularPayItemName: lesson.nonRegularPayItemName || "",
+    nonRegularPayRate: Number(lesson.nonRegularPayRate || 0),
     dutyType: lesson.dutyType || "",
     studentCount: Number(lesson.studentCount || 0),
     routeRunId: lesson.routeRunId || "",
@@ -1667,7 +1699,9 @@ function normalizeBackendLesson(lesson) {
     note:
       lesson.nonPayable
         ? lesson.note || "固定非正课时段，不计入课时或工资"
-        : lesson.attendanceNote ||
+        : lesson.nonRegularPayItemName
+          ? `${lesson.nonRegularPayItemName}：${Number(lesson.nonRegularPayRate || 0)} 元/节，已纳入课时工资`
+          : lesson.attendanceNote ||
           (lesson.status === "completed" ? "后端接口：已计薪" : "后端接口：尚未上课"),
     source: "backend-api",
   };
@@ -1909,7 +1943,7 @@ function viewAllowed(viewName) {
   if (!view || !roleMatches(view.role)) return false;
   // 组织岗位和全校统一薪资规则属于总校财务的配置职责。
   // 学部财务仍可在自己的范围内核算与查看工资，但不应看到这两个入口。
-  if (role === "finance" && ["hrOrg", "payrollConfig"].includes(viewName) && !canExportAllPayrollDetails()) {
+  if (role === "finance" && ["hrOrg", "payrollConfig"].includes(viewName) && !canManagePayrollConfig()) {
     return false;
   }
   if (["system_admin", "principal", "payroll_viewer", "payroll_exporter"].includes(role) && viewName === "payrollHistory" && !canViewAllPayrollDetails()) {
@@ -2606,6 +2640,7 @@ function restoreTemporaryReplanLocks(assignments, originalAssignments) {
 
 function applySchedulingSelection(divisionId, gradeId = "") {
   const nextConfig = buildSchedulingConfig(divisionId, gradeId);
+  schedulePeriodEditorState = null;
   state.selectedSchedulingDivisionId = nextConfig.divisionId;
   state.selectedSchedulingGradeId = nextConfig.gradeId;
   state.selectedSchedulingClassId = nextConfig.classes[0]?.id || "";
@@ -3951,7 +3986,7 @@ function ensureBackendTeacherPayroll(teacherId, month = defaultTeacherPayrollMon
 }
 
 async function loadPayrollRules() {
-  if (!backendMode() || !canExportAllPayrollDetails()) return;
+  if (!backendMode() || !canManagePayrollConfig()) return;
   payrollRuleState = { ...payrollRuleState, loading: true, error: "" };
   try {
     const data = await apiRequest("/api/payroll-rules");
@@ -3999,8 +4034,8 @@ function payrollRulesFromInputs() {
 }
 
 async function saveBackendPayrollRules() {
-  if (!backendMode() || !isFinanceRole()) {
-    showToast("请使用后端财务或行政管理账号保存薪资规则");
+  if (!backendMode() || !canManagePayrollConfig()) {
+    showToast("仅总校财务可以维护薪资规则");
     return;
   }
   let payrollRules;
@@ -5709,6 +5744,15 @@ function canExportAllPayrollDetails() {
   );
 }
 
+// 总校财务可以维护全校统一薪资规则；工资导出权限仍由上面的独立规则控制。
+function canManagePayrollConfig() {
+  return Boolean(
+    currentRole() === "finance" &&
+      currentFinanceScopeId() === "headquarters" &&
+      currentFinanceCanReadAll(),
+  );
+}
+
 // 学部财务没有跨部门对比需求，分组汇总只保留给总校财务。
 function setFinanceGroupSummaryVisibility() {
   const panel = document.querySelector("#financeGroupPanel");
@@ -6662,14 +6706,8 @@ function attendanceStageOptionsHtml(options = [], selectedStageId = "") {
     .join("");
 }
 
-function attendanceTemplateForStage(stageId) {
-  const templates = {
-    kindergarten: { filename: "幼儿园教师月度考勤上传模板.xlsx", label: "幼儿园" },
-    primary: { filename: "小学部教师月度考勤上传模板.xlsx", label: "小学部" },
-    middle: { filename: "初中部教师月度考勤上传模板.xlsx", label: "初中部" },
-    high: { filename: "高中部教师月度考勤上传模板.xlsx", label: "高中部" },
-  };
-  return templates[stageId] || { filename: "教师月度考勤上传模板.xlsx", label: "当前学部" };
+function attendanceTemplateForStage(_stageId) {
+  return { filename: "全校统一月度考勤上传模板.xlsx", label: "全校统一" };
 }
 
 async function loadAttendanceUploads({ month = selectedAttendanceMonth(), stageId = attendanceUploadState.stageId } = {}) {
@@ -6763,24 +6801,9 @@ function renderAttendanceManagement() {
     list.innerHTML = `<div class="empty-state">${escapeHtml(attendanceUploadState.error)}</div>`;
     return;
   }
-  const appliesPrimaryPolicy = selectedStageId === "primary";
-  const appliesMiddlePolicy = selectedStageId === "middle";
-  const appliesHighPolicy = selectedStageId === "high";
   note.textContent = attendanceUploadState.canUpload
-    ? appliesPrimaryPolicy
-      ? "小学部已启用考勤扣款：上午 7:45 后、下午 14:15 后打卡各扣 30 元；应出勤且明确“未补卡”的缺卡每次扣 50 元；四次均无打卡、四项均填“未补卡”时按旷工 200 元／天处理。系统不判断应打卡日期，不自动处理早退、周五下午离校、周日值班或假打卡。上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。"
-      : appliesMiddlePolicy
-      ? "初中部已启用迟到／早退、旷工考勤规则：上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。请只填写应出勤日，并在“应出勤”列明确填写“是”或“否”。"
-      : appliesHighPolicy
-      ? "高中部请使用专用考勤结果表：直接填写准时／迟到及分钟数、签退情况、旷课节数和旷工天数。10 分钟内迟到或未签退累计第 3 次起，每次扣考核工资 2%；超时迟到或早退每次扣 3%；旷课、旷工按制度计算。上传或重传会使本月尚未锁定的工资单重新核算；已锁定工资不会被改动。"
-      : "同一学部同一月份再次上传会覆盖当前考勤版本，旧版本会保留为历史记录。除小学部、初中部、高中部外，当前仅校验和留存，不会自动扣薪。"
-    : appliesPrimaryPolicy
-      ? "小学部考勤会在工资预览／重新生成时，按导入记录中的迟到、明确未补卡与旷工自动扣款；上传与覆盖由对应学部主任完成。"
-      : appliesMiddlePolicy
-      ? "初中部考勤会在工资预览／重新生成时自动计算迟到、早退与旷工扣款；上传与覆盖由对应学部主任完成。"
-      : appliesHighPolicy
-      ? "高中部考勤会在工资预览／重新生成时按专用考勤结果表计算考核工资扣款与旷工扣款；上传与覆盖由对应学部主任完成。"
-      : "您可查看各学部已上传的考勤版本；上传与覆盖由对应学部主任完成。";
+    ? "已按全校统一口径切换：请按照本学部作息计算并填写迟到、早退、脱岗分钟数；≤10 分钟为轻微，11–30 分钟为一般，超过 30 分钟为较重。旷课／空堂、旷工也须据实填写；已批准请假、外出或其他免责事项请选择“免责”。系统只扣考核工资，月度最多 20%，并以税前应发不低于最低工资作保护。上传或重传会重新核算本月未锁定工资；已锁定工资不会改动。"
+    : "您可查看各学部已上传的统一考勤版本。请按本学部作息填报分钟数；工资核算只扣考核工资，月度最多 20%，并受税前应发最低工资保护。上传与覆盖由对应学部主任完成。";
   const uploads = attendanceUploadState.uploads || [];
   list.innerHTML = uploads.length
     ? uploads
@@ -6788,9 +6811,7 @@ function renderAttendanceManagement() {
           const active = upload.status === "active";
           const settlement = upload.settlementSummary || {};
           const policyLine = settlement.applies
-            ? settlement.requiresPayrollContext
-              ? `<small>${escapeHtml(settlement.componentName || "考勤违纪扣款")}：${escapeHtml(settlement.attendanceLabel || "轻微迟到／未签退")} ${Number(settlement.lateEarlyCount || 0)} 次${Number(settlement.seriousOccurrenceCount || 0) ? ` · 超时迟到／早退 ${Number(settlement.seriousOccurrenceCount || 0)} 次` : ""}${Number(settlement.missedClassCount || 0) ? ` · 旷课 ${Number(settlement.missedClassCount || 0)} 节` : ""}${Number(settlement.absenceDays || 0) ? ` · 旷工 ${Number(settlement.absenceDays || 0)} 天` : ""} · 工资生成时按考核工资和当月工资总额计算</small>`
-              : `<small>${escapeHtml(settlement.componentName || "考勤扣款")}：${escapeHtml(settlement.attendanceLabel || "迟到／早退")} ${Number(settlement.lateEarlyCount || 0)} 次${Number(settlement.missingPunchCount || 0) ? ` · 未补卡 ${Number(settlement.missingPunchCount || 0)} 次` : ""}${Number(settlement.absenceDays || 0) ? ` · 旷工 ${Number(settlement.absenceDays || 0)} 天` : ""} · 暂计扣款 ¥${Number(settlement.totalDeduction || 0).toLocaleString()}</small>`
+            ? `<small>${escapeHtml(settlement.componentName || "全校统一考勤绩效扣减")}：轻微 ${Number(settlement.minorCount || 0)} 次 · 一般 ${Number(settlement.generalCount || 0)} 次 · 较重 ${Number(settlement.seriousOccurrenceCount || 0)} 次${Number(settlement.missedClassCount || 0) ? ` · 旷课／空堂 ${Number(settlement.missedClassCount || 0)} 节` : ""}${Number(settlement.absenceDays || 0) ? ` · 旷工 ${Number(settlement.absenceDays || 0)} 天` : ""} · 工资生成时仅按考核工资扣减，月度最多 20%</small>`
             : "";
           return `
             <article class="attendance-upload-entry ${active ? "" : "is-replaced"}">
@@ -7509,7 +7530,6 @@ function collectCourseRulesFromForm() {
       subjectId,
       enabled: true,
       weeklyLessons: Number(document.querySelector(`[data-course-rule-weekly="${subjectId}"]`)?.value || "0"),
-      durationMinutes: Number.parseInt(document.querySelector(`[data-course-rule-duration="${subjectId}"]`)?.value || "40", 10),
       minPerClassPerDay,
       maxPerClassPerDay: normalizeCourseRuleMaxPerDay(
         document.querySelector(`[data-course-rule-max-day="${subjectId}"]`)?.value || "0",
@@ -7532,6 +7552,65 @@ function collectCourseRulesFromForm() {
         document.querySelector(`[data-course-rule-room-type="${subjectId}"]`)?.value || "homeroom",
       ),
     };
+  });
+}
+
+function collectAlternatingCoursePairsFromForm() {
+  return Array.from(document.querySelectorAll("[data-cycle-pair-row]")).map((row) => ({
+    oddSubjectId: row.querySelector("[data-cycle-pair-odd]")?.value || "",
+    evenSubjectId: row.querySelector("[data-cycle-pair-even]")?.value || "",
+  }));
+}
+
+function fractionalCourseRules(rules = []) {
+  return rules.filter(
+    (rule) =>
+      rule.enabled && Math.abs(Number(rule.sourceWeeklyLessons ?? rule.weeklyLessons ?? 0) % 1) === 0.5,
+  );
+}
+
+function validateAlternatingCoursePairs(rules = [], pairs = []) {
+  const halfRules = fractionalCourseRules(rules);
+  if (!halfRules.length) return "";
+  if (halfRules.length % 2) {
+    return `当前有 ${halfRules.length} 门带 .5 课时的课程；请再设置一门带 .5 课时的课程后完成配对。`;
+  }
+  const allowedIds = new Set(halfRules.map((rule) => rule.subjectId));
+  const used = new Set();
+  if (pairs.length !== halfRules.length / 2) return "请为每门带 .5 课时的课程配置单双周对应课程。";
+  for (const pair of pairs) {
+    const oddSubjectId = String(pair.oddSubjectId || "").trim();
+    const evenSubjectId = String(pair.evenSubjectId || "").trim();
+    if (!oddSubjectId || !evenSubjectId) return "请完整选择每一组的单周课程和双周课程。";
+    if (oddSubjectId === evenSubjectId) return "同一门课程不能同时作为单周和双周课程。";
+    if (!allowedIds.has(oddSubjectId) || !allowedIds.has(evenSubjectId)) {
+      return "单双周配对只能选择带 .5 课时的课程。";
+    }
+    if (used.has(oddSubjectId) || used.has(evenSubjectId)) return "每门带 .5 课时的课程只能出现在一组配对中。";
+    used.add(oddSubjectId);
+    used.add(evenSubjectId);
+  }
+  return used.size === halfRules.length ? "" : "请为每门带 .5 课时的课程配置单双周对应课程。";
+}
+
+function courseRulesWithPendingWeeklyLessons(config = state.schedulingConfig) {
+  return (config.courseRules || []).map((rule) => {
+    const input = document.querySelector(`[data-course-rule-weekly="${rule.subjectId}"]`);
+    const pending = Number(input?.value);
+    const weeklyLessons = Number.isFinite(pending)
+      ? Math.round(pending * 2) / 2
+      : Number(rule.sourceWeeklyLessons ?? rule.weeklyLessons ?? 0);
+    return { ...rule, weeklyLessons, sourceWeeklyLessons: weeklyLessons };
+  });
+}
+
+function refreshAlternatingCoursePairEditor() {
+  if (!courseRulesEditMode) return;
+  const editor = document.querySelector("#alternatingCoursePairEditor");
+  if (!editor) return;
+  editor.outerHTML = alternatingCoursePairEditorHtml(state.schedulingConfig, {
+    rules: courseRulesWithPendingWeeklyLessons(),
+    pairs: collectAlternatingCoursePairsFromForm(),
   });
 }
 
@@ -7580,7 +7659,7 @@ function localSubjectFromCourseRule(rule) {
   };
 }
 
-function applyLocalCourseRules(rules) {
+function applyLocalCourseRules(rules, cyclePairs = []) {
   state.schedulingConfig.courseRules = state.schedulingConfig.courseRules.map((rule) => ({
     ...rule,
     ...(rules.find((item) => item.subjectId === rule.subjectId) || {}),
@@ -7588,6 +7667,7 @@ function applyLocalCourseRules(rules) {
   state.schedulingConfig.subjects = state.schedulingConfig.courseRules
     .map(localSubjectFromCourseRule)
     .filter(Boolean);
+  state.schedulingConfig.cyclePairs = cyclePairs;
   state.schedulingDraft = {
     ...clone(initialState.schedulingDraft),
     divisionId: state.schedulingConfig.divisionId,
@@ -7612,6 +7692,7 @@ function splitSchedulePeriodTime(period = {}) {
 }
 
 function schedulePeriodTypeText(type = "regular") {
+  if (type === "morning") return "早自习";
   if (type === "selfStudy") return "自习";
   if (type === "activity") return "活动";
   if (type === "evening") return "晚自习";
@@ -7619,6 +7700,7 @@ function schedulePeriodTypeText(type = "regular") {
 }
 
 function defaultNonRegularPeriodContent(type = "selfStudy") {
+  if (type === "morning") return "早自习";
   if (type === "activity") return "活动";
   if (type === "evening") return "晚自习";
   return "自习";
@@ -7637,14 +7719,43 @@ function nonRegularTeacherOptions(config, selectedTeacherId = "", selectedRole =
   ].join("");
 }
 
-function schedulePeriodTypeOptions(selected = "regular") {
+function nonRegularPayItemOptions(config, selectedId = "", selectedName = "") {
+  const items = config.nonRegularPayItems || [];
+  const selectedStillAvailable = items.some((item) => item.id === selectedId);
   return [
+    `<option value="">不计薪（仅展示在课表）</option>`,
+    ...(!selectedStillAvailable && selectedId
+      ? [`<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedName || "已停用计薪项目")}（保留后请重新选择）</option>`]
+      : []),
+    ...items.map(
+      (item) =>
+        `<option value="${escapeHtml(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(item.name)}</option>`,
+    ),
+  ].join("");
+}
+
+function nonRegularPayItemHint(config) {
+  return (config.nonRegularPayItems || []).length
+    ? "选择项目后，发布时按总校财务配置的单价计薪，并校验老师时间冲突。"
+    : "暂未配置计薪项目；可由总校财务在“薪资配置 → 自定义计薪活动”新增。";
+}
+
+function schedulePeriodTypeOptions(selected = "regular") {
+  // selfStudy 是旧作息中的历史枚举。新建日程不再提供它，统一用早自习、
+  // 晚自习或可命名活动；但编辑旧记录时保留一个只读选项，避免用户只是打开
+  // 编辑器就把原来的历史类型悄悄改成“正课”。
+  const legacySelected = selected === "selfStudy";
+  return [
+    ...(legacySelected ? [["selfStudy", "历史自习（仅保留既有日程）", true]] : []),
     ["regular", "正课"],
-    ["selfStudy", "自习"],
-    ["activity", "活动"],
+    ["morning", "早自习"],
     ["evening", "晚自习"],
+    ["activity", "活动（可自命名）"],
   ]
-    .map(([value, label]) => `<option value="${value}" ${value === selected ? "selected" : ""}>${label}</option>`)
+    .map(
+      ([value, label, disabled]) =>
+        `<option value="${value}" ${value === selected ? "selected" : ""} ${disabled ? "disabled" : ""}>${label}</option>`,
+    )
     .join("");
 }
 
@@ -7662,6 +7773,10 @@ function minutesToTimeText(value) {
 
 function isHighSchedulingConfig(config = state.schedulingConfig) {
   return config?.stageId === "high" || config?.divisionId === "high";
+}
+
+function isPrimarySchedulingConfig(config = state.schedulingConfig) {
+  return config?.stageId === "primary" || config?.divisionId === "elementary";
 }
 
 function activeScheduleTemplateKey(config = state.schedulingConfig) {
@@ -7684,6 +7799,7 @@ function applyActiveScheduleTemplatePeriods(config, key) {
 }
 
 function setActiveScheduleTemplate(key) {
+  schedulePeriodEditorState = null;
   state.schedulingConfig = applyActiveScheduleTemplatePeriods(state.schedulingConfig, key);
   renderAdminScheduling();
 }
@@ -7714,6 +7830,8 @@ function schedulePeriodsFromConfig(config = state.schedulingConfig) {
       responsibleTeacherId: period.type === "regular" ? "" : period.responsibleTeacherId || "",
       responsibleRole: period.type === "regular" ? "" : period.responsibleRole || "",
       responsibleTeacherName: period.responsibleTeacherName || "",
+      nonRegularPayItemId: period.type === "regular" ? "" : period.nonRegularPayItemId || "",
+      nonRegularPayItemName: period.type === "regular" ? "" : period.nonRegularPayItemName || "",
       dayIndexes: normalizeScheduleDayIndexes(period.dayIndexes),
     };
   });
@@ -7737,7 +7855,7 @@ function schedulePeriodDayOptions(period, index) {
   ).join("");
 }
 
-function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
+function schedulePeriodCardEditorHtml(config = state.schedulingConfig) {
   return schedulePeriodsFromConfig(config)
     .map((period, index) => {
       const isNonRegular = period.type !== "regular";
@@ -7762,7 +7880,7 @@ function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
         <fieldset class="period-template-days">
           <legend>生效星期</legend>
           <div class="period-day-options">${schedulePeriodDayOptions(period, index)}</div>
-          <small>周日可显示并同步老师端，但只能作为固定日程，不参与自动排课或计薪。</small>
+          <small>周日可显示并同步老师端，不参与自动排课；选择计薪项目后按节进入工资。</small>
         </fieldset>
         <div class="period-template-nonregular-fields" data-schedule-nonregular-fields ${isNonRegular ? "" : "hidden"}>
           <label class="field-label" for="periodContent-${index}">
@@ -7775,7 +7893,13 @@ function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
               ${nonRegularTeacherOptions(config, period.responsibleTeacherId, period.responsibleRole)}
             </select>
           </label>
-          <span class="period-template-nonregular-note">固定显示在最终课表中，不参与自动排课、冲突检测、课时或工资计算。</span>
+          <label class="field-label" for="periodPayItem-${index}">
+            <span>计薪项目</span>
+            <select id="periodPayItem-${index}" data-schedule-period-pay-item class="lesson-select">
+              ${nonRegularPayItemOptions(config, period.nonRegularPayItemId, period.nonRegularPayItemName)}
+            </select>
+          </label>
+          <span class="period-template-nonregular-note">${escapeHtml(nonRegularPayItemHint(config))}</span>
         </div>
       </div>
     `;
@@ -7783,15 +7907,202 @@ function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
     .join("");
 }
 
+function schedulePeriodEditorDayOptions(period, index) {
+  const selectedDays = normalizeScheduleDayIndexes(period.dayIndexes);
+  return SCHEDULE_DAY_OPTIONS.map(
+    (label, dayIndex) => `
+      <label class="period-day-chip ${dayIndex === 6 ? "sunday" : ""}">
+        <input
+          type="checkbox"
+          data-schedule-editor-day
+          data-day-index="${dayIndex}"
+          ${selectedDays.includes(dayIndex) ? "checked" : ""}
+          aria-label="当前日程在${label}生效"
+        />
+        <span>${label}</span>
+      </label>
+    `,
+  ).join("");
+}
+
+function defaultSchedulePeriodDraft(dayIndex = null, config = state.schedulingConfig) {
+  const periods = schedulePeriodsFromConfig(config);
+  const selectedDay = Number.isInteger(dayIndex) ? dayIndex : null;
+  const dayPeriods = selectedDay === null
+    ? periods.filter((period) => normalizeScheduleDayIndexes(period.dayIndexes).some((item) => item <= 4))
+    : periods.filter((period) => normalizeScheduleDayIndexes(period.dayIndexes).includes(selectedDay));
+  const last = dayPeriods
+    .slice()
+    .sort((left, right) => (timeTextToMinutes(left.endTime) || 0) - (timeTextToMinutes(right.endTime) || 0))
+    .at(-1) || { endTime: "08:10" };
+  const lastEnd = timeTextToMinutes(last.endTime) ?? 8 * 60 + 10;
+  const startTime = minutesToTimeText(Math.min(lastEnd + 10, 23 * 60 + 10));
+  const endTime = minutesToTimeText(Math.min((timeTextToMinutes(startTime) ?? lastEnd + 10) + 40, 23 * 60 + 59));
+  const weekend = selectedDay !== null && selectedDay > 4;
+  return {
+    period: periods.length + 1,
+    label: `第 ${periods.length + 1} 节`,
+    startTime,
+    endTime,
+    time: `${startTime}-${endTime}`,
+    type: weekend ? "activity" : "regular",
+    typeName: schedulePeriodTypeText(weekend ? "activity" : "regular"),
+    active: true,
+    content: "",
+    responsibleTeacherId: "",
+    responsibleRole: "",
+    nonRegularPayItemId: "",
+    nonRegularPayItemName: "",
+    dayIndexes: selectedDay === null ? [...DEFAULT_SCHEDULE_DAY_INDEXES] : [selectedDay],
+  };
+}
+
+function schedulePeriodInlineEditorHtml(config = state.schedulingConfig) {
+  if (!schedulePeriodEditorState) return "";
+  const periods = schedulePeriodsFromConfig(config);
+  const index = Number(schedulePeriodEditorState.index);
+  const editing = Number.isInteger(index) && index >= 0 && Boolean(periods[index]);
+  const period = editing
+    ? periods[index]
+    : defaultSchedulePeriodDraft(Number.isInteger(schedulePeriodEditorState.dayIndex) ? schedulePeriodEditorState.dayIndex : null, config);
+  const isNonRegular = period.type !== "regular";
+  return `
+    <section class="schedule-period-inline-editor" id="schedulePeriodInlineEditor" data-schedule-period-editor>
+      <div class="schedule-period-editor-heading">
+        <div>
+          <strong>${editing ? "修改日程" : "添加日程"}</strong>
+          <span>${editing ? "修改会同步到已选择的所有星期。" : "先选择日期和时间，加入周表后再统一保存。"}</span>
+        </div>
+        <button class="ghost-button compact-button" data-cancel-schedule-period-editor type="button">取消</button>
+      </div>
+      <div class="schedule-period-editor-fields">
+        <label class="field-label" for="schedulePeriodEditorStart">
+          <span>开始时间</span>
+          <input id="schedulePeriodEditorStart" type="time" value="${escapeHtml(period.startTime)}" />
+        </label>
+        <label class="field-label" for="schedulePeriodEditorEnd">
+          <span>结束时间</span>
+          <input id="schedulePeriodEditorEnd" type="time" value="${escapeHtml(period.endTime)}" />
+        </label>
+        <label class="field-label" for="schedulePeriodEditorType">
+          <span>日程类型</span>
+          <select id="schedulePeriodEditorType" data-schedule-period-type class="lesson-select">
+            ${schedulePeriodTypeOptions(period.type)}
+          </select>
+        </label>
+      </div>
+      <fieldset class="period-template-days schedule-period-editor-days">
+        <legend>安排在哪几天</legend>
+        <div class="period-day-options">${schedulePeriodEditorDayOptions(period, index)}</div>
+        <small>正课只参与周一至周五自动排课；周末日程仅作为固定日程发布。</small>
+      </fieldset>
+      <div class="period-template-nonregular-fields" data-schedule-nonregular-fields ${isNonRegular ? "" : "hidden"}>
+        <label class="field-label" for="schedulePeriodEditorContent">
+          <span>固定内容</span>
+          <input id="schedulePeriodEditorContent" data-schedule-period-content maxlength="80" value="${escapeHtml(period.content || "")}" placeholder="例如 ${escapeHtml(defaultNonRegularPeriodContent(period.type))}" />
+        </label>
+        <label class="field-label" for="schedulePeriodEditorResponsible">
+          <span>负责岗位 / 老师（周日必选）</span>
+          <select id="schedulePeriodEditorResponsible" data-schedule-period-responsible class="lesson-select">
+            ${nonRegularTeacherOptions(config, period.responsibleTeacherId, period.responsibleRole)}
+          </select>
+        </label>
+        <label class="field-label" for="schedulePeriodEditorPayItem">
+          <span>计薪项目</span>
+          <select id="schedulePeriodEditorPayItem" data-schedule-period-pay-item class="lesson-select">
+            ${nonRegularPayItemOptions(config, period.nonRegularPayItemId, period.nonRegularPayItemName)}
+          </select>
+        </label>
+        <span class="period-template-nonregular-note">${escapeHtml(nonRegularPayItemHint(config))}</span>
+      </div>
+      <div class="schedule-period-editor-actions">
+        ${editing ? `<button class="ghost-button icon-danger" data-delete-active-schedule-period type="button">删除日程</button>` : ""}
+        <button class="primary-button" data-apply-schedule-period-editor type="button">${editing ? "更新周表" : "加入周表"}</button>
+      </div>
+    </section>
+  `;
+}
+
+function schedulePeriodWeekEntryHtml(period, index, dayIndex) {
+  const isNonRegular = period.type !== "regular";
+  const selectedDays = normalizeScheduleDayIndexes(period.dayIndexes);
+  const title = isNonRegular ? period.content || period.typeName : period.label;
+  const responsible = isNonRegular
+    ? period.responsibleTeacherName || (period.responsibleRole === "homeroom" ? "各班班主任" : period.responsibleRole === "life_teacher" ? "本学部生活老师" : "")
+    : "自动排课时段";
+  const payItem = isNonRegular && period.nonRegularPayItemId ? ` · 计薪：${period.nonRegularPayItemName || "已选项目"}` : "";
+  return `
+    <button
+      class="schedule-week-entry type-${escapeHtml(period.type)}"
+      data-edit-schedule-period="${index}"
+      data-schedule-day-index="${dayIndex}"
+      type="button"
+      aria-label="修改${SCHEDULE_DAY_OPTIONS[dayIndex]} ${escapeHtml(period.startTime)} 的${escapeHtml(title)}"
+    >
+      <span class="schedule-week-entry-time">${escapeHtml(period.startTime)}–${escapeHtml(period.endTime)}</span>
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(period.typeName)}${responsible ? ` · ${escapeHtml(responsible)}` : ""}${escapeHtml(payItem)}</small>
+      ${selectedDays.length > 1 ? `<em>同步 ${selectedDays.length} 天</em>` : ""}
+    </button>
+  `;
+}
+
+function schedulePeriodDayColumnHtml(periods, dayIndex, options = {}) {
+  const entries = periods
+    .map((period, index) => ({ period, index }))
+    .filter(({ period }) => normalizeScheduleDayIndexes(period.dayIndexes).includes(dayIndex))
+    .sort((left, right) => (timeTextToMinutes(left.period.startTime) || 0) - (timeTextToMinutes(right.period.startTime) || 0));
+  return `
+    <section class="schedule-week-day ${options.weekend ? "weekend" : ""}">
+      <header>
+        <strong>${SCHEDULE_DAY_OPTIONS[dayIndex]}</strong>
+        <span>${entries.length} 项日程</span>
+      </header>
+      <div class="schedule-week-day-events">
+        ${entries.length ? entries.map(({ period, index }) => schedulePeriodWeekEntryHtml(period, index, dayIndex)).join("") : `<div class="schedule-week-day-empty">当天暂无日程</div>`}
+      </div>
+      <button class="schedule-week-add" data-add-schedule-period-day="${dayIndex}" type="button">
+        <span aria-hidden="true">＋</span> 添加日程
+      </button>
+    </section>
+  `;
+}
+
+function primaryScheduleWeekHtml(config = state.schedulingConfig) {
+  const periods = schedulePeriodsFromConfig(config);
+  return `
+    <div class="primary-week-schedule">
+      <div class="schedule-week-legend">
+        <span><i class="regular"></i>正课：参与自动排课</span>
+        <span><i class="fixed"></i>固定日程：默认只显示；选择计薪项目后按节进入工资</span>
+        <span>点击任意日程即可修改</span>
+      </div>
+      <div class="schedule-week-scroll">
+        <div class="schedule-week-board">
+          ${[0, 1, 2, 3, 4, 5, 6]
+            .map((dayIndex) => schedulePeriodDayColumnHtml(periods, dayIndex, { weekend: dayIndex > 4 }))
+            .join("")}
+        </div>
+      </div>
+      ${schedulePeriodInlineEditorHtml(config)}
+    </div>
+  `;
+}
+
+function schedulePeriodTemplateHtml(config = state.schedulingConfig) {
+  return isPrimarySchedulingConfig(config) ? primaryScheduleWeekHtml(config) : schedulePeriodCardEditorHtml(config);
+}
+
 function readSchedulePeriodsFromForm(options = {}) {
   const validate = options.validate !== false;
   const rows = Array.from(document.querySelectorAll("[data-schedule-period-row]"));
-  const periods = rows.map((row, index) => {
+  const periods = rows.length ? rows.map((row, index) => {
     const startTime = row.querySelector("[data-schedule-period-start]")?.value || "";
     const endTime = row.querySelector("[data-schedule-period-end]")?.value || "";
     const type = row.querySelector("[data-schedule-period-type]")?.value || "regular";
     const content = row.querySelector("[data-schedule-period-content]")?.value?.trim() || "";
     const responsibleSelection = row.querySelector("[data-schedule-period-responsible]")?.value || "";
+    const nonRegularPayItemId = row.querySelector("[data-schedule-period-pay-item]")?.value || "";
     const responsibleRole = responsibleSelection.startsWith("role:") ? responsibleSelection.slice(5) : "";
     const responsibleTeacherId = responsibleRole ? "" : responsibleSelection;
     const dayIndexes = Array.from(row.querySelectorAll("[data-schedule-period-day]:checked"))
@@ -7809,11 +8120,17 @@ function readSchedulePeriodsFromForm(options = {}) {
       content: type === "regular" ? "" : content,
       responsibleTeacherId: type === "regular" ? "" : responsibleTeacherId,
       responsibleRole: type === "regular" ? "" : responsibleRole,
+      nonRegularPayItemId: type === "regular" ? "" : nonRegularPayItemId,
       dayIndexes,
     };
-  });
+  }) : schedulePeriodsFromConfig();
 
   if (!validate) return periods.length ? periods : schedulePeriodsFromConfig();
+  validateSchedulePeriodRows(periods);
+  return periods;
+}
+
+function validateSchedulePeriodRows(periods) {
   if (!periods.length) throw new Error("请至少保留 1 个可排课节次");
   if (!periods.some((period) => period.type === "regular")) {
     throw new Error("请至少保留 1 个正课节次用于自动排课");
@@ -7831,6 +8148,9 @@ function readSchedulePeriodsFromForm(options = {}) {
     if (period.type !== "regular" && period.dayIndexes.includes(6) && !period.responsibleTeacherId && !period.responsibleRole) {
       throw new Error(`第 ${index + 1} 个周日日程必须选择负责岗位或老师，发布后系统才能同步到老师终端`);
     }
+    if (period.type !== "regular" && period.nonRegularPayItemId && !period.responsibleTeacherId && !period.responsibleRole) {
+      throw new Error(`第 ${index + 1} 个计薪日程必须选择负责岗位或老师`);
+    }
     const overlappingIndex = periods.slice(0, index).findIndex((previous) => {
       const previousStart = timeTextToMinutes(previous.startTime);
       const previousEnd = timeTextToMinutes(previous.endTime);
@@ -7844,7 +8164,83 @@ function readSchedulePeriodsFromForm(options = {}) {
   return periods;
 }
 
+function openSchedulePeriodEditor(index = -1, dayIndex = null) {
+  schedulePeriodEditorState = {
+    index: Number(index),
+    dayIndex: dayIndex === null || dayIndex === "" ? null : Number(dayIndex),
+  };
+  renderAdminScheduling();
+  requestAnimationFrame(() => document.querySelector("#schedulePeriodInlineEditor")?.scrollIntoView({ behavior: "smooth", block: "nearest" }));
+}
+
+function applySchedulePeriodEditor() {
+  if (!schedulePeriodEditorState) return;
+  const periods = schedulePeriodsFromConfig();
+  const index = Number(schedulePeriodEditorState.index);
+  const editing = Number.isInteger(index) && index >= 0 && Boolean(periods[index]);
+  if (!editing && periods.length >= 48) {
+    showToast("每套作息最多配置 48 个日程时段");
+    return;
+  }
+  const startTime = document.querySelector("#schedulePeriodEditorStart")?.value || "";
+  const endTime = document.querySelector("#schedulePeriodEditorEnd")?.value || "";
+  const type = document.querySelector("#schedulePeriodEditorType")?.value || "regular";
+  const content = document.querySelector("#schedulePeriodEditorContent")?.value?.trim() || "";
+  const responsibleSelection = document.querySelector("#schedulePeriodEditorResponsible")?.value || "";
+  const nonRegularPayItemId = document.querySelector("#schedulePeriodEditorPayItem")?.value || "";
+  const responsibleRole = responsibleSelection.startsWith("role:") ? responsibleSelection.slice(5) : "";
+  const responsibleTeacherId = responsibleRole ? "" : responsibleSelection;
+  const dayIndexes = Array.from(document.querySelectorAll("[data-schedule-editor-day]:checked"))
+    .map((input) => Number.parseInt(input.dataset.dayIndex, 10))
+    .filter(Number.isInteger);
+  const candidate = {
+    ...(editing ? periods[index] : {}),
+    period: editing ? index + 1 : periods.length + 1,
+    label: editing ? periods[index].label : `第 ${periods.length + 1} 节`,
+    startTime,
+    endTime,
+    time: `${startTime}-${endTime}`,
+    type,
+    typeName: schedulePeriodTypeText(type),
+    active: true,
+    content: type === "regular" ? "" : content,
+    responsibleTeacherId: type === "regular" ? "" : responsibleTeacherId,
+    responsibleRole: type === "regular" ? "" : responsibleRole,
+    nonRegularPayItemId: type === "regular" ? "" : nonRegularPayItemId,
+    nonRegularPayItemName:
+      type === "regular"
+        ? ""
+        : (state.schedulingConfig.nonRegularPayItems || []).find((item) => item.id === nonRegularPayItemId)?.name || "",
+    dayIndexes,
+  };
+  const nextPeriods = editing
+    ? periods.map((period, rowIndex) => (rowIndex === index ? candidate : period))
+    : [...periods, candidate];
+  const ordered = nextPeriods
+    .slice()
+    .sort((left, right) => {
+      const timeDifference = (timeTextToMinutes(left.startTime) || 0) - (timeTextToMinutes(right.startTime) || 0);
+      if (timeDifference) return timeDifference;
+      return Math.min(...normalizeScheduleDayIndexes(left.dayIndexes)) - Math.min(...normalizeScheduleDayIndexes(right.dayIndexes));
+    })
+    .map((period, rowIndex) => ({ ...period, period: rowIndex + 1, label: `第 ${rowIndex + 1} 节` }));
+  try {
+    validateSchedulePeriodRows(ordered);
+  } catch (error) {
+    showToast(error.message || "日程设置无效");
+    return;
+  }
+  saveActiveScheduleTemplatePeriods(ordered);
+  schedulePeriodEditorState = null;
+  renderAdminScheduling();
+  showToast(editing ? "日程已更新，请点击“保存周表”生效" : "日程已加入，请点击“保存周表”生效");
+}
+
 function addSchedulePeriodRow() {
+  if (isPrimarySchedulingConfig()) {
+    openSchedulePeriodEditor(-1, null);
+    return;
+  }
   const periods = readSchedulePeriodsFromForm({ validate: false });
   if (periods.length >= 48) {
     showToast("每套作息最多配置 48 个日程时段");
@@ -7872,16 +8268,25 @@ function addSchedulePeriodRow() {
 }
 
 function deleteSchedulePeriodRow(index) {
-  const periods = readSchedulePeriodsFromForm({ validate: false }).filter((_, rowIndex) => rowIndex !== Number(index));
+  const periods = readSchedulePeriodsFromForm({ validate: false })
+    .filter((_, rowIndex) => rowIndex !== Number(index))
+    .map((period, rowIndex) => ({
+      ...period,
+      period: rowIndex + 1,
+      label: `第 ${rowIndex + 1} 节`,
+    }));
   if (!periods.length) {
     showToast("请至少保留 1 个可排课节次");
     return;
   }
-  saveActiveScheduleTemplatePeriods(periods.map((period, rowIndex) => ({
-    ...period,
-    period: rowIndex + 1,
-    label: `第 ${rowIndex + 1} 节`,
-  })));
+  try {
+    validateSchedulePeriodRows(periods);
+  } catch (error) {
+    showToast(error.message || "不能删除这个日程");
+    return;
+  }
+  saveActiveScheduleTemplatePeriods(periods);
+  schedulePeriodEditorState = null;
   renderAdminScheduling();
 }
 
@@ -8618,8 +9023,14 @@ async function saveAdminRoomResources() {
 
 async function saveAdminCourseRules() {
   const rules = collectCourseRulesFromForm();
+  const cyclePairs = collectAlternatingCoursePairsFromForm();
   if (!rules.some((rule) => rule.enabled && rule.weeklyLessons > 0)) {
     showToast("请至少启用 1 门课程并设置周课时");
+    return;
+  }
+  const cyclePairError = validateAlternatingCoursePairs(rules, cyclePairs);
+  if (cyclePairError) {
+    showToast(cyclePairError);
     return;
   }
 
@@ -8634,6 +9045,7 @@ async function saveAdminCourseRules() {
           stageId: state.schedulingConfig.stageId,
           grade: state.schedulingConfig.grade,
           rules,
+          cyclePairs,
         },
       });
       applyBackendScheduleResult(result);
@@ -8651,7 +9063,7 @@ async function saveAdminCourseRules() {
     return;
   }
 
-  applyLocalCourseRules(rules);
+  applyLocalCourseRules(rules, cyclePairs);
   showToast("课程规则已保存到试运行数据");
   render();
 }
@@ -8666,7 +9078,7 @@ function createLocalSubjectId() {
   return id;
 }
 
-function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requiredRoomType = "homeroom") {
+function applyLocalGradeCourse(subjectName, weeklyLessons, requiredRoomType = "homeroom") {
   const normalizedName = subjectName.trim().replace(/\s+/g, "");
   const existingSubject =
     Object.values(schedulingCatalog.subjects).find((subject) => subject.name === normalizedName) || null;
@@ -8676,7 +9088,8 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requ
       id: createLocalSubjectId(),
       name: normalizedName,
       weeklyLessons,
-      durationMinutes,
+      // 正课时长不再按科目维护；实际时段统一由作息时间表决定。
+      durationMinutes: 40,
       teacherIds: [],
       custom: true,
       minPerClassPerDay: 0,
@@ -8698,7 +9111,7 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requ
     subjectName: subject.name,
     enabled: true,
     weeklyLessons,
-    durationMinutes,
+    durationMinutes: existingRule?.durationMinutes || subject.durationMinutes || 40,
     minPerClassPerDay: existingRule?.minPerClassPerDay || subject.minPerClassPerDay || 0,
     maxPerClassPerDay: existingRule?.maxPerClassPerDay || subject.maxPerClassPerDay || 0,
     minWeeklyDays:
@@ -8723,15 +9136,14 @@ function applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requ
 
 async function addAdminGradeCourse() {
   const subjectName = document.querySelector("#newCourseName").value.trim();
-  const weeklyLessons = Number.parseInt(document.querySelector("#newCourseWeekly").value || "0", 10);
-  const durationMinutes = Number.parseInt(document.querySelector("#newCourseDuration").value || "40", 10);
+  const weeklyLessons = Number(document.querySelector("#newCourseWeekly").value || "0");
   const requiredRoomType = normalizeScheduleRoomType(document.querySelector("#newCourseRoomType")?.value || "homeroom");
   if (!subjectName) {
     showToast("请输入课程名称");
     return;
   }
-  if (!Number.isFinite(weeklyLessons) || weeklyLessons <= 0) {
-    showToast("每周节数必须大于 0");
+  if (!Number.isFinite(weeklyLessons) || weeklyLessons < 0.5 || Math.round(weeklyLessons * 2) !== weeklyLessons * 2) {
+    showToast("每周节数至少为 0.5，且只能按 0.5 节递增");
     return;
   }
 
@@ -8747,7 +9159,6 @@ async function addAdminGradeCourse() {
           grade: state.schedulingConfig.grade,
           subjectName,
           weeklyLessons,
-          durationMinutes,
           requiredRoomType,
         },
       });
@@ -8755,7 +9166,6 @@ async function addAdminGradeCourse() {
       schedulingBackendState = { ...schedulingBackendState, loaded: true, loading: false, error: "" };
       document.querySelector("#newCourseName").value = "";
       document.querySelector("#newCourseWeekly").value = "2";
-      document.querySelector("#newCourseDuration").value = "40";
       document.querySelector("#newCourseRoomType").value = "homeroom";
       showToast("课程已添加到当前年级");
     } catch (error) {
@@ -8770,10 +9180,9 @@ async function addAdminGradeCourse() {
     return;
   }
 
-  applyLocalGradeCourse(subjectName, weeklyLessons, durationMinutes, requiredRoomType);
+  applyLocalGradeCourse(subjectName, weeklyLessons, requiredRoomType);
   document.querySelector("#newCourseName").value = "";
   document.querySelector("#newCourseWeekly").value = "2";
-  document.querySelector("#newCourseDuration").value = "40";
   document.querySelector("#newCourseRoomType").value = "homeroom";
   showToast("课程已添加到试运行数据");
   render();
@@ -10105,7 +10514,7 @@ function renderDashboard() {
         <div class="detail-cell"><span>时间</span>${formatDate(nextLesson.date)} ${nextLesson.time}</div>
         <div class="detail-cell"><span>地点</span>${nextLesson.room || "按日程执行"}</div>
         <div class="detail-cell"><span>日程类型</span>${lessonTypeLabel[nextLesson.type]}</div>
-        <div class="detail-cell"><span>计薪</span>${nextLesson.nonPayable ? "固定日程，不计入课时工资" : "排给你的课自动计入课时费"}</div>
+        <div class="detail-cell"><span>计薪</span>${nextLesson.nonPayable ? "固定日程，不计入课时工资" : nextLesson.nonRegularPayItemName ? `${escapeHtml(nextLesson.nonRegularPayItemName)} · ${nextLesson.nonRegularPayRate} 元/节` : "排给你的课自动计入课时费"}</div>
       </div>
     `;
   }
@@ -10234,12 +10643,13 @@ function availableScheduleWeeks(lessons, teacherId = currentTeacherId()) {
       weekMap.set(week.weekStart, {
         weekStart: week.weekStart,
         lessonCount: Number(week.lessonCount) || 0,
+        cycleWeek: week.cycleWeek || "",
       });
     });
     lessons.forEach((lesson) => {
       const weekStart = startOfNaturalWeek(lesson.date);
       if (!weekMap.has(weekStart)) {
-        weekMap.set(weekStart, { weekStart, lessonCount: 0 });
+        weekMap.set(weekStart, { weekStart, lessonCount: 0, cycleWeek: lesson.cycleWeek || "" });
       }
     });
     return Array.from(weekMap.values()).sort((a, b) => a.weekStart.localeCompare(b.weekStart));
@@ -10460,6 +10870,8 @@ function renderSchedule() {
     state.selectedScheduleDate = weekDates.includes(todayKey()) ? todayKey() : weekDates[0];
   }
   const weekLessons = lessons.filter((lesson) => weekDates.includes(lesson.date));
+  const selectedWeekOption = weekOptions.find((option) => option.weekStart === selectedWeek) || {};
+  const selectedCycleLabel = selectedWeekOption.cycleWeek === "odd" ? "单周" : selectedWeekOption.cycleWeek === "even" ? "双周" : "";
   const payableCount = weekLessons
     .filter((lesson) => lesson.status !== "cancelled" && !lesson.nonPayable)
     .reduce((sum, lesson) => sum + Number(lesson.units || 0), 0);
@@ -10472,7 +10884,7 @@ function renderSchedule() {
         lessons.filter((lesson) => weekDateKeys(week).includes(lesson.date)).length;
       return `
         <option value="${week}" ${week === selectedWeek ? "selected" : ""}>
-          ${formatWeekRange(week)} · ${count} 节
+          ${formatWeekRange(week)}${weekOptions.find((option) => option.weekStart === week)?.cycleWeek === "odd" ? " · 单周" : weekOptions.find((option) => option.weekStart === week)?.cycleWeek === "even" ? " · 双周" : ""} · ${count} 节
         </option>
       `;
     })
@@ -10481,7 +10893,7 @@ function renderSchedule() {
   termTitle.textContent = term.name || "当前学期";
   termRange.textContent =
     term.startDate && term.endDate ? `${term.startDate} 至 ${term.endDate}` : "未设置学期日期";
-  range.textContent = `${formatWeekRange(selectedWeek)} · 自然周排班`;
+  range.textContent = `${formatWeekRange(selectedWeek)}${selectedCycleLabel ? ` · ${selectedCycleLabel}课表` : " · 自然周排班"}`;
 
   summary.innerHTML = [
     ["本周日程", `${weekLessons.length} 项`, "课程与固定安排"],
@@ -10765,12 +11177,16 @@ function renderAdminScheduling() {
       ? state.selectedSchedulingClassId
       : config.classes[0]?.id || "";
   state.selectedSchedulingClassId = selectedClassId;
+  const selectedCycleWeek = selectedCycleWeekForDraft(draft, "admin");
+  const displayWeekStart = scheduleCycleWeekStart(draft, selectedCycleWeek, config.weekStart);
+  const displayConfig = { ...config, weekStart: displayWeekStart };
   const selectedClassAssignments = assignments
     .filter((assignment) => assignment.classId === selectedClassId)
+    .filter((assignment) => !selectedCycleWeek || assignment.cycleWeek === selectedCycleWeek)
     .sort((a, b) => `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`));
   const selectedClassDisplayAssignments = [
     ...selectedClassAssignments,
-    ...configuredNonRegularScheduleItems(config, selectedClassId),
+    ...configuredNonRegularScheduleItems(displayConfig, selectedClassId),
   ];
   if (!selectedClassAssignments.some((assignment) => assignment.id === state.selectedScheduleAssignmentId)) {
     state.selectedScheduleAssignmentId = selectedClassAssignments[0]?.id || "";
@@ -10872,8 +11288,12 @@ function renderAdminScheduling() {
   }
   const activeTemplate = (config.scheduleTemplateOptions || []).find((item) => item.key === activeScheduleTemplateKey(config));
   document.querySelector("#periodTemplateHelp").textContent =
-    `${highScheduling ? `${activeTemplate?.label || "当前班级类别"}：` : ""}${config.divisionName}${config.gradeName}当前正课 ${regularSchedulePeriods(config).length} 个自动排课节次，非正课 ${(schedulePeriodsFromConfig(config).filter((period) => period.type !== "regular")).length} 个固定显示时段；午休、大课间通过相邻节次之间的空档体现。高中共享老师和专用教室按实际钟点校验冲突。`;
-  document.querySelector("#periodTemplateList").innerHTML = schedulePeriodTemplateHtml(config);
+    `${highScheduling ? `${activeTemplate?.label || "当前班级类别"}：` : ""}${config.divisionName}${config.gradeName}当前正课 ${regularSchedulePeriods(config).length} 个自动排课节次，非正课 ${(schedulePeriodsFromConfig(config).filter((period) => period.type !== "regular")).length} 个固定显示时段；${isPrimarySchedulingConfig(config) ? "按周一至周日查看完整日程；正课只参与周一至周五自动排课，点击日程即可修改。" : "午休、大课间通过相邻节次之间的空档体现。"}${highScheduling ? "高中共享老师和专用教室按实际钟点校验冲突。" : ""}`;
+  const periodTemplateList = document.querySelector("#periodTemplateList");
+  periodTemplateList.classList.toggle("weekly-mode", isPrimarySchedulingConfig(config));
+  periodTemplateList.innerHTML = schedulePeriodTemplateHtml(config);
+  document.querySelector("#addSchedulePeriod").textContent = isPrimarySchedulingConfig(config) ? "＋ 添加日程" : "新增节次";
+  document.querySelector("#saveSchedulePeriods").textContent = isPrimarySchedulingConfig(config) ? "保存周表" : "保存作息时间";
   document.querySelector("#roomResourceHelp").textContent =
     `${config.divisionName}当前有 ${roomSummary.homeroomCount} 间普通教室，另有 ${roomSummary.specialCount} 间专用教室；下方目录名称会用于排课、换教室和教室二维码。`;
   document.querySelector("#roomResourceTypeControls").innerHTML = roomResourceTypeControlsHtml(config, roomSummary.counts);
@@ -10907,10 +11327,11 @@ function renderAdminScheduling() {
   document.querySelector("#scheduleVersionStatus").className = currentVersion ? "status-pill done" : "status-pill";
   document.querySelector("#scheduleVersionList").innerHTML = scheduleVersionListHtml(scheduleVersions);
   document.querySelector("#toggleCourseEditMode").textContent = courseRulesEditMode ? "完成编辑" : "编辑";
-  document.querySelector("#adminSchedulePreviewHelp").textContent =
-    `按${config.gradeName}班级查看生成结果，确认前为草稿，确认后同步到老师端 ${formatWeekRange(config.weekStart)} 课表。`;
+  document.querySelector("#adminSchedulePreviewHelp").textContent = selectedCycleWeek
+    ? `按${config.gradeName}班级查看单双周结果；基础课程两周保持一致，替换课程在同一课位轮换。发布后老师端可选择单周或双周查看。`
+    : `按${config.gradeName}班级查看生成结果，确认前为草稿，确认后同步到老师端 ${formatWeekRange(config.weekStart)} 课表。`;
   document.querySelector("#courseRuleList").innerHTML = enabledCourseRules.length
-    ? enabledCourseRules.map(adminCourseRuleItem).join("")
+    ? `${enabledCourseRules.map(adminCourseRuleItem).join("")}${alternatingCoursePairEditorHtml(config)}`
     : `<div class="empty-state">当前年级还没有课程，请先新增课程</div>`;
   document.querySelector("#constraintSubjectSelect").innerHTML = scheduleConstraintSubjectOptions(config);
   document.querySelector("#constraintPeriodSelect").innerHTML = scheduleConstraintPeriodOptions(config);
@@ -10985,10 +11406,11 @@ function renderAdminScheduling() {
     .join("");
   renderScheduleAdjustmentPanel(selectedClassAssignments, selectedAssignment, draft);
   renderScheduleChangePanel(selectedClassAssignments, selectedAssignment, draft);
-  document.querySelector("#adminScheduleGrid").innerHTML = adminScheduleGrid(selectedClassDisplayAssignments, {
+  document.querySelector("#adminScheduleGrid").innerHTML = `${scheduleCycleSelectorHtml(draft, selectedCycleWeek, "admin")}${adminScheduleGrid(selectedClassDisplayAssignments, {
     readonly: false,
-    periods: schedulePeriodsForSchedulingClass(config, selectedClassId),
-  });
+    periods: schedulePeriodsForSchedulingClass(displayConfig, selectedClassId),
+    weekStart: displayWeekStart,
+  })}`;
 
   const generateButton = document.querySelector("#generateSchedule");
   generateButton.disabled = schedulingBackendState.loading || !readiness.canGenerate;
@@ -11022,6 +11444,11 @@ function renderAdminScheduling() {
   document.querySelectorAll("[data-delete-schedule-period]").forEach((button) => {
     button.disabled = termReadOnly || schedulingBackendState.loading;
   });
+  document
+    .querySelectorAll("[data-add-schedule-period-day], [data-edit-schedule-period], [data-apply-schedule-period-editor], [data-delete-active-schedule-period]")
+    .forEach((button) => {
+      button.disabled = termReadOnly || schedulingBackendState.loading;
+    });
 }
 
 function renderAdminScheduleOverview() {
@@ -11047,8 +11474,12 @@ function renderAdminScheduleOverview() {
         : config.classes[0]?.id || "";
   state.selectedScheduleOverviewClassId = selectedClassId;
   const selectedClass = config.classes.find((schoolClass) => schoolClass.id === selectedClassId) || config.classes[0] || null;
+  const selectedCycleWeek = selectedCycleWeekForDraft(draft, "overview");
+  const displayWeekStart = scheduleCycleWeekStart(draft, selectedCycleWeek, config.weekStart);
+  const displayConfig = { ...config, weekStart: displayWeekStart };
   const selectedClassAssignments = assignments
     .filter((assignment) => assignment.classId === selectedClassId)
+    .filter((assignment) => !selectedCycleWeek || assignment.cycleWeek === selectedCycleWeek)
     .sort((a, b) => `${a.date} ${a.period}`.localeCompare(`${b.date} ${b.period}`));
   const conflicts = validateScheduleConflicts(assignments);
   const selectedClassConflicts = conflicts.filter((conflict) => {
@@ -11063,8 +11494,9 @@ function renderAdminScheduleOverview() {
   const classSelect = document.querySelector("#overviewClassSelect");
 
   document.querySelector("#adminScheduleOverviewTitle").textContent = `${config.divisionName}${config.gradeName}课表总览`;
-  document.querySelector("#adminScheduleOverviewIntro").textContent =
-    `查看${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName} ${formatWeekRange(config.weekStart)} 的班级课表。`;
+  document.querySelector("#adminScheduleOverviewIntro").textContent = selectedCycleWeek
+    ? `查看${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName}的单周／双周循环课表。`
+    : `查看${config.termName || "当前学期"} · ${config.divisionName}${config.gradeName} ${formatWeekRange(config.weekStart)} 的班级课表。`;
   divisionSelect.innerHTML = schedulingDivisionOptions(config.divisionId);
   gradeSelect.innerHTML = schedulingGradeOptions(config.divisionId, config.gradeId);
   classSelect.innerHTML = config.classes
@@ -11111,7 +11543,7 @@ function renderAdminScheduleOverview() {
     </article>
     <article class="metric">
       <span>自然周</span>
-      <strong>${escapeHtml(formatWeekRange(config.weekStart))}</strong>
+      <strong>${escapeHtml(formatWeekRange(displayWeekStart))}</strong>
       <small>${schedulePeriodsForSchedulingClass(config, selectedClassId).length} 个节次</small>
     </article>
     <article class="metric">
@@ -11126,10 +11558,11 @@ function renderAdminScheduleOverview() {
     </article>
   `;
   grid.innerHTML = selectedClassAssignments.length
-    ? adminScheduleGrid(selectedClassAssignments, {
+    ? `${scheduleCycleSelectorHtml(draft, selectedCycleWeek, "overview")}${adminScheduleGrid(selectedClassAssignments, {
         readonly: true,
-        periods: schedulePeriodsForSchedulingClass(config, selectedClassId),
-      })
+        periods: schedulePeriodsForSchedulingClass(displayConfig, selectedClassId),
+        weekStart: displayWeekStart,
+      })}`
     : currentVersion
       ? `<div class="empty-state schedule-overview-empty">当前学部年级已有发布版本 V${escapeHtml(currentVersion.versionNumber)}，但课表明细暂未载入。请回到“排课管理”重新读取当前学部年级。</div>`
       : `<div class="empty-state schedule-overview-empty">当前学部年级还没有课表，请先到“排课管理”生成草稿或发布正式课表。</div>`;
@@ -11173,14 +11606,19 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
 
   const hasDraft = assignments.length > 0;
   const isPublished = draft.status === "published";
+  const isAlternatingCycle = draft.cycle?.mode === "alternating-week";
   const termReadOnly = state.schedulingConfig.termStatus === "archived";
-  const canAdjust = hasDraft && !isPublished && !termReadOnly && !schedulingBackendState.loading;
+  // 双周替换课位在两张周表中必须同步移动。为避免只改其中一周破坏教师、班级或
+  // 教室冲突校验，草稿阶段不开放单节手调、锁定或局部重排；请改配对/约束后重生成。
+  const canAdjust = hasDraft && !isPublished && !isAlternatingCycle && !termReadOnly && !schedulingBackendState.loading;
   const lockedCount = (draft.assignments || []).filter((assignment) => assignment.locked).length;
 
   status.textContent = !hasDraft
     ? "等待草稿"
     : isPublished
       ? "已发布锁定"
+      : isAlternatingCycle
+        ? "两周联动"
       : draft.conflicts?.length
         ? `${draft.conflicts.length} 个冲突`
         : lockedCount
@@ -11190,6 +11628,8 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
     ? "status-pill"
     : isPublished
       ? "status-pill locked"
+      : isAlternatingCycle
+        ? "status-pill warning"
       : draft.conflicts?.length
         ? "status-pill warning"
         : "status-pill done";
@@ -11313,7 +11753,9 @@ function renderScheduleAdjustmentPanel(assignments, selectedAssignment, draft) {
   replanTeacherSelect.disabled = !canAdjust || !hasDraft;
   replanDateSelect.disabled = !canAdjust || !hasDraft;
   replanSubjectSelect.disabled = !canAdjust || !hasDraft;
-  suggestions.innerHTML = scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft);
+  suggestions.innerHTML = isAlternatingCycle
+    ? `<div class="schedule-adjustment-note">单双周替换课位必须两周同步安排。若需变更，请在“课程与分布规则”调整配对、任课老师或约束后重新生成草稿。</div>`
+    : scheduleAdjustmentSuggestionsHtml(selectedAssignment, draft);
 }
 
 function renderTeacherRulePanel(config) {
@@ -11638,10 +12080,17 @@ function personnelCompactTags(row) {
   const workStatus = HR_WORK_STATUSES.some(([value]) => value === row.workStatus) ? row.workStatus : "employed";
   const workStatusLabel =
     row.workStatusLabel || HR_WORK_STATUSES.find(([value]) => value === workStatus)?.[1] || "就业";
+  const administrativeTeachingLoad = HR_ADMINISTRATIVE_TEACHING_LOADS.some(([value]) => value === row.administrativeTeachingLoad)
+    ? row.administrativeTeachingLoad
+    : "none";
+  const administrativeTeachingLoadLabel =
+    row.administrativeTeachingLoadLabel ||
+    HR_ADMINISTRATIVE_TEACHING_LOADS.find(([value]) => value === administrativeTeachingLoad)?.[1] ||
+    "不适用";
   const customTags = Array.isArray(row.tags) ? row.tags : [];
   const customTagText = customTags.map((tag) => tag.name).filter(Boolean).join("、");
   const ariaLabel = isTeacher
-    ? `人员层级：${managementLabel}；雇佣类型：${employmentLabel}；工作状态：${workStatusLabel}${customTagText ? `；自定义标签：${customTagText}` : ""}`
+    ? `人员层级：${managementLabel}；雇佣类型：${employmentLabel}；工作状态：${workStatusLabel}${administrativeTeachingLoad !== "none" ? `；行政兼课基准：${administrativeTeachingLoadLabel}` : ""}${customTagText ? `；自定义标签：${customTagText}` : ""}`
     : `人员层级：${managementLabel}；工作状态：${workStatusLabel}${customTagText ? `；自定义标签：${customTagText}` : ""}`;
   return `
     <span class="personnel-identity-tags" aria-label="${escapeHtml(ariaLabel)}">
@@ -11649,6 +12098,11 @@ function personnelCompactTags(row) {
       ${
         isTeacher
           ? `<span class="personnel-identity-tag employment ${employmentType}">${escapeHtml(employmentLabel)}</span>`
+          : ""
+      }
+      ${
+        isTeacher && administrativeTeachingLoad !== "none"
+          ? `<span class="personnel-identity-tag management ${administrativeTeachingLoad}">兼课 ${escapeHtml(administrativeTeachingLoadLabel)}</span>`
           : ""
       }
       <span class="personnel-identity-tag work-status ${workStatus}">${escapeHtml(workStatusLabel)}</span>
@@ -12159,21 +12613,6 @@ function adminCourseRuleItem(rule) {
             value="${Number(rule.sourceWeeklyLessons ?? rule.weeklyLessons ?? 0)}"
           />
         </label>
-        <label class="field-label compact-field" for="courseDuration-${subjectId}">
-          <span>每节时长</span>
-          <div class="input-with-unit">
-            <input
-              id="courseDuration-${subjectId}"
-              data-course-rule-duration="${subjectId}"
-              type="number"
-              min="20"
-              max="120"
-              step="5"
-              value="${Number(rule.durationMinutes || 40)}"
-            />
-            <em>分钟</em>
-          </div>
-        </label>
         ${
           courseRulesEditMode
             ? `<button class="mini-button danger" data-delete-grade-course="${subjectId}" type="button">删除</button>`
@@ -12311,6 +12750,118 @@ function adminCourseRuleItem(rule) {
           `
       }
     </article>
+  `;
+}
+
+function alternatingCoursePairRows(halfRules = [], preferredPairs = []) {
+  const allowed = new Set(halfRules.map((rule) => rule.subjectId));
+  const used = new Set();
+  const rows = [];
+  (preferredPairs || []).forEach((pair) => {
+    const oddSubjectId = String(pair?.oddSubjectId || "").trim();
+    const evenSubjectId = String(pair?.evenSubjectId || "").trim();
+    if (
+      !oddSubjectId ||
+      !evenSubjectId ||
+      oddSubjectId === evenSubjectId ||
+      !allowed.has(oddSubjectId) ||
+      !allowed.has(evenSubjectId) ||
+      used.has(oddSubjectId) ||
+      used.has(evenSubjectId)
+    ) {
+      return;
+    }
+    used.add(oddSubjectId);
+    used.add(evenSubjectId);
+    rows.push({ oddSubjectId, evenSubjectId });
+  });
+  const remaining = halfRules.filter((rule) => !used.has(rule.subjectId));
+  for (let index = 0; index < remaining.length; index += 2) {
+    rows.push({
+      oddSubjectId: remaining[index]?.subjectId || "",
+      evenSubjectId: remaining[index + 1]?.subjectId || "",
+    });
+  }
+  return rows;
+}
+
+function alternatingCoursePairEditorHtml(config, options = {}) {
+  const halfRules = fractionalCourseRules(options.rules || config.courseRules || []);
+  if (!halfRules.length) return `<div id="alternatingCoursePairEditor"></div>`;
+  const preferredPairs = Array.isArray(options.pairs) && options.pairs.length ? options.pairs : config.cyclePairs || [];
+  const existingPairs = alternatingCoursePairRows(halfRules, preferredPairs);
+  const optionsHtml = (selectedId) =>
+    `<option value="" ${selectedId ? "" : "selected"}>请选择</option>${halfRules
+      .map(
+        (rule) =>
+          `<option value="${escapeHtml(rule.subjectId)}" ${rule.subjectId === selectedId ? "selected" : ""}>${escapeHtml(rule.subjectName)} · ${Number(rule.sourceWeeklyLessons ?? rule.weeklyLessons)} 节/周</option>`,
+      )
+      .join("")}`;
+  const disabled = courseRulesEditMode ? "" : "disabled";
+  const complete = halfRules.length % 2 === 0 && existingPairs.every((pair) => pair.oddSubjectId && pair.evenSubjectId);
+  return `
+    <section class="alternating-course-pairs" id="alternatingCoursePairEditor" aria-label="单双周替换课程">
+      <header>
+        <div>
+          <strong>单双周替换课位</strong>
+          <small>两门带 .5 课时的课程共用同一个课位：单周上左侧课程，双周上右侧课程；其余课程在两周完全一致。</small>
+        </div>
+        <span class="tag ${complete ? "scheduled" : "exception"}">${existingPairs.length} 组${complete ? "" : " · 待配对"}</span>
+      </header>
+      ${
+        complete
+          ? ""
+          : `<p class="course-rule-auto-note active">每门带 .5 课时的课程必须两两配对。补齐后即可保存并生成单双周课表。</p>`
+      }
+      <div class="alternating-course-pair-list">
+        ${existingPairs
+          .map(
+            (pair, index) => `
+              <div class="alternating-course-pair" data-cycle-pair-row>
+                <span>第 ${index + 1} 组</span>
+                <label class="field-label compact-field">
+                  <span>单周课程</span>
+                  <select class="lesson-select" data-cycle-pair-odd ${disabled}>${optionsHtml(pair.oddSubjectId)}</select>
+                </label>
+                <span class="alternating-course-arrow" aria-hidden="true">⇄</span>
+                <label class="field-label compact-field">
+                  <span>双周课程</span>
+                  <select class="lesson-select" data-cycle-pair-even ${disabled}>${optionsHtml(pair.evenSubjectId)}</select>
+                </label>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function selectedCycleWeekForDraft(draft, key = "admin") {
+  if (draft?.cycle?.mode !== "alternating-week") return "";
+  const property = key === "overview" ? "selectedScheduleOverviewCycleWeek" : "selectedSchedulingCycleWeek";
+  const selected = state[property] === "even" ? "even" : "odd";
+  state[property] = selected;
+  return selected;
+}
+
+function scheduleCycleWeekStart(draft, cycleWeek, fallbackWeekStart) {
+  if (draft?.cycle?.mode !== "alternating-week") return fallbackWeekStart;
+  return cycleWeek === "even" ? draft.cycle.evenWeekStart : draft.cycle.oddWeekStart;
+}
+
+function scheduleCycleSelectorHtml(draft, cycleWeek, viewKey) {
+  if (draft?.cycle?.mode !== "alternating-week") return "";
+  const weekStart = scheduleCycleWeekStart(draft, cycleWeek, draft.weekStart);
+  return `
+    <div class="schedule-cycle-selector">
+      <strong>两周循环课表</strong>
+      <select class="lesson-select" data-schedule-cycle-view="${escapeHtml(viewKey)}">
+        <option value="odd" ${cycleWeek === "odd" ? "selected" : ""}>单周 · ${escapeHtml(formatWeekRange(draft.cycle.oddWeekStart))}</option>
+        <option value="even" ${cycleWeek === "even" ? "selected" : ""}>双周 · ${escapeHtml(formatWeekRange(draft.cycle.evenWeekStart))}</option>
+      </select>
+      <span>当前查看 ${escapeHtml(formatWeekRange(weekStart))}；基础课程保持不变，替换课程以高亮课位呈现。</span>
+    </div>
   `;
 }
 
@@ -13014,7 +13565,7 @@ function configuredNonRegularScheduleItems(config, classId = "") {
 }
 
 function adminScheduleGrid(assignments, options = {}) {
-  const weekDates = weekDateKeys(state.schedulingConfig.weekStart);
+  const weekDates = weekDateKeys(options.weekStart || state.schedulingConfig.weekStart);
   const grouped = weekDates.reduce((map, date) => {
     map.set(date, new Map());
     return map;
@@ -14028,6 +14579,19 @@ const salarySchemeMoneyGroups = [
     path: "housingAllowance",
     labels: salaryHousingLabels,
   },
+  {
+    title: "行政管理人员兼课基准（每自然周）",
+    description:
+      "总校人事 + 行政在任课行政人员的人事档案选择 1/3 或 1/2 工作量。基准内正课不另计课时费，不足不扣款；只有超出部分按所在学部、学科的正课单价计薪。",
+    fields: {
+      "administrativeTeachingLoadBaseline.oneThird.high": "高中 · 1/3 工作量（节/周）",
+      "administrativeTeachingLoadBaseline.oneThird.middle": "初中 · 1/3 工作量（节/周）",
+      "administrativeTeachingLoadBaseline.oneThird.primary": "小学 · 1/3 工作量（节/周）",
+      "administrativeTeachingLoadBaseline.oneHalf.high": "高中 · 1/2 工作量（节/周）",
+      "administrativeTeachingLoadBaseline.oneHalf.middle": "初中 · 1/2 工作量（节/周）",
+      "administrativeTeachingLoadBaseline.oneHalf.primary": "小学 · 1/2 工作量（节/周）",
+    },
+  },
   // 校龄津贴按岗位类别取不同公式，参数与 server/payroll.js 的 seniorityRules 一一对应。
   // 早先这里配的是一张 1-6 年的阶梯表（seniorityAllowance），但计算侧读的是公式，
   // 改了阶梯表根本不生效——现在直接配公式参数。
@@ -14253,6 +14817,65 @@ function schemeNumberInput(pathValue, label, value) {
   `;
 }
 
+function customNonRegularPayItemRowHtml(item = {}, index = 0) {
+  const id = String(item.id || `activity-${Date.now()}-${index + 1}`).trim();
+  return `
+    <div class="custom-pay-item-row" data-custom-pay-item-row>
+      <input type="hidden" data-custom-pay-item-id value="${escapeHtml(id)}" />
+      <label class="field-label">
+        活动名称
+        <input data-custom-pay-item-name maxlength="40" value="${escapeHtml(item.name || "")}" placeholder="例如 大课间" />
+      </label>
+      <label class="field-label">
+        适用年级
+        <select data-custom-pay-item-grade class="lesson-select">
+          ${customPayActivityGradeOptions(item.gradeId)}
+        </select>
+      </label>
+      <label class="field-label">
+        补贴（元/节）
+        <input data-custom-pay-item-rate type="number" min="0" step="0.01" value="${Number(item.rate || 0)}" placeholder="例如 20" />
+      </label>
+      <button class="ghost-button icon-danger compact-button" type="button" data-remove-custom-pay-item>删除</button>
+    </div>
+  `;
+}
+
+function customNonRegularPayItemsCard(scheme = {}) {
+  const items = Array.isArray(scheme.customNonRegularPayItems) ? scheme.customNonRegularPayItems : [];
+  return `
+    <section class="payroll-scheme-card custom-pay-item-card">
+      <div>
+        <h4>自定义计薪活动</h4>
+        <p>每条活动须选择一个适用年级并设定每节补贴；同名活动可为不同年级分别配置单价。排课负责人只会看到当前年级可用的项目；未选择项目时，非正课只展示在课表、不计薪。</p>
+      </div>
+      <div id="customNonRegularPayItemRows" class="custom-pay-item-list">
+        ${items.map((item, index) => customNonRegularPayItemRowHtml(item, index)).join("") || `<p class="muted custom-pay-item-empty">暂未新增自定义计薪活动。</p>`}
+      </div>
+      <div><button class="ghost-button" type="button" data-add-custom-pay-item>＋ 新增计薪活动</button></div>
+    </section>
+  `;
+}
+
+function customNonRegularPayItemsFromInputs() {
+  const rows = Array.from(document.querySelectorAll("[data-custom-pay-item-row]"));
+  const names = new Set();
+  return rows.map((row, index) => {
+    const id = String(row.querySelector("[data-custom-pay-item-id]")?.value || `activity-${Date.now()}-${index + 1}`).trim();
+    const name = String(row.querySelector("[data-custom-pay-item-name]")?.value || "").trim();
+    const gradeId = String(row.querySelector("[data-custom-pay-item-grade]")?.value || "").trim();
+    const grade = customPayActivityGradeById(gradeId);
+    const rate = Number(row.querySelector("[data-custom-pay-item-rate]")?.value || 0);
+    if (!name) throw new Error("请填写自定义计薪活动名称，或删除空白行");
+    if (!grade) throw new Error(`请为“${name}”选择适用年级`);
+    if (!Number.isFinite(rate) || rate < 0) throw new Error(`“${name}”的补贴必须是非负数字`);
+    const key = `${gradeId}:${name.toLocaleLowerCase()}`;
+    if (names.has(key)) throw new Error(`“${grade.label}”中的“${name}”已重复，请保留一条即可`);
+    names.add(key);
+    return { id, name, stageId: grade.stageId, gradeId, gradeName: grade.gradeName, rate, enabled: true };
+  });
+}
+
 function renderPayrollSchemeEditor(rules = {}) {
   const editor = document.querySelector("#payrollSchemeEditor");
   if (!editor) return;
@@ -14268,6 +14891,7 @@ function renderPayrollSchemeEditor(rules = {}) {
       <label class="field-label">最低工资标准（元/月）<input id="schemeMinimumWage" type="number" min="1" step="1" value="${minimumWage}" /></label>
     </section>
   `;
+  const customPayItems = customNonRegularPayItemsCard(scheme);
   const fixedGroups = salarySchemeMoneyGroups
     .map((group) => {
       // 两种写法：{path, labels} 用同一前缀拼子键；{fields} 直接给完整路径，
@@ -14344,6 +14968,7 @@ function renderPayrollSchemeEditor(rules = {}) {
   editor.innerHTML = `
     <div class="payroll-scheme-note">这些金额是全校统一规则，不需要先选择老师；老师个人命中哪个档位，在“薪资结算工作台”的教师工资档案里设置。</div>
     ${minimumWageCard}
+    ${customPayItems}
     ${fixedGroups}
     ${lifeTeacherGroups}
     ${lessonRuleGroups}
@@ -14362,6 +14987,7 @@ function applyPayrollSchemeEditorInputs(teacherSalaryScheme = {}) {
   }
   next.minimumWage = minimumWage;
   delete next.minimumWageByYear;
+  next.customNonRegularPayItems = customNonRegularPayItemsFromInputs();
   return next;
 }
 
@@ -14732,7 +15358,7 @@ function renderPayrollHistory() {
 }
 
 function renderPayrollConfig() {
-  if (!canExportAllPayrollDetails()) return;
+  if (!canManagePayrollConfig()) return;
   if (!payrollRuleState.loaded && !payrollRuleState.loading) {
     loadPayrollRules();
   }
@@ -15461,6 +16087,7 @@ function attendanceNote(lesson) {
 }
 
 function allowanceText(lesson) {
+  if (lesson.nonRegularPayItemName) return `${lesson.units} 节 × ${lesson.nonRegularPayRate} 元（${lesson.nonRegularPayItemName}）`;
   if (lesson.type === "regular") return `${lesson.units} 节 × ${state.rules.regularLessonRate} 元`;
   if (lesson.type === "morning" || lesson.type === "evening") return `${lesson.units} 节 × ${state.rules.selfStudyRate} 元`;
   return `${lesson.units} 节 × ${state.rules.weekendRate} 元`;
@@ -15473,6 +16100,7 @@ function actionCell(lesson) {
     return `<span class="muted">${escapeHtml(lesson.cancelReason || "已取消，不计薪")}</span>`;
   }
   if (lesson.nonPayable) return `<span class="muted">固定日程，不计课时工资</span>`;
+  if (lesson.nonRegularPayItemName) return `<span class="muted">${escapeHtml(lesson.nonRegularPayItemName)} · ${lesson.nonRegularPayRate} 元/节</span>`;
   return `<span class="muted">计入课时费</span>`;
 }
 
@@ -15597,7 +16225,7 @@ async function authenticate(username, password) {
           error: "",
         };
         await loadFinanceTeacherPage({ page: 1 });
-        if (canExportAllPayrollDetails()) await loadPayrollRules();
+        if (canManagePayrollConfig()) await loadPayrollRules();
       }
       if (["admin", "division_head", "principal"].includes(payload.account.role)) {
         schedulingBackendState = { loaded: false, loading: false, error: "", job: null, precheck: null };
@@ -15630,20 +16258,15 @@ async function authenticate(username, password) {
 }
 
 async function quickLoginDemo(username) {
-  // 总校财务已由真实名册人员接管，继续提交旧 finance / 123456 既会失败，
-  // 更不能把真实临时口令写进浏览器代码。点击时只帮用户填入正式用户名，
-  // 密码仍由本人输入；学校内网环境会整体隐藏这一开发区。
-  if (apiEnabled() && username === "finance") {
-    document.querySelector("#loginUsername").value = "fy260907-0019";
-    document.querySelector("#loginPassword").value = "";
-    document.querySelector("#loginError").textContent = "总校财务账号已由诸新龙接管，请输入本人当前密码";
-    document.querySelector("#loginPassword").focus();
-    return;
-  }
+  // 本地测试环境统一使用默认演示口令；学校正式环境会隐藏整个快捷账号区，
+  // 因此不会在内网部署页面中暴露或代填任何真实人员的密码。
   const password = "123456";
-  document.querySelector("#loginUsername").value = username;
+  // 总校财务已由真实名册接管，账号实际使用工号；按钮仍保持“总校财务”这类
+  // 易懂的业务名称。本地开发环境可用默认测试口令一键进入。
+  const loginUsername = apiEnabled() && username === "finance" ? "fy260907-0019" : username;
+  document.querySelector("#loginUsername").value = loginUsername;
   document.querySelector("#loginPassword").value = password;
-  await authenticate(username, password);
+  await authenticate(loginUsername, password);
 }
 
 function logout() {
@@ -15701,18 +16324,44 @@ function openDialog(config = {}) {
         let control;
         if (field.type === "textarea") {
           control = `<textarea id="${id}" data-dialog-field="${escapeHtml(field.name)}" rows="${field.rows || 3}" placeholder="${escapeHtml(field.placeholder || "")}">${escapeHtml(field.value || "")}</textarea>`;
-        } else if (field.type === "multiselect") {
+        } else if (field.type === "half_hour_time") {
+          // 原生 <input type=time> 在不同浏览器仍会放出 00-59 的分钟列表。
+          // 加班只有整点/半点两个粒度，直接拆成两组下拉，避免用户先选 18:39
+          // 再在提交时被拒绝。
+          const parsed = /^(\d{2}):(00|30)$/.exec(String(field.value || ""));
+          const selectedHour = parsed?.[1] || "";
+          const selectedMinute = parsed?.[2] || "";
+          const hourOptions = ["", ...Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"))]
+            .map((hour) => `<option value="${hour}" ${hour === selectedHour ? "selected" : ""}>${hour || "时"}</option>`)
+            .join("");
+          const minuteOptions = ["", "00", "30"]
+            .map((minute) => `<option value="${minute}" ${minute === selectedMinute ? "selected" : ""}>${minute || "分"}</option>`)
+            .join("");
+          control = `<div id="${id}" class="dialog-half-hour-time" data-dialog-field="${escapeHtml(field.name)}" data-half-hour-time="1">
+            <select aria-label="${escapeHtml(field.label || "时间")}小时" data-half-hour-hour>${hourOptions}</select>
+            <span aria-hidden="true">:</span>
+            <select aria-label="${escapeHtml(field.label || "时间")}分钟" data-half-hour-minute>${minuteOptions}</select>
+          </div>`;
+        } else if (field.type === "multiselect" || field.type === "teacher_multiselect") {
           // 多选用勾选列表而非 <select multiple>：后者要按住 Ctrl 才能多选，
           // 教务不会知道这一点，最后只抄送出去一个人。
           const selectedValues = new Set((Array.isArray(field.value) ? field.value : []).map((value) => String(value)));
-          control = `<div class="dialog-checklist" data-dialog-field="${escapeHtml(field.name)}" data-multi="1">${(field.options || [])
+          const optionHtml = (field.options || [])
             .map(
               (opt, i) =>
-                `<label class="dialog-check"><input type="checkbox" value="${escapeHtml(opt.value)}" ${
+                `<label class="dialog-check" ${field.type === "teacher_multiselect" ? `data-teacher-multi-option data-search-text="${escapeHtml(opt.searchText || opt.label)}"` : ""}><input type="checkbox" value="${escapeHtml(opt.value)}" ${
                   selectedValues.has(String(opt.value)) || (!selectedValues.size && i === 0 && field.autoFirst) ? "checked" : ""
                 } /><span>${escapeHtml(opt.label)}</span></label>`,
             )
-            .join("")}</div>`;
+            .join("");
+          control =
+            field.type === "teacher_multiselect"
+              ? `<div class="dialog-personnel-picker" data-dialog-field="${escapeHtml(field.name)}" data-multi="1">
+                  <input class="dialog-personnel-search" data-teacher-multi-search type="search" placeholder="搜索姓名、工号或学科" autocomplete="off" />
+                  <div class="dialog-checklist dialog-personnel-options" data-teacher-multi-options>${optionHtml}</div>
+                  <small class="dialog-personnel-count" data-teacher-multi-count></small>
+                </div>`
+              : `<div class="dialog-checklist" data-dialog-field="${escapeHtml(field.name)}" data-multi="1">${optionHtml}</div>`;
         } else if (field.type === "select") {
           control = `<select id="${id}" data-dialog-field="${escapeHtml(field.name)}">${(field.options || [])
             .map((opt) => `<option value="${escapeHtml(opt.value)}" ${opt.value === field.value ? "selected" : ""}>${escapeHtml(opt.label)}</option>`)
@@ -15758,7 +16407,7 @@ function openDialog(config = {}) {
     const overlay = root.querySelector("[data-dialog-overlay]");
     const confirmButton = root.querySelector("[data-dialog-confirm]");
     const errorEl = root.querySelector("[data-dialog-error]");
-    const firstControl = root.querySelector("[data-dialog-field]");
+    const firstControl = root.querySelector("[data-dialog-field] input, [data-dialog-field] textarea, [data-dialog-field] select, [data-teacher-multi-search], [data-dialog-field]");
     (firstControl || confirmButton).focus();
 
     let closed = false;
@@ -15777,6 +16426,12 @@ function openDialog(config = {}) {
     const collect = () => {
       const values = {};
       root.querySelectorAll("[data-dialog-field]").forEach((el) => {
+        if (el.dataset.halfHourTime) {
+          const hour = el.querySelector("[data-half-hour-hour]")?.value || "";
+          const minute = el.querySelector("[data-half-hour-minute]")?.value || "";
+          values[el.dataset.dialogField] = hour && minute ? `${hour}:${minute}` : "";
+          return;
+        }
         if (el.dataset.multi) {
           values[el.dataset.dialogField] = [...el.querySelectorAll("input:checked")].map((box) => box.value);
           return;
@@ -15789,6 +16444,23 @@ function openDialog(config = {}) {
       });
       return values;
     };
+
+    const refreshTeacherMultiPicker = (picker) => {
+      const query = String(picker.querySelector("[data-teacher-multi-search]")?.value || "").trim().toLowerCase();
+      picker.querySelectorAll("[data-teacher-multi-option]").forEach((option) => {
+        option.hidden = Boolean(query) && !String(option.dataset.searchText || "").toLowerCase().includes(query);
+      });
+      const count = picker.querySelectorAll("input:checked").length;
+      const countEl = picker.querySelector("[data-teacher-multi-count]");
+      if (countEl) countEl.textContent = `已选择 ${count} 人`;
+    };
+    root.querySelectorAll("[data-dialog-field][data-multi]").forEach((picker) => {
+      if (picker.querySelector("[data-teacher-multi-search]")) {
+        refreshTeacherMultiPicker(picker);
+        picker.addEventListener("input", () => refreshTeacherMultiPicker(picker));
+        picker.addEventListener("change", () => refreshTeacherMultiPicker(picker));
+      }
+    });
 
     if (onChange) {
       const emitChange = (event) => onChange({ values: collect(), root, event });
@@ -15840,7 +16512,8 @@ function openDialog(config = {}) {
         event.key === "Enter" &&
         !event.shiftKey &&
         event.target.tagName !== "TEXTAREA" &&
-        event.target.type !== "file"
+        event.target.type !== "file" &&
+        !event.target.matches?.("[data-teacher-multi-search]")
       ) {
         event.preventDefault();
         submit();
@@ -16052,10 +16725,21 @@ document.addEventListener("input", (event) => {
   if (minDayInput) {
     syncCourseRuleCoverageInput(minDayInput.dataset.courseRuleMinDay);
   }
+  if (event.target.closest("[data-course-rule-weekly]")) {
+    refreshAlternatingCoursePairEditor();
+  }
 });
 
 document.addEventListener("change", (event) => {
-  if (event.target.matches("#hrNew-orgUnitId")) {
+  if (event.target.matches("[data-schedule-cycle-view]")) {
+    if (event.target.dataset.scheduleCycleView === "overview") {
+      state.selectedScheduleOverviewCycleWeek = event.target.value === "even" ? "even" : "odd";
+      renderAdminScheduleOverview();
+    } else {
+      state.selectedSchedulingCycleWeek = event.target.value === "even" ? "even" : "odd";
+      renderAdminScheduling();
+    }
+  } else if (event.target.matches("#hrNew-orgUnitId")) {
     syncLifeTeacherPositionChoices("#hrNew-orgUnitId", "#hrNew-positionId");
   } else if (event.target.matches("#hrEmp-orgUnitId")) {
     syncLifeTeacherPositionChoices("#hrEmp-orgUnitId", "#hrEmp-positionId");
@@ -16460,6 +17144,9 @@ const HR_STATUS_OPTIONS = [
   ["left", "已离职"],
   ["suspended", "停用"],
 ];
+// “离职中 / 已离职”只由离职审批流写入；档案页保留作筛选展示，
+// 但不能再通过手动状态下拉绕开学部主任发起、总校人事与校长审批。
+const HR_DIRECT_STATUS_OPTIONS = HR_STATUS_OPTIONS.filter(([value]) => !["offboarding", "left"].includes(value));
 
 // 职称与学历：人事评定/证书事实，决定基本工资档与学历补贴
 const HR_TITLE_GRADES = [
@@ -16492,6 +17179,14 @@ const HR_EMPLOYMENT_TYPES = [
 const HR_WORK_STATUSES = [
   ["employed", "就业"],
   ["standby", "待岗"],
+];
+
+// 只给已关联任课教师的行政人员使用。基准内属于岗位教学工作量，
+// 每自然周超过基准的正课才按学科课时单价计入工资。
+const HR_ADMINISTRATIVE_TEACHING_LOADS = [
+  ["none", "不适用"],
+  ["oneThird", "1/3 工作量"],
+  ["oneHalf", "1/2 工作量"],
 ];
 
 // 兼岗任命：由人事维护的职务，直接决定兼岗津贴
@@ -16580,6 +17275,20 @@ function hrWorkStatusTag(status = "employed", label = "") {
   const normalized = HR_WORK_STATUSES.some(([value]) => value === status) ? status : "employed";
   const text = label || HR_WORK_STATUSES.find(([value]) => value === normalized)?.[1] || "就业";
   return `<span class="work-status-tag ${normalized}">工作 · ${escapeHtml(text)}</span>`;
+}
+
+function hrAdministrativeTeachingLoadOptions(selected = "none") {
+  const normalized = HR_ADMINISTRATIVE_TEACHING_LOADS.some(([value]) => value === selected) ? selected : "none";
+  return HR_ADMINISTRATIVE_TEACHING_LOADS.map(
+    ([value, label]) => `<option value="${value}" ${value === normalized ? "selected" : ""}>${label}</option>`,
+  ).join("");
+}
+
+function hrAdministrativeTeachingLoadTag(load = "none", label = "") {
+  const normalized = HR_ADMINISTRATIVE_TEACHING_LOADS.some(([value]) => value === load) ? load : "none";
+  if (normalized === "none") return "";
+  const text = label || HR_ADMINISTRATIVE_TEACHING_LOADS.find(([value]) => value === normalized)?.[1] || "不适用";
+  return `<span class="tag pending">兼课 · ${escapeHtml(text)}</span>`;
 }
 
 function canManagePersonnelTags() {
@@ -16938,6 +17647,7 @@ function renderHrEmployees() {
             <div class="hr-employee-tags">
               ${hrManagementLevelTag(employee.managementLevel, employee.managementLevelLabel)}
               ${employee.teacherId ? hrEmploymentTypeTag(employee.employmentType, employee.employmentTypeLabel) : ""}
+              ${employee.teacherId ? hrAdministrativeTeachingLoadTag(employee.administrativeTeachingLoad, employee.administrativeTeachingLoadLabel) : ""}
               ${hrWorkStatusTag(employee.workStatus, employee.workStatusLabel)}
               ${hrPersonnelTagsHtml(employee.tags, { compact: true })}
               <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
@@ -17015,6 +17725,7 @@ function renderHrEmployeeDetail() {
   const employee = detail.employee;
   const canManageManagementLevel = currentRole() === "system_admin";
   const canManageEmployment = currentRole() === "system_admin" && Boolean(employee.teacherId);
+  const canManageAdministrativeTeachingLoad = currentRole() === "system_admin" && Boolean(employee.teacherId);
   if (canManagePersonnelTags() && !personnelTagState.loaded && !personnelTagState.loading) loadPersonnelTags();
   if (!isHrManagerRole()) {
     // 学部负责人只读视图（不含敏感完整值与编辑操作）
@@ -17034,6 +17745,7 @@ function renderHrEmployeeDetail() {
           <div class="hr-field"><span>合同数量</span><strong>${detail.contracts.length}</strong></div>
           <div class="hr-field"><span>人员层级</span>${hrManagementLevelTag(employee.managementLevel, employee.managementLevelLabel)}</div>
           ${employee.teacherId ? `<div class="hr-field"><span>雇佣类型</span>${hrEmploymentTypeTag(employee.employmentType, employee.employmentTypeLabel)}</div>` : ""}
+          ${employee.teacherId && employee.administrativeTeachingLoad !== "none" ? `<div class="hr-field"><span>行政兼课基准</span>${hrAdministrativeTeachingLoadTag(employee.administrativeTeachingLoad, employee.administrativeTeachingLoadLabel)}</div>` : ""}
           ${employee.isLifeTeacher ? `<div class="hr-field"><span>生活老师类别</span><strong>${escapeHtml((employee.teacherRoles?.lifeTeacherKind === "lower" ? "低段生活老师" : employee.teacherRoles?.lifeTeacherKind === "upper" ? "高段生活老师" : employee.teacherRoles?.lifeTeacherKind === "night" ? "门岗／夜班生活老师" : "生活老师"))}</strong></div>
           <div class="hr-field"><span>负责学生数</span><strong>${Number(employee.teacherRoles?.lifeTeacherStudentCount || 0)} 人</strong></div>` : ""}
           <div class="hr-field"><span>工作状态</span>${hrWorkStatusTag(employee.workStatus, employee.workStatusLabel)}</div>
@@ -17054,6 +17766,7 @@ function renderHrEmployeeDetail() {
         <div class="hr-detail-tags">
           ${hrManagementLevelTag(employee.managementLevel, employee.managementLevelLabel)}
           ${employee.teacherId ? hrEmploymentTypeTag(employee.employmentType, employee.employmentTypeLabel) : ""}
+          ${employee.teacherId ? hrAdministrativeTeachingLoadTag(employee.administrativeTeachingLoad, employee.administrativeTeachingLoadLabel) : ""}
           ${hrWorkStatusTag(employee.workStatus, employee.workStatusLabel)}
           ${hrPersonnelTagsHtml(employee.tags, { compact: true })}
           <span class="${hrStatusPillClass(employee.status)}">${escapeHtml(employee.statusLabel)}</span>
@@ -17082,6 +17795,13 @@ function renderHrEmployeeDetail() {
               ? `<label class="field-label">雇佣类型<select id="hrEmp-employmentType">${hrEmploymentTypeOptions(employee.employmentType)}</select></label>
                  <label class="field-label">协议月薪（元／月）<input id="hrEmp-agreementMonthlySalary" type="number" min="0" step="0.01" value="${Number(employee.agreementMonthlySalary || 0)}" /><small>仅协议教师填写；正常教师按现有薪资规则结算。</small></label>`
               : `<div class="hr-field"><span>雇佣类型</span>${hrEmploymentTypeTag(employee.employmentType, employee.employmentTypeLabel)}</div>`
+            : ""
+        }
+        ${
+          employee.teacherId
+            ? canManageAdministrativeTeachingLoad
+              ? `<label class="field-label">行政兼课基准<select id="hrEmp-administrativeTeachingLoad">${hrAdministrativeTeachingLoadOptions(employee.administrativeTeachingLoad)}</select><small>不足不扣款；每自然周超过基准的正课才按学科课时单价计薪。</small></label>`
+              : `<div class="hr-field"><span>行政兼课基准</span>${hrAdministrativeTeachingLoadTag(employee.administrativeTeachingLoad, employee.administrativeTeachingLoadLabel) || "<strong>不适用</strong>"}</div>`
             : ""
         }
         ${
@@ -17227,14 +17947,18 @@ function renderHrEmployeeDetail() {
 
       <div class="hr-detail-section">
         <h3>人事状态</h3>
-        <div class="hr-inline-form">
-          <select id="hrEmp-nextStatus">
-            ${HR_STATUS_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === employee.status ? "selected" : ""}>${label}</option>`).join("")}
-          </select>
-          <input id="hrEmp-statusReason" placeholder="状态变更原因（必填）" />
-          <button class="ghost-button compact-button" data-hr-emp-status type="button">变更状态</button>
-        </div>
-        <p class="action-hint">离职/停用会同步冻结教学侧账号资格；完整业务联动在 M4 交付。</p>
+        ${
+          ["left", "offboarding"].includes(employee.status)
+            ? `<p class="action-hint">${employee.status === "offboarding" ? "该人员正在走离职审批，待总校人事与校长审批后自动生效。" : "该人员已离职；账号、任课资格和后续工资均已按离职流程处理。"}</p>`
+            : `<div class="hr-inline-form">
+                <select id="hrEmp-nextStatus">
+                  ${HR_DIRECT_STATUS_OPTIONS.map(([value, label]) => `<option value="${value}" ${value === employee.status ? "selected" : ""}>${label}</option>`).join("")}
+                </select>
+                <input id="hrEmp-statusReason" placeholder="状态变更原因（必填）" />
+                <button class="ghost-button compact-button" data-hr-emp-status type="button">变更状态</button>
+              </div>
+              <p class="action-hint">停用会同步冻结教学侧账号资格。离职请由所属学部主任在人事审批中发起，不在此处直接修改。</p>`
+        }
       </div>
 
       <div class="hr-detail-section">
@@ -17946,13 +18670,279 @@ function syncLeaveDuration(root, event = null) {
   daysInput.value = leavePeriodCalculation(values).days;
 }
 
+function overtimeDurationCalculation(values = {}) {
+  const parseTime = (value) => {
+    const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value || ""));
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const start = parseTime(values.startTime);
+  const end = parseTime(values.endTime);
+  if (start === null || end === null) return { hours: "", error: "" };
+  if (start % 30 !== 0 || end % 30 !== 0) {
+    return { hours: "", error: "加班开始和结束时间仅支持每半小时选择一次" };
+  }
+  if (start === end) return { hours: "", error: "开始时间和结束时间不能相同" };
+  const minutes = end > start ? end - start : end + 24 * 60 - start;
+  return { hours: String(Number((minutes / 60).toFixed(2))), error: "" };
+}
+
+function dialogTimeFieldValue(root, name) {
+  const field = root.querySelector(`[data-dialog-field="${name}"]`);
+  if (!field) return "";
+  if (field.dataset.halfHourTime) {
+    const hour = field.querySelector("[data-half-hour-hour]")?.value || "";
+    const minute = field.querySelector("[data-half-hour-minute]")?.value || "";
+    return hour && minute ? `${hour}:${minute}` : "";
+  }
+  return field.value || "";
+}
+
+function syncOvertimeDuration(root) {
+  const hoursInput = root.querySelector('[data-dialog-field="hours"]');
+  if (!hoursInput) return;
+  hoursInput.value = overtimeDurationCalculation({
+    startTime: dialogTimeFieldValue(root, "startTime"),
+    endTime: dialogTimeFieldValue(root, "endTime"),
+  }).hours;
+}
+
+// 班级人数确认是薪资基础数据，不适合放进一段“班级,人数”的自由文本里。
+// 专用对话框把班级、班主任和生活老师分开呈现：班主任逐班任命；生活老师仅
+// 填其负责学生总数（可跨班），并在提交前显示是否超过本学部学生合计。
+async function openClassSizeConfirmationDialog(template, prefill = {}) {
+  if (!termManagementState.loaded) await loadTermContext();
+  const selectableTerms = allBudgetTerms().filter(canUseBudgetTerm);
+  if (!selectableTerms.length) {
+    showToast("暂无可确认人数的正式学期，请先由学部主任维护教学日历");
+    return;
+  }
+  let selectedTermId =
+    prefill.termId || selectableTerms.find((term) => term.current)?.id || selectableTerms[0]?.id || "";
+  let options = null;
+  const root = document.querySelector("#dialogRoot");
+  const close = () => {
+    root.innerHTML = "";
+    root.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("dialog-open");
+    activeDialogClose = null;
+  };
+  const loadOptions = async () => {
+    try {
+      options = await apiRequest(`/api/oa/class-size-confirmation-options?termId=${encodeURIComponent(selectedTermId)}`);
+    } catch (error) {
+      showToast(error.message || "读取班级与人员名单失败");
+      close();
+      return false;
+    }
+    if (!(options.classes || []).length) {
+      showToast("该学部当前学期尚未建立班级，暂不能确认人数");
+      close();
+      return false;
+    }
+    if (!(options.homeroomTeachers || []).length) {
+      showToast("本学部暂无可任命的在职任课老师，暂不能确认班主任");
+      close();
+      return false;
+    }
+    return true;
+  };
+  if (!(await loadOptions())) return;
+
+  const teacherOptionsHtml = (selectedId) => `
+    <option value="">请选择班主任</option>
+    ${(options.homeroomTeachers || [])
+      .map(
+        (teacher) =>
+          `<option value="${escapeHtml(teacher.teacherId)}" ${teacher.teacherId === selectedId ? "selected" : ""}>${escapeHtml(
+            `${teacher.name}${teacher.employeeNo ? ` · ${teacher.employeeNo}` : ""}${teacher.subjectName ? ` · ${teacher.subjectName}` : ""}`,
+          )}</option>`,
+      )
+      .join("")}
+  `;
+  const render = () => {
+    const previousNote = options.priorConfirmation
+      ? `<p class="class-size-prior-note">当前已存在第 ${escapeHtml(String(options.priorConfirmation.version || 1))} 版确认；重新提交并经校长批准后才会更新本学期工资口径。</p>`
+      : "";
+    root.innerHTML = `
+      <div class="dialog-overlay" data-dialog-overlay>
+        <div class="dialog-card class-size-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="classSizeConfirmTitle">
+          <div class="dialog-head">
+            <h3 id="classSizeConfirmTitle">${escapeHtml(template.icon || "👥")} 发起班级人数确认</h3>
+            <p>流程：校长审批 → 抄送总校人事 + 行政、总校财务。审批通过后，本学期班主任津贴和生活老师工作量工资按此确认单取数。</p>
+          </div>
+          <div class="class-size-confirm-body">
+            <div class="class-size-confirm-meta">
+              <label class="field-label">适用学期
+                <select data-class-size-term>
+                  ${selectableTerms
+                    .map((term) => `<option value="${escapeHtml(term.id)}" ${term.id === selectedTermId ? "selected" : ""}>${escapeHtml(budgetTermLabel(term))}</option>`)
+                    .join("")}
+                </select>
+              </label>
+              <div class="class-size-confirm-stage"><span>人数所属学部</span><strong>${escapeHtml(options.stageName || "本学部")}</strong></div>
+            </div>
+            ${previousNote}
+            <section class="class-size-confirm-section">
+              <div class="class-size-confirm-section-head">
+                <div><h4>班级人数与班主任</h4><p>每个班级必须选择一位本学部在职班主任；学生人数将作为班主任津贴的计算依据。</p></div>
+                <strong data-class-size-student-total>0 人</strong>
+              </div>
+              <div class="class-size-confirm-table-wrap">
+                <table class="class-size-confirm-table">
+                  <thead><tr><th>年级</th><th>班级</th><th>学生人数</th><th>班主任</th></tr></thead>
+                  <tbody>
+                    ${(options.classes || [])
+                      .map(
+                        (item) => `
+                          <tr data-class-size-row data-class-id="${escapeHtml(item.classId)}">
+                            <td>${escapeHtml(String(item.grade || "—"))}</td>
+                            <td><strong>${escapeHtml(item.className)}</strong></td>
+                            <td><input class="class-size-number-input" data-class-size-students type="number" min="0" step="1" value="${escapeHtml(String(item.studentCount ?? 0))}" inputmode="numeric" aria-label="${escapeHtml(item.className)}学生人数" /></td>
+                            <td><select data-class-size-homeroom>${teacherOptionsHtml(item.homeroomTeacherId || "")}</select></td>
+                          </tr>`,
+                      )
+                      .join("")}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+            <section class="class-size-confirm-section">
+              <div class="class-size-confirm-section-head">
+                <div><h4>生活老师负责学生数</h4><p>不绑定具体班级；一个生活老师可负责多个班级学生。合计可小于本学部总人数，但不能超过。</p></div>
+                <strong data-class-size-life-total>0 / 0 人</strong>
+              </div>
+              ${
+                (options.lifeTeachers || []).length
+                  ? `<div class="class-size-life-grid">
+                      ${(options.lifeTeachers || [])
+                        .map(
+                          (teacher) => `
+                            <label class="class-size-life-row" data-life-teacher-id="${escapeHtml(teacher.teacherId)}">
+                              <span><strong>${escapeHtml(teacher.name)}</strong><small>${escapeHtml([teacher.employeeNo, teacher.positionName || "生活老师"].filter(Boolean).join(" · "))}</small></span>
+                              <span class="class-size-life-number"><input data-life-students type="number" min="0" step="1" value="${escapeHtml(String(teacher.studentCount || 0))}" inputmode="numeric" /><em>人</em></span>
+                            </label>`,
+                        )
+                        .join("")}
+                    </div>`
+                  : '<p class="class-size-empty-life">本学部当前没有在职生活老师；无需填写本栏。</p>'
+              }
+            </section>
+            <label class="field-label">说明（选填）<textarea data-class-size-reason placeholder="例如：转入转出、寄宿生人数变化等"></textarea></label>
+            <p class="dialog-error" data-dialog-error></p>
+          </div>
+          <div class="dialog-actions">
+            <button class="ghost-button" data-dialog-cancel type="button">取消</button>
+            <button class="primary-button" data-class-size-submit type="button">提交申请</button>
+          </div>
+        </div>
+      </div>
+    `;
+    root.setAttribute("aria-hidden", "false");
+    document.body.classList.add("dialog-open");
+    syncTotals();
+    bind();
+  };
+  const integerFrom = (input) => {
+    const value = String(input?.value || "").trim();
+    return /^\d+$/.test(value) ? Number(value) : null;
+  };
+  const syncTotals = () => {
+    const classValues = [...root.querySelectorAll("[data-class-size-students]")].map(integerFrom);
+    const lifeValues = [...root.querySelectorAll("[data-life-students]")].map(integerFrom);
+    const total = classValues.some((value) => value === null) ? 0 : classValues.reduce((sum, value) => sum + value, 0);
+    const lifeTotal = lifeValues.some((value) => value === null) ? 0 : lifeValues.reduce((sum, value) => sum + value, 0);
+    const studentTarget = root.querySelector("[data-class-size-student-total]");
+    const lifeTarget = root.querySelector("[data-class-size-life-total]");
+    if (studentTarget) studentTarget.textContent = `${total} 人`;
+    if (lifeTarget) {
+      lifeTarget.textContent = `${lifeTotal} / ${total} 人`;
+      lifeTarget.classList.toggle("is-over-limit", lifeTotal > total);
+    }
+  };
+  const bind = () => {
+    root.querySelector("[data-dialog-cancel]")?.addEventListener("click", close);
+    root.querySelector("[data-dialog-overlay]")?.addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) close();
+    });
+    root.querySelector("[data-class-size-term]")?.addEventListener("change", async (event) => {
+      selectedTermId = event.target.value;
+      const submit = root.querySelector("[data-class-size-submit]");
+      if (submit) submit.disabled = true;
+      if (await loadOptions()) render();
+    });
+    root.querySelectorAll("[data-class-size-students], [data-life-students]").forEach((input) => {
+      input.addEventListener("input", syncTotals);
+    });
+    root.querySelector("[data-class-size-submit]")?.addEventListener("click", async () => {
+      const errorEl = root.querySelector("[data-dialog-error]");
+      const submit = root.querySelector("[data-class-size-submit]");
+      const classConfirmations = [...root.querySelectorAll("[data-class-size-row]")].map((row) => ({
+        classId: row.dataset.classId || "",
+        studentCount: integerFrom(row.querySelector("[data-class-size-students]")),
+        homeroomTeacherId: row.querySelector("[data-class-size-homeroom]")?.value || "",
+      }));
+      const lifeTeacherAssignments = [...root.querySelectorAll("[data-life-teacher-id]")].map((row) => ({
+        teacherId: row.dataset.lifeTeacherId || "",
+        studentCount: integerFrom(row.querySelector("[data-life-students]")),
+      }));
+      const incompleteClass = classConfirmations.find((item) => item.studentCount === null || !item.homeroomTeacherId);
+      const invalidLife = lifeTeacherAssignments.find((item) => item.studentCount === null);
+      const total = classConfirmations.reduce((sum, item) => sum + Number(item.studentCount || 0), 0);
+      const lifeTotal = lifeTeacherAssignments.reduce((sum, item) => sum + Number(item.studentCount || 0), 0);
+      if (incompleteClass) {
+        errorEl.textContent = "请逐班填写非负整数人数，并选择班主任。";
+        return;
+      }
+      if (invalidLife) {
+        errorEl.textContent = "生活老师负责学生数必须为非负整数。";
+        return;
+      }
+      if (lifeTotal > total) {
+        errorEl.textContent = `生活老师负责学生合计 ${lifeTotal} 人，不能超过本学部学生总数 ${total} 人。`;
+        return;
+      }
+      submit.disabled = true;
+      submit.classList.add("is-loading");
+      errorEl.textContent = "";
+      try {
+        await apiRequest("/api/oa/requests", {
+          method: "POST",
+          body: {
+            templateKey: "class_size_confirm",
+            formData: {
+              termId: selectedTermId,
+              classConfirmations,
+              lifeTeacherAssignments,
+              reason: root.querySelector("[data-class-size-reason]")?.value || "",
+            },
+          },
+        });
+        close();
+        showToast("班级人数确认已提交，等待校长审批");
+        loadOaRequests({ scope: "mine", page: 1 });
+      } catch (error) {
+        errorEl.textContent = error.message || "提交失败，请重试";
+        submit.disabled = false;
+        submit.classList.remove("is-loading");
+      }
+    });
+  };
+  render();
+}
+
 // 发起申请：按模板字段动态生成表单
 async function openOaCreateDialog(templateKey, prefill = {}) {
   const template = oaState.templates.find((item) => item.key === templateKey);
   if (!template) return;
+  if (templateKey === "class_size_confirm") {
+    await openClassSizeConfirmationDialog(template, prefill);
+    return;
+  }
   const hasHalfDayRange = ["leave", "outbound"].includes(templateKey);
+  const hasOvertimeTimeRange = ["overtime", "overtime_batch"].includes(templateKey);
   let lessonSwapOptions = null;
   let payrollApprovalOptions = null;
+  let overtimeBatchStaffOptions = null;
   if (templateKey === "payroll_approval") {
     try {
       payrollApprovalOptions = await apiRequest("/api/oa/payroll-approval-options");
@@ -17962,6 +18952,18 @@ async function openOaCreateDialog(templateKey, prefill = {}) {
     }
     if (!(payrollApprovalOptions.periods || []).length) {
       showToast("暂无可提交的工资期间：请先完成本学部所有老师的确认与财务复核");
+      return;
+    }
+  }
+  if (templateKey === "overtime_batch") {
+    try {
+      overtimeBatchStaffOptions = await apiRequest("/api/oa/overtime-batch-staff-options");
+    } catch (error) {
+      showToast(error.message || "读取本学部加班人员失败");
+      return;
+    }
+    if (!(overtimeBatchStaffOptions.staff || []).length) {
+      showToast("本学部暂无可选择的在职老师");
       return;
     }
   }
@@ -18019,7 +19021,13 @@ async function openOaCreateDialog(templateKey, prefill = {}) {
     multiple: Boolean(field.multiple),
     accept: field.accept || "",
     options:
-      templateKey === "lesson_swap" && field.key === "sourceLessonId"
+      templateKey === "overtime_batch" && field.key === "participantTeacherIds"
+        ? (overtimeBatchStaffOptions?.staff || []).map((staff) => ({
+            value: staff.teacherId,
+            label: `${staff.name} · ${staff.employeeNo || "未设工号"} · ${staff.subjectName || "教师"}`,
+            searchText: `${staff.name || ""} ${staff.employeeNo || ""} ${staff.subjectName || ""} ${staff.stageName || ""}`,
+          }))
+        : templateKey === "lesson_swap" && field.key === "sourceLessonId"
         ? lessonSwapOptions.sourceLessons.map((lesson) => ({ value: lesson.lessonId, label: lesson.label }))
         : templateKey === "lesson_swap" && field.key === "counterpartTeacherId"
           ? counterpartTeachers
@@ -18074,6 +19082,10 @@ async function openOaCreateDialog(templateKey, prefill = {}) {
       ? ({ root, event }) => {
           syncLeaveDuration(root, event);
         }
+      : hasOvertimeTimeRange
+        ? ({ root }) => {
+            syncOvertimeDuration(root);
+          }
       : templateKey === "lesson_swap"
         ? ({ root, event }) => {
             if (event && event.target?.dataset.dialogField !== "counterpartTeacherId") return;
@@ -18110,6 +19122,8 @@ async function openOaCreateDialog(templateKey, prefill = {}) {
     validate:
       hasHalfDayRange
         ? (values) => leavePeriodCalculation(values).error
+        : hasOvertimeTimeRange
+          ? (values) => overtimeDurationCalculation(values).error
         : null,
     onConfirm: async (values) => {
       const formData = {};
@@ -18125,6 +19139,7 @@ async function openOaCreateDialog(templateKey, prefill = {}) {
         }
       });
       if (templateKey === "leave") formData.days = leavePeriodCalculation(values).days;
+      if (hasOvertimeTimeRange) formData.hours = overtimeDurationCalculation(values).hours;
 
       if (files.length) {
         const multipart = new FormData();
@@ -18472,6 +19487,40 @@ function renderPayrollApprovalSnapshot(detail) {
   `;
 }
 
+function renderClassSizeConfirmationSnapshot(detail) {
+  if (detail.templateKey !== "class_size_confirm") return "";
+  const classes = Array.isArray(detail.formData?.classConfirmations) ? detail.formData.classConfirmations : [];
+  const lifeTeachers = Array.isArray(detail.formData?.lifeTeacherAssignments) ? detail.formData.lifeTeacherAssignments : [];
+  if (!classes.length && !lifeTeachers.length) return "";
+  const studentTotal = Number(detail.formData?.totalStudentCount ?? classes.reduce((sum, item) => sum + Number(item.studentCount || 0), 0));
+  const lifeTotal = Number(detail.formData?.lifeTeacherStudentTotal ?? lifeTeachers.reduce((sum, item) => sum + Number(item.studentCount || 0), 0));
+  return `
+    <section class="class-size-detail-snapshot">
+      <div class="class-size-detail-head">
+        <div><h4>人数与岗位确认明细</h4><p>${escapeHtml(detail.termName || detail.formData?.termName || "")} · ${escapeHtml(detail.formData?.stageName || "")}</p></div>
+        <div><strong>${studentTotal} 人</strong><small>生活老师负责 ${lifeTotal} 人</small></div>
+      </div>
+      <div class="class-size-detail-table-wrap">
+        <table class="class-size-detail-table">
+          <thead><tr><th>年级</th><th>班级</th><th>学生人数</th><th>班主任</th></tr></thead>
+          <tbody>${classes
+            .map(
+              (item) => `<tr><td>${escapeHtml(String(item.grade || "—"))}</td><td>${escapeHtml(item.className || item.classId || "")}</td><td>${escapeHtml(String(item.studentCount ?? 0))} 人</td><td>${escapeHtml(item.homeroomTeacherName || item.homeroomTeacherId || "—")}</td></tr>`,
+            )
+            .join("")}</tbody>
+        </table>
+      </div>
+      ${
+        lifeTeachers.length
+          ? `<div class="class-size-detail-life"><strong>生活老师负责学生数</strong>${lifeTeachers
+              .map((item) => `<span>${escapeHtml(item.teacherName || item.teacherId || "")}<b>${escapeHtml(String(item.studentCount ?? 0))} 人</b></span>`)
+              .join("")}</div>`
+          : '<p class="class-size-detail-empty">本学部本学期无生活老师需确认。</p>'
+      }
+    </section>
+  `;
+}
+
 async function downloadOaAttachment(requestId, attachment) {
   const response = await fetch(
     `/api/oa/requests/${encodeURIComponent(requestId)}/attachments/${encodeURIComponent(attachment.id)}/content`,
@@ -18518,6 +19567,8 @@ async function openOaDetail(requestId) {
   const fieldRows = (detail.formFields || [])
     .map((field) => {
       let value = detail.formData?.[field.key];
+      // 人数确认的两个结构化字段由下方表格渲染，不能退化成 [object Object]。
+      if (["class_size_rows", "life_teacher_rows"].includes(field.type)) return "";
       // 调课单存的是课次 ID，详情中必须展示双方确认的课程信息，不能让老师和
       // 排课负责人对着一串内部编号判断是不是要调的那节课。
       if (detail.templateKey === "lesson_swap" && field.key === "sourceLessonId") {
@@ -18525,6 +19576,10 @@ async function openOaDetail(requestId) {
       }
       if (detail.templateKey === "lesson_swap" && field.key === "counterpartLessonId") {
         value = detail.formData?.counterpartLessonLabel || value;
+      }
+      if (detail.templateKey === "overtime_batch" && field.key === "participantTeacherIds") {
+        const names = Array.isArray(detail.formData?.participantTeacherNames) ? detail.formData.participantTeacherNames : [];
+        value = names.length ? `${names.join("、")}（共 ${detail.formData?.participantCount || names.length} 人）` : value;
       }
       if (field.type === "file") {
         // 申请材料与执行凭证分别展示，避免凭证被误显示在“证明材料”字段下。
@@ -18607,6 +19662,7 @@ async function openOaDetail(requestId) {
         <div class="approval-detail-body">
           <div class="approval-detail-fields">${fieldRows || '<p class="empty-state compact">无表单内容</p>'}</div>
           ${renderPayrollApprovalSnapshot(detail)}
+          ${renderClassSizeConfirmationSnapshot(detail)}
           ${renderCcSection(detail)}
           <ol class="approval-steps">${stepRows}</ol>
           ${renderExecutionSection(detail)}
@@ -19629,6 +20685,14 @@ let hrFlowsState = {
   status: "",
   todoOnly: true,
   createType: "",
+  employeePicker: {
+    query: "",
+    items: [],
+    selected: null,
+    loaded: false,
+    loading: false,
+    error: "",
+  },
   loaded: false,
   loading: false,
   error: "",
@@ -19660,17 +20724,92 @@ async function loadHrFlows(overrides = {}) {
 
 const HR_FLOW_TYPE_LABELS = { onboard: "入职", transfer: "调岗", offboard: "离职" };
 
+function resetHrFlowEmployeePicker() {
+  hrFlowsState.employeePicker = {
+    query: "",
+    items: [],
+    selected: null,
+    loaded: false,
+    loading: false,
+    error: "",
+  };
+}
+
+async function loadHrFlowEmployeeOptions(query = hrFlowsState.employeePicker.query) {
+  const normalizedQuery = String(query || "").trim();
+  const picker = hrFlowsState.employeePicker;
+  hrFlowsState.employeePicker = { ...picker, query: normalizedQuery, loading: true, error: "" };
+  try {
+    const result = await apiRequest(`/api/hr/flow-employee-options?search=${encodeURIComponent(normalizedQuery)}`);
+    hrFlowsState.employeePicker = {
+      ...hrFlowsState.employeePicker,
+      query: normalizedQuery,
+      items: Array.isArray(result.items) ? result.items : [],
+      loaded: true,
+      loading: false,
+      error: "",
+    };
+  } catch (error) {
+    hrFlowsState.employeePicker = {
+      ...hrFlowsState.employeePicker,
+      query: normalizedQuery,
+      items: [],
+      loaded: true,
+      loading: false,
+      error: error.message || "员工列表加载失败",
+    };
+  }
+}
+
+function hrFlowEmployeePickerHtml() {
+  const picker = hrFlowsState.employeePicker;
+  const selected = picker.selected;
+  const options = picker.items
+    .map((employee) => {
+      const isSelected = selected?.id === employee.id;
+      return `
+        <button class="hr-flow-employee-option${isSelected ? " selected" : ""}" type="button" data-hr-flow-employee-pick="${escapeHtml(employee.id)}" aria-pressed="${isSelected}">
+          <strong>${escapeHtml(employee.personName)} · ${escapeHtml(employee.employeeNo)}</strong>
+          <small>${escapeHtml(employee.orgUnitName || "未设置部门")} · ${escapeHtml(employee.positionName || "未设置岗位")}</small>
+        </button>
+      `;
+    })
+    .join("");
+  const resultContent = picker.loading
+    ? '<div class="hr-flow-employee-empty">正在查询员工…</div>'
+    : picker.error
+      ? `<div class="hr-flow-employee-empty">${escapeHtml(picker.error)}</div>`
+      : options || `<div class="hr-flow-employee-empty">${picker.loaded ? "没有找到可选择的在职员工" : "请输入姓名或工号后搜索"}</div>`;
+  return `
+    <div class="hr-flow-employee-picker">
+      <span class="field-label">选择员工</span>
+      <div class="hr-flow-employee-search">
+        <input id="hrFlowEmployeeSearch" type="search" value="${escapeHtml(picker.query)}" placeholder="输入姓名或工号搜索" autocomplete="off" />
+        <button class="ghost-button compact-button" type="button" data-hr-flow-employee-search>搜索</button>
+      </div>
+      ${selected ? `<div class="hr-flow-employee-selected">已选择：<strong>${escapeHtml(selected.personName)} · ${escapeHtml(selected.employeeNo)}</strong><span>${escapeHtml(selected.orgUnitName || "未设置部门")} · ${escapeHtml(selected.positionName || "未设置岗位")}</span></div>` : ""}
+      <div class="hr-flow-employee-options">${resultContent}</div>
+      <p class="field-hint">请从名单中点选员工；仅显示当前权限范围内可办理调岗或离职的在职人员。</p>
+    </div>
+  `;
+}
+
 function hrFlowCreateFormHtml() {
   const type = hrFlowsState.createType;
   if (!type) {
+    const canStartPeopleFlow = ["hr", "system_admin", "division_head"].includes(currentRole());
+    const canStartOffboard = currentRole() === "division_head";
     return `
       <div class="hr-inline-form">
-        <span>发起流程：</span>
-        <button class="ghost-button compact-button" data-hr-flow-new="onboard" type="button">入职申请</button>
-        <button class="ghost-button compact-button" data-hr-flow-new="transfer" type="button">调岗申请</button>
-        <button class="ghost-button compact-button" data-hr-flow-new="offboard" type="button">离职申请</button>
+        ${canStartPeopleFlow ? "<span>发起流程：</span>" : "<span>请处理分配给您的审批事项。</span>"}
+        ${canStartPeopleFlow ? '<button class="ghost-button compact-button" data-hr-flow-new="onboard" type="button">入职申请</button><button class="ghost-button compact-button" data-hr-flow-new="transfer" type="button">调岗申请</button>' : ""}
+        ${canStartOffboard ? '<button class="ghost-button compact-button" data-hr-flow-new="offboard" type="button">发起离职申请</button>' : ""}
       </div>
     `;
+  }
+  if (type === "offboard" && currentRole() !== "division_head") {
+    hrFlowsState.createType = "";
+    return `<div class="empty-state">离职申请仅可由所属学部主任发起。</div>`;
   }
   if (type === "onboard") {
     const teacherSubjects = (hrOrgState.units.length ? "" : "");
@@ -19698,7 +20837,7 @@ function hrFlowCreateFormHtml() {
     <div class="hr-detail-card">
       <h3>发起${isTransfer ? "调岗" : "离职"}</h3>
       <div class="hr-form-grid">
-        <label class="field-label">员工工号<input id="hrFlow-employeeNo" placeholder="例如 FY0001" /></label>
+        ${hrFlowEmployeePickerHtml()}
         <label class="field-label">生效日期<input id="hrFlow-effectiveDate" type="date" /></label>
         ${
           isTransfer
@@ -19784,7 +20923,11 @@ function renderHrFlows() {
     loadHrFlows();
     return;
   }
-  if (!hrOrgState.loaded && !hrOrgState.loading) loadHrOrgData();
+  // 校长只处理人事审批待办，不需要也无权读取组织岗位配置；
+  // 仅在确实可能发起/编辑人事流程的角色下加载这些候选项。
+  if (!hrOrgState.loaded && !hrOrgState.loading && ["hr", "system_admin", "division_head"].includes(currentRole())) {
+    loadHrOrgData();
+  }
 
   document.querySelector("#hrTodoPill").textContent = `待办 ${hrFlowsState.todoCount}`;
   document.querySelector("#hrTodoPill").className = hrFlowsState.todoCount ? "status-pill warning" : "status-pill done";
@@ -20211,6 +21354,8 @@ document.addEventListener("click", async (event) => {
         "agreementMonthlySalary",
         // 就业／待岗同样由总校人事 + 行政维护。
         "workStatus",
+        // 行政兼课基准同样只由总校人事 + 行政维护。
+        "administrativeTeachingLoad",
       ].forEach((field) => {
         const input = document.querySelector(`#hrEmp-${field}`);
         if (input) body[field] = input.value;
@@ -20531,13 +21676,34 @@ document.addEventListener("click", async (event) => {
   const newFlowButton = event.target.closest("[data-hr-flow-new]");
   if (newFlowButton) {
     hrFlowsState.createType = newFlowButton.dataset.hrFlowNew;
-    if (!hrOrgState.loaded) await loadHrOrgData();
+    resetHrFlowEmployeePicker();
+    const requiredLoads = [];
+    if (!hrOrgState.loaded) requiredLoads.push(loadHrOrgData());
+    if (["transfer", "offboard"].includes(hrFlowsState.createType)) requiredLoads.push(loadHrFlowEmployeeOptions());
+    await Promise.all(requiredLoads);
     render();
     return;
   }
   if (event.target.closest("[data-hr-flow-cancel]")) {
     hrFlowsState.createType = "";
+    resetHrFlowEmployeePicker();
     render();
+    return;
+  }
+  const employeeSearchButton = event.target.closest("[data-hr-flow-employee-search]");
+  if (employeeSearchButton) {
+    const searchInput = document.querySelector("#hrFlowEmployeeSearch");
+    await loadHrFlowEmployeeOptions(searchInput?.value || "");
+    render();
+    return;
+  }
+  const employeePickButton = event.target.closest("[data-hr-flow-employee-pick]");
+  if (employeePickButton) {
+    const selected = hrFlowsState.employeePicker.items.find((item) => item.id === employeePickButton.dataset.hrFlowEmployeePick);
+    if (selected) {
+      hrFlowsState.employeePicker = { ...hrFlowsState.employeePicker, selected };
+      render();
+    }
     return;
   }
   const submitButton = event.target.closest("[data-hr-flow-submit]");
@@ -20553,7 +21719,10 @@ document.addEventListener("click", async (event) => {
         body.primarySubjectId = document.querySelector("#hrFlow-subjectId").value;
         body.hiredAt = document.querySelector("#hrFlow-hiredAt").value;
       } else {
-        body.employeeNo = document.querySelector("#hrFlow-employeeNo").value.trim();
+        if (!hrFlowsState.employeePicker.selected?.id) {
+          throw new Error("请从员工名单中选择人员");
+        }
+        body.employeeId = hrFlowsState.employeePicker.selected.id;
         body.effectiveDate = document.querySelector("#hrFlow-effectiveDate").value;
         if (flowType === "transfer") {
           body.targetOrgUnitId = document.querySelector("#hrFlow-targetOrgUnitId").value;
@@ -20563,6 +21732,7 @@ document.addEventListener("click", async (event) => {
       await apiRequest("/api/hr/flows", { method: "POST", body });
       showToast("流程已发起");
       hrFlowsState.createType = "";
+      resetHrFlowEmployeePicker();
       hrFlowsState.loaded = false;
       hrEmployeePage.loaded = false;
       render();
@@ -21131,6 +22301,46 @@ document.querySelector("#saveTeacherRule").addEventListener("click", () => {
 });
 
 document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-add-custom-pay-item]")) {
+    const rows = document.querySelector("#customNonRegularPayItemRows");
+    if (!rows) return;
+    rows.querySelector(".custom-pay-item-empty")?.remove();
+    rows.insertAdjacentHTML("beforeend", customNonRegularPayItemRowHtml({}, rows.querySelectorAll("[data-custom-pay-item-row]").length));
+    rows.querySelector("[data-custom-pay-item-row]:last-child [data-custom-pay-item-name]")?.focus();
+    return;
+  }
+  const removeCustomPayItem = event.target.closest("[data-remove-custom-pay-item]");
+  if (removeCustomPayItem) {
+    removeCustomPayItem.closest("[data-custom-pay-item-row]")?.remove();
+    const rows = document.querySelector("#customNonRegularPayItemRows");
+    if (rows && !rows.querySelector("[data-custom-pay-item-row]")) {
+      rows.innerHTML = `<p class="muted custom-pay-item-empty">暂未新增自定义计薪活动。</p>`;
+    }
+    return;
+  }
+  const addPeriodButton = event.target.closest("[data-add-schedule-period-day]");
+  if (addPeriodButton) {
+    openSchedulePeriodEditor(-1, addPeriodButton.dataset.addSchedulePeriodDay);
+    return;
+  }
+  const editPeriodButton = event.target.closest("[data-edit-schedule-period]");
+  if (editPeriodButton) {
+    openSchedulePeriodEditor(editPeriodButton.dataset.editSchedulePeriod, editPeriodButton.dataset.scheduleDayIndex);
+    return;
+  }
+  if (event.target.closest("[data-apply-schedule-period-editor]")) {
+    applySchedulePeriodEditor();
+    return;
+  }
+  if (event.target.closest("[data-cancel-schedule-period-editor]")) {
+    schedulePeriodEditorState = null;
+    renderAdminScheduling();
+    return;
+  }
+  if (event.target.closest("[data-delete-active-schedule-period]")) {
+    deleteSchedulePeriodRow(schedulePeriodEditorState?.index);
+    return;
+  }
   const deletePeriodButton = event.target.closest("[data-delete-schedule-period]");
   if (!deletePeriodButton) return;
   deleteSchedulePeriodRow(deletePeriodButton.dataset.deleteSchedulePeriod);
@@ -21139,7 +22349,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("change", (event) => {
   const typeSelect = event.target.closest("[data-schedule-period-type]");
   if (!typeSelect) return;
-  const row = typeSelect.closest("[data-schedule-period-row]");
+  const row = typeSelect.closest("[data-schedule-period-row], [data-schedule-period-editor]");
   const fields = row?.querySelector("[data-schedule-nonregular-fields]");
   if (!fields) return;
   const isNonRegular = typeSelect.value !== "regular";
@@ -21147,8 +22357,10 @@ document.addEventListener("change", (event) => {
   if (!isNonRegular) {
     const contentInput = row.querySelector("[data-schedule-period-content]");
     const responsibleSelect = row.querySelector("[data-schedule-period-responsible]");
+    const payItemSelect = row.querySelector("[data-schedule-period-pay-item]");
     if (contentInput) contentInput.value = "";
     if (responsibleSelect) responsibleSelect.value = "";
+    if (payItemSelect) payItemSelect.value = "";
   }
 });
 
@@ -21302,7 +22514,7 @@ if (backendMode()) {
   }
   if (isFinanceRole()) {
     loadFinanceTeacherPage({ page: financeTeacherPage.page });
-    if (canExportAllPayrollDetails()) loadPayrollRules();
+    if (canManagePayrollConfig()) loadPayrollRules();
   }
   if (currentRole() === "admin") {
     loadTermContext().then(() => loadBackendSchedulingContext());

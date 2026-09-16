@@ -582,6 +582,55 @@ function runPayroll({ teacher, profile = {}, lessons = [], ...rest }) {
   assert.equal(substituteOutbound.lines[0].rate, rules.primary.substitute, "代课老师应按学部代课单价计薪");
 }
 
+// -------------------------------------------------- 行政管理人员兼课基准
+{
+  const baseline = scheme.administrativeTeachingLoadBaseline;
+  assert.deepEqual(baseline.oneThird, { high: 4, middle: 5, primary: 6 }, "1/3 工作量应按三学部基准配置");
+  assert.deepEqual(baseline.oneHalf, { high: 6, middle: 7, primary: 8 }, "1/2 工作量应按三学部基准配置");
+
+  const regularLessons = Array.from({ length: 5 }, (_, index) => ({
+    id: `L-ADMIN-HIGH-${index + 1}`,
+    date: `2026-09-${String(7 + index).padStart(2, "0")}`,
+    time: `${String(8 + index).padStart(2, "0")}:00`,
+    type: "regular",
+    status: "scheduled",
+  }));
+  const highOneThird = runPayroll({
+    teacher: baseTeacher({ stageId: "high", primarySubjectId: "math" }),
+    lessons: regularLessons,
+    hrFacts: { administrativeTeachingLoad: "oneThird" },
+  });
+  assert.equal(highOneThird.administrativeTeaching.weeklyBaseline, 4, "高中行政兼课 1/3 基准为每周 4 节");
+  assert.equal(highOneThird.administrativeTeaching.scheduledRegularUnits, 5);
+  assert.equal(highOneThird.administrativeTeaching.excessUnits, 1);
+  assert.equal(highOneThird.lessonAmount, 96, "高中数学仅超出 1 节按 80×1.2 元计薪");
+  assert.equal(amountOf(highOneThird, "行政兼课超基准课时费"), 96);
+  assert.equal(highOneThird.lines.filter((line) => !line.payable).length, 4, "基准内 4 节不另计课时费");
+
+  const primaryOneHalf = runPayroll({
+    teacher: baseTeacher({ stageId: "primary", grade: 4, primarySubjectId: "chinese" }),
+    lessons: Array.from({ length: 9 }, (_, index) => ({
+      id: `L-ADMIN-PRIMARY-${index + 1}`,
+      date: `2026-09-${String(7 + Math.floor(index / 2)).padStart(2, "0")}`,
+      time: `${String(8 + (index % 2)).padStart(2, "0")}:00`,
+      type: "regular",
+      status: "scheduled",
+    })),
+    hrFacts: { administrativeTeachingLoad: "oneHalf" },
+  });
+  assert.equal(primaryOneHalf.administrativeTeaching.weeklyBaseline, 8, "小学行政兼课 1/2 基准为每周 8 节");
+  assert.equal(primaryOneHalf.administrativeTeaching.excessUnits, 1);
+  assert.equal(primaryOneHalf.lessonAmount, 22.8, "小学语文仅超出 1 节按 19×1.2 元计薪");
+
+  const belowBaseline = runPayroll({
+    teacher: baseTeacher({ stageId: "middle", grade: 8, primarySubjectId: "chinese" }),
+    lessons: [{ id: "L-ADMIN-MIDDLE-1", date: "2026-09-08", time: "08:00", type: "regular", status: "scheduled" }],
+    hrFacts: { administrativeTeachingLoad: "oneHalf" },
+  });
+  assert.equal(belowBaseline.lessonAmount, 0, "不足基准不计课时费，也不形成扣款");
+  assert.equal(belowBaseline.deductionAmount, 0, "不足行政兼课基准不扣款");
+}
+
 // ------------------------------------------------------ 住房补贴与考核标准
 {
   assert.equal(scheme.housingAllowance.teacher, 2100, "专任教师住房补贴统一 2100");

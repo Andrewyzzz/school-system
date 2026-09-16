@@ -154,6 +154,7 @@ systemctl stop school-system
 psql "$DATABASE_URL" -f database/postgres/001_phase1_schema.sql
 psql "$DATABASE_URL" -f database/postgres/002_phase2_schema.sql
 psql "$DATABASE_URL" -f database/postgres/003_phase2_m2_patch.sql
+psql "$DATABASE_URL" -f database/postgres/005_alternating_week_schedule.sql
 
 # ③ 试跑核对（不写库）
 DATABASE_URL=... npm run migrate:postgres

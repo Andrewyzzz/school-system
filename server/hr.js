@@ -63,6 +63,15 @@ export const WORK_STATUS_LABELS = {
   standby: "待岗",
 };
 
+// 行政管理人员兼课基准由总校人事 + 行政逐人维护。它只适用于已关联任课教师的
+// 行政人员：基准内的正课是岗位工作量，超出部分才进入课时工资。
+export const ADMINISTRATIVE_TEACHING_LOADS = ["none", "oneThird", "oneHalf"];
+export const ADMINISTRATIVE_TEACHING_LOAD_LABELS = {
+  none: "不适用",
+  oneThird: "1/3 工作量",
+  oneHalf: "1/2 工作量",
+};
+
 // 自定义标签只是人事辅助标识，不参与薪资、排课或审批计算。
 // 色值使用受控枚举，前端无需接收或渲染任意 CSS。
 export const PERSONNEL_TAG_COLORS = ["blue", "green", "orange", "purple", "gray"];
@@ -109,6 +118,7 @@ const EMPLOYEE_EDITABLE_FIELDS = [
   "employmentType",
   "agreementMonthlySalary",
   "workStatus",
+  "administrativeTeachingLoad",
 ];
 
 // 职称档（对应薪资方案 baseSalaryByQualification 的键）
@@ -220,6 +230,19 @@ function validatedWorkStatus(value) {
     throw httpError(400, "工作状态只能选择就业或待岗");
   }
   return status;
+}
+
+function administrativeTeachingLoadOf(value) {
+  const load = String(value || "").trim();
+  return ADMINISTRATIVE_TEACHING_LOADS.includes(load) ? load : "none";
+}
+
+function validatedAdministrativeTeachingLoad(value) {
+  const load = String(value || "").trim();
+  if (!ADMINISTRATIVE_TEACHING_LOADS.includes(load)) {
+    throw httpError(400, "行政兼课基准只能选择不适用、1/3 工作量或 1/2 工作量");
+  }
+  return load;
 }
 
 function normalizedPersonnelTagName(value) {
@@ -704,6 +727,9 @@ export function publicEmployee(db, employee, options = {}) {
     employmentTypeLabel: EMPLOYMENT_TYPE_LABELS[employmentTypeOf(employee.employmentType)],
     workStatus: workStatusOf(employee.workStatus),
     workStatusLabel: WORK_STATUS_LABELS[workStatusOf(employee.workStatus)],
+    administrativeTeachingLoad: administrativeTeachingLoadOf(employee.administrativeTeachingLoad),
+    administrativeTeachingLoadLabel:
+      ADMINISTRATIVE_TEACHING_LOAD_LABELS[administrativeTeachingLoadOf(employee.administrativeTeachingLoad)],
     tagIds: normalizedPersonnelTagIds(db, employee.tagIds),
     tags: normalizedPersonnelTagIds(db, employee.tagIds)
       .map((tagId) => findPersonnelTag(db, tagId))
@@ -907,9 +933,15 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
   if (input.workStatus !== undefined && actorAccount?.role !== "system_admin") {
     throw httpError(403, "仅总校人事 + 行政可以维护就业／待岗状态");
   }
+  if (input.administrativeTeachingLoad !== undefined && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护行政兼课基准");
+  }
   const employmentType = input.employmentType === undefined ? "normal" : validatedEmploymentType(input.employmentType);
   const agreementMonthlySalary = validatedAgreementMonthlySalary(input.agreementMonthlySalary || 0);
   const workStatus = input.workStatus === undefined ? "employed" : validatedWorkStatus(input.workStatus);
+  const administrativeTeachingLoad = input.administrativeTeachingLoad === undefined
+    ? "none"
+    : validatedAdministrativeTeachingLoad(input.administrativeTeachingLoad);
   if (input.tagIds !== undefined && actorAccount?.role !== "system_admin") {
     throw httpError(403, "仅总校人事 + 行政可以维护人员标签");
   }
@@ -919,6 +951,9 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
   }
   if (employmentType === "agreement" && agreementMonthlySalary <= 0) {
     throw httpError(400, "协议教师必须填写大于 0 的协议月薪");
+  }
+  if (administrativeTeachingLoad !== "none" && !String(input.teacherId || "")) {
+    throw httpError(400, "行政兼课基准仅适用于已关联的任课教师");
   }
 
   const now = nowIso();
@@ -945,6 +980,7 @@ export function createEmployee(db, input = {}, actorAccount = null, context = {}
     employmentType,
     agreementMonthlySalary: employmentType === "agreement" ? agreementMonthlySalary : 0,
     workStatus,
+    administrativeTeachingLoad,
     tagIds,
     hiredAt: String(input.hiredAt || ""),
     regularizedAt: String(input.regularizedAt || ""),
@@ -1005,12 +1041,16 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
   const before = { ...employee };
   const changesEmployment = patch.employmentType !== undefined || patch.agreementMonthlySalary !== undefined;
   const changesWorkStatus = patch.workStatus !== undefined;
+  const changesAdministrativeTeachingLoad = patch.administrativeTeachingLoad !== undefined;
   const changesPersonnelTags = patch.tagIds !== undefined;
   if (changesEmployment && actorAccount?.role !== "system_admin") {
     throw httpError(403, "仅总校人事 + 行政可以维护教师雇佣类型和协议月薪");
   }
   if (changesWorkStatus && actorAccount?.role !== "system_admin") {
     throw httpError(403, "仅总校人事 + 行政可以维护就业／待岗状态");
+  }
+  if (changesAdministrativeTeachingLoad && actorAccount?.role !== "system_admin") {
+    throw httpError(403, "仅总校人事 + 行政可以维护行政兼课基准");
   }
   if (changesPersonnelTags && actorAccount?.role !== "system_admin") {
     throw httpError(403, "仅总校人事 + 行政可以维护人员标签");
@@ -1026,6 +1066,12 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
   }
   if (nextEmploymentType === "agreement" && nextAgreementMonthlySalary <= 0) {
     throw httpError(400, "协议教师必须填写大于 0 的协议月薪");
+  }
+  const nextAdministrativeTeachingLoad = patch.administrativeTeachingLoad === undefined
+    ? administrativeTeachingLoadOf(employee.administrativeTeachingLoad)
+    : validatedAdministrativeTeachingLoad(patch.administrativeTeachingLoad);
+  if (nextAdministrativeTeachingLoad !== "none" && !employee.teacherId) {
+    throw httpError(400, "行政兼课基准仅适用于已关联的任课教师");
   }
 
   EMPLOYEE_EDITABLE_FIELDS.forEach((field) => {
@@ -1083,6 +1129,10 @@ export function updateEmployee(db, employeeId, patch = {}, actorAccount = null, 
     }
     if (field === "workStatus") {
       employee.workStatus = validatedWorkStatus(patch.workStatus);
+      return;
+    }
+    if (field === "administrativeTeachingLoad") {
+      employee.administrativeTeachingLoad = nextAdministrativeTeachingLoad;
       return;
     }
     employee[field] = String(patch[field] ?? "");
@@ -1828,6 +1878,7 @@ export function ensureHrData(db) {
       managementLevel: "ordinary",
       employmentType: "normal",
       agreementMonthlySalary: 0,
+      administrativeTeachingLoad: "none",
       hiredAt: teacher.hiredAt || "",
       regularizedAt: "",
       leftAt: "",
@@ -1890,6 +1941,7 @@ export function ensureHrData(db) {
         employmentType: "normal",
         agreementMonthlySalary: 0,
         workStatus: "employed",
+        administrativeTeachingLoad: "none",
         hiredAt: String(account.createdAt || "").slice(0, 10),
         regularizedAt: "",
         leftAt: "",
@@ -1933,6 +1985,10 @@ export function ensureHrData(db) {
     }
     if (employee.workStatus === undefined) {
       employee.workStatus = "employed";
+      changed = true;
+    }
+    if (employee.administrativeTeachingLoad === undefined) {
+      employee.administrativeTeachingLoad = "none";
       changed = true;
     }
     if (!Array.isArray(employee.tagIds)) {
@@ -2012,8 +2068,10 @@ export const HR_FLOW_DEFINITIONS = {
   offboard: {
     label: "离职",
     steps: [
-      { name: "学部确认", approverRoles: ["division_head", "hr", "system_admin"], scope: "from" },
-      { name: "总校审批", approverRoles: ["system_admin"] },
+      // 离职由用人学部提出，总校人事核验资料与交接，再交校长作最终决定。
+      // 不把发起人同时放进审批人，避免学部主任自行确认自己的离职申请。
+      { name: "总校人事审批", approverRoles: ["hr", "system_admin"] },
+      { name: "校长审批", approverRoles: ["principal"] },
     ],
   },
   profile_update: {
@@ -2128,6 +2186,11 @@ export function createHrFlow(db, account, input = {}, context = {}) {
   if (!["division_head", "hr", "system_admin"].includes(account?.role || "")) {
     throw httpError(403, "只有学部负责人、人事专员或行政管理可以发起人事流程");
   }
+  // 离职是用人学部对本学部人员提出的事项：人事只审批，校长只终审。
+  // 这样不会绕开课程交接与最终离职处理留痕。
+  if (flowType === "offboard" && account?.role !== "division_head") {
+    throw httpError(403, "离职申请仅可由所属学部主任发起");
+  }
   const reason = requireReason(input.reason, `发起${definition.label}流程`);
   const now = nowIso();
   let payload = { reason };
@@ -2178,7 +2241,9 @@ export function createHrFlow(db, account, input = {}, context = {}) {
       findEmployee(db, String(input.employeeId || "").trim()) ||
       db.employees.find((item) => item.employeeNo === String(input.employeeNo || "").trim());
     if (!employee) throw httpError(404, "档案不存在（可按档案 ID 或工号指定）");
-    if (employee.status === "left") throw httpError(409, "已离职人员不能发起该流程");
+    if (!["active", "probation"].includes(employee.status)) {
+      throw httpError(409, "仅可为在职或试用期人员发起调岗、离职流程");
+    }
     if (activeFlowFor(db, employee.id, ["transfer", "offboard"])) {
       throw httpError(409, "该人员已有进行中的调岗/离职流程");
     }

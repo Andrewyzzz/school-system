@@ -46,6 +46,7 @@ import {
 } from "./dataPorting.js";
 import {
   canExportAllPayrollDetails,
+  canManagePayrollConfig,
   canViewDivisionPayrollDetails,
   canViewAllPayrollDetails,
   canFinanceActOnTeacher,
@@ -148,6 +149,7 @@ import {
   DB_DRIVER,
   invalidateOpenPayrollDetailsForTeacher,
   invalidateOpenPayrollDetailsForStage,
+  applyApprovedClassSizeConfirmation,
 } from "./storage.js";
 import {
   ensureSchemaConstraints,
@@ -236,6 +238,8 @@ import {
   OA_FIELD_TYPES,
   createOaRequest,
   listPayrollApprovalOptions,
+  listOvertimeBatchStaffOptions,
+  listClassSizeConfirmationOptions,
   actOnOaRequest,
   addOaExecutionEvidence,
   executeOaRequest,
@@ -965,8 +969,8 @@ async function handleApi(req, res, db, url) {
       return;
     }
 
-    // 月度考勤：学部主任维护本学部老师每日四次打卡记录。初中部按已确认制度
-    // 在工资预览／重新生成时计算迟到早退、旷工扣款；其他学部暂仅校验和留存。
+    // 月度考勤：学部主任维护本学部老师每日四次打卡及违纪分钟数。各学部作息
+    // 仅用于本地判定；工资预览／重新生成统一按全校制度扣减考核工资。
     if (req.method === "GET" && url.pathname === "/api/attendance/uploads") {
       const auth = requireAuth(req, res, db, ["division_head", "system_admin", "principal"]);
       if (!auth) return;
@@ -1256,7 +1260,7 @@ async function handleApi(req, res, db, url) {
     if (req.method === "GET" && url.pathname === "/api/payroll-rules") {
       const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
-      if (!canExportAllPayrollDetails(auth.account)) {
+      if (!canManagePayrollConfig(auth.account)) {
         sendError(res, 403, "仅总校财务可以查看薪资配置");
         return;
       }
@@ -1267,7 +1271,7 @@ async function handleApi(req, res, db, url) {
     if (req.method === "PATCH" && url.pathname === "/api/payroll-rules") {
       const auth = requireAuth(req, res, db, ["finance"]);
       if (!auth) return;
-      if (!canExportAllPayrollDetails(auth.account)) {
+      if (!canManagePayrollConfig(auth.account)) {
         sendError(res, 403, "仅总校财务可以维护薪资配置");
         return;
       }
@@ -2333,7 +2337,7 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/hr/org-units") {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
         if (!auth) return;
-        if (auth.account.role === "finance" && !canExportAllPayrollDetails(auth.account)) {
+        if (auth.account.role === "finance" && !canManagePayrollConfig(auth.account)) {
           sendError(res, 403, "仅总校财务可以查看组织与岗位");
           return;
         }
@@ -2373,7 +2377,7 @@ async function handleApi(req, res, db, url) {
       if (req.method === "GET" && url.pathname === "/api/hr/positions") {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
         if (!auth) return;
-        if (auth.account.role === "finance" && !canExportAllPayrollDetails(auth.account)) {
+        if (auth.account.role === "finance" && !canManagePayrollConfig(auth.account)) {
           sendError(res, 403, "仅总校财务可以查看组织与岗位");
           return;
         }
@@ -2435,6 +2439,29 @@ async function handleApi(req, res, db, url) {
         const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
         if (!auth) return;
         sendJson(res, 200, queryEmployees(db, Object.fromEntries(url.searchParams), hrScopeFor(db, auth.account)));
+        return;
+      }
+
+      // 调岗、离职不能依赖手输工号：按当前账号的人事权限返回可点选人员。
+      // 只暴露选择器所需的公开字段，且排除已离职、停用和正在办理离职的人员。
+      if (req.method === "GET" && url.pathname === "/api/hr/flow-employee-options") {
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        if (!auth) return;
+        const result = queryEmployees(
+          db,
+          { search: url.searchParams.get("search") || "", page: 1, pageSize: 100 },
+          hrScopeFor(db, auth.account),
+        );
+        const items = result.items
+          .filter((employee) => ["active", "probation"].includes(employee.status))
+          .map((employee) => ({
+            id: employee.id,
+            personName: employee.personName,
+            employeeNo: employee.employeeNo,
+            orgUnitName: employee.orgUnitName,
+            positionName: employee.positionName,
+          }));
+        sendJson(res, 200, { items });
         return;
       }
 
@@ -2592,6 +2619,10 @@ async function handleApi(req, res, db, url) {
           return;
         }
         if (req.method === "POST" && subPath === "status") {
+          if (["left", "offboarding"].includes(String(body.status || ""))) {
+            sendError(res, 409, "离职请由所属学部主任在人事审批中发起，不能直接修改人员状态");
+            return;
+          }
           const employee = setEmployeeStatus(db, employeeId, String(body.status || ""), body.reason, auth.account, hrContext);
           await saveDatabase(db);
           // 入离职直接影响当月核算人数（8.12 对账的人事侧基数）
@@ -2751,7 +2782,7 @@ async function handleApi(req, res, db, url) {
       // ---- M3 审批流 ----
 
       if (req.method === "GET" && url.pathname === "/api/hr/todos") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
         if (!auth) return;
         sendJson(res, 200, { count: countHrTodos(db, auth.account) });
         return;
@@ -2770,7 +2801,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/flows") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
         if (!auth) return;
         sendJson(res, 200, { flows: queryHrFlows(db, Object.fromEntries(url.searchParams), auth.account) });
         return;
@@ -2778,7 +2809,7 @@ async function handleApi(req, res, db, url) {
 
       const flowMatch = url.pathname.match(/^\/api\/hr\/flows\/([^/]+)\/(approve|reject|withdraw)$/);
       if (flowMatch && req.method === "POST") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const action = flowMatch[2];
@@ -2812,6 +2843,27 @@ async function handleApi(req, res, db, url) {
         const auth = requireAuth(req, res, db, ["finance"]);
         if (!auth) return;
         sendJson(res, 200, listPayrollApprovalOptions(db, auth.account));
+        return;
+      }
+
+      // 批量加班申请的人员仅能来自当前学部主任所辖学部，候选名单不可由前端自行拼接。
+      if (req.method === "GET" && url.pathname === "/api/oa/overtime-batch-staff-options") {
+        const auth = requireAuth(req, res, db, ["division_head"]);
+        if (!auth) return;
+        sendJson(res, 200, listOvertimeBatchStaffOptions(db, auth.account));
+        return;
+      }
+
+      // 班级人数确认必须从当前主任所辖学部的“班级 / 在职班主任 / 生活老师”
+      // 清单中点选，避免浏览器手输名称造成跨学部、离职人员或历史班级串入。
+      if (req.method === "GET" && url.pathname === "/api/oa/class-size-confirmation-options") {
+        const auth = requireAuth(req, res, db, ["division_head"]);
+        if (!auth) return;
+        sendJson(
+          res,
+          200,
+          listClassSizeConfirmationOptions(db, auth.account, { termId: url.searchParams.get("termId") || "" }),
+        );
         return;
       }
 
@@ -3268,6 +3320,12 @@ function monthsBetween(startMonth, endMonth) {
 }
 
 export function registerApprovalSideEffects() {
+  // 班级人数确认经校长通过后，写入该学期的班主任 / 生活老师人数快照；
+  // 薪资预览与生成明细均只读取这个审批后的快照。
+  registerOaSideEffect("applyClassSizeConfirmation", (database, payload) =>
+    applyApprovedClassSizeConfirmation(database, payload),
+  );
+
   // 请假审批通过后由调课引擎真正更新课表（含全部冲突与锁定校验）
   registerOaSideEffect("applySubstitutes", (database, arrangements, account) =>
     applySubstituteArrangements(database, arrangements, account),

@@ -23,9 +23,13 @@ import {
   scanOaTimeouts,
   findTemplate,
   calculateLeaveDays,
+  calculateOvertimeHours,
+  listOvertimeBatchStaffOptions,
+  listClassSizeConfirmationOptions,
   registerOaSideEffect,
 } from "../server/oa.js";
 import { registerApprovalSideEffects } from "../server/server.js";
+import { teacherPayrollPreview } from "../server/storage.js";
 
 const account = (id, role, name) => ({ id, role, displayName: name, username: id });
 const teacher = account("ACC-T1", "teacher", "张老师");
@@ -119,6 +123,14 @@ function outboundForm(overrides = {}) {
     () => calculateLeaveDays("2026-09-10", "下午", "2026-09-10", "上午"),
     /结束时间不能早于开始时间/,
   );
+  assert.equal(calculateOvertimeHours("18:00", "21:30"), 3.5, "加班时长应由起止时间精确计算");
+  assert.equal(calculateOvertimeHours("22:00", "02:00"), 4, "夜班可跨越午夜");
+  assert.throws(() => calculateOvertimeHours("18:15", "21:00"), /每半小时/, "加班时间不应精确到分钟");
+  assert.throws(() => calculateOvertimeHours("18:00", "18:00"), /不能相同/);
+  const overtimeTemplate = findTemplate(freshDb(), "overtime");
+  assert.equal(overtimeTemplate.formFields.find((field) => field.key === "startTime")?.type, "half_hour_time", "个人加班应使用前端半小时选择器");
+  const batchTemplate = findTemplate(freshDb(), "overtime_batch");
+  assert.equal(batchTemplate.formFields.find((field) => field.key === "endTime")?.type, "half_hour_time", "批量加班应使用前端半小时选择器");
 }
 
 // ------------------------------------------------------------ 模板与角色过滤
@@ -170,6 +182,59 @@ function outboundForm(overrides = {}) {
 
   const headquartersHrTemplates = listTemplatesForRole(freshDb(), "system_admin").map((item) => item.key);
   assert.ok(!headquartersHrTemplates.includes("class_size_confirm"), "总校人事行政只审批班级人数，不应自行发起");
+}
+
+// ---------------------------------------------------------- 批量加班：学部范围、校长审批与办结抄送
+{
+  const db = freshDb();
+  const primaryHead = { ...account("ACC-HEAD-PRIMARY", "division_head", "小学部主任"), scopeStageIds: ["primary"] };
+  const principal = account("ACC-PRINCIPAL", "principal", "校长");
+  const headquartersHr = account("ACC-SYSTEM-ADMIN", "system_admin", "总校人事行政");
+  const headquartersFinance = { ...account("ACC-FINANCE", "finance", "总校财务"), financeScope: "headquarters", financeReadAll: true };
+  const primaryFinance = { ...account("ACC-FINANCE-PRIMARY", "finance", "小学部会计"), financeScope: "primary" };
+  db.accounts = [primaryHead, principal, headquartersHr, headquartersFinance, primaryFinance];
+  db.teachers = [
+    { id: "T-P1", name: "张老师", employeeNo: "821", stageId: "primary", primarySubjectName: "语文", status: "active" },
+    { id: "T-P2", name: "陈老师", employeeNo: "919", stageId: "primary", primarySubjectName: "数学", status: "active" },
+    { id: "T-H1", name: "高老师", employeeNo: "072", stageId: "high", primarySubjectName: "英语", status: "active" },
+  ];
+  const options = listOvertimeBatchStaffOptions(db, primaryHead);
+  assert.deepEqual(options.staff.map((item) => item.teacherId), ["T-P1", "T-P2"], "候选人员只能返回发起主任所属学部");
+  assert.ok(listTemplatesForRole(db, primaryHead).some((item) => item.key === "overtime_batch"));
+  assert.ok(!listTemplatesForRole(db, teacher).some((item) => item.key === "overtime_batch"), "老师不能发起批量加班");
+  assert.throws(
+    () =>
+      createOaRequest(db, primaryHead, {
+        templateKey: "overtime_batch",
+        formData: {
+          overtimeDate: "2026-09-20", startTime: "18:00", endTime: "21:30", hours: 99,
+          overtimeType: "周末加班", reason: "家长开放日", participantTeacherIds: ["T-H1"],
+        },
+      }),
+    /本学部在职老师/,
+    "服务端不能接受跨学部伪造的人员 ID",
+  );
+  const request = createOaRequest(db, primaryHead, {
+    templateKey: "overtime_batch",
+    formData: {
+      overtimeDate: "2026-09-20", startTime: "18:00", endTime: "21:30", hours: 99,
+      overtimeType: "周末加班", reason: "家长开放日", participantTeacherIds: ["T-P1", "T-P2"],
+    },
+  });
+  assert.equal(request.formData.hours, 3.5, "批量加班也不能采信浏览器传来的时长");
+  assert.equal(request.formData.participantCount, 2);
+  assert.match(request.summary, /2 人/);
+  actOnOaRequest(db, request.id, "approve", principal, { comment: "同意" });
+  assert.equal(request.status, "approved", "校长审批后批量加班单应办结");
+  assert.deepEqual(
+    new Set(request.ccRecipients.map((item) => item.accountId)),
+    new Set([headquartersHr.id, headquartersFinance.id, primaryFinance.id]),
+    "办结后应抄送总校人事行政、总校财务和本学部财务",
+  );
+  assert.ok(
+    db.notifications.some((item) => item.accountIds.includes(primaryFinance.id) && item.title.includes("抄送给您")),
+    "办结抄送必须产生通知提醒",
+  );
 }
 
 // ---------------------------------------------------------- 外出：课程安排 + 人事备案，不计请假扣薪
@@ -473,6 +538,7 @@ function outboundForm(overrides = {}) {
       reason: "监考",
     },
   });
+  assert.equal(overtime.formData.hours, 3, "个人加班时长必须由服务端按起止时间重算");
   assert.equal(countOaTodos(db, head), 1);
   assert.equal(countOaTodos(db, admin), 1, "或签下多个角色都能看到待办");
   actOnOaRequest(db, overtime.id, "approve", admin, { comment: "确认" });
@@ -498,13 +564,49 @@ function outboundForm(overrides = {}) {
   const principal = account("ACC-PRINCIPAL", "principal", "校长");
   db.terms = [term];
   db.accounts = [primaryHead, headquartersFinance, headquartersAdmin, principal];
+  db.classes = [
+    { id: "CLS-P-1", stageId: "primary", grade: 1, name: "一年级 1 班", displayOrder: 1, active: true },
+    { id: "CLS-P-2", stageId: "primary", grade: 1, name: "一年级 2 班", displayOrder: 2, active: true },
+  ];
+  db.teachers = [
+    { id: "T-P-HOME-1", name: "王老师", employeeNo: "P001", stageId: "primary", status: "active", primarySubjectName: "语文" },
+    { id: "T-P-HOME-2", name: "李老师", employeeNo: "P002", stageId: "primary", status: "active", primarySubjectName: "数学" },
+    { id: "T-P-LIFE", name: "陈生活老师", employeeNo: "P003", stageId: "primary", status: "active", primarySubjectName: "生活管理", salaryProfile: { salaryCategory: "lifeTeacher" } },
+  ];
+  db.employees = [{ teacherId: "T-P-LIFE", positionId: "POS-LIFE-TEACHER", status: "active" }];
+  db.payrollDetails = [];
+  db.auditLogs = [];
+  const classSizeOptions = listClassSizeConfirmationOptions(db, primaryHead, { termId: term.id });
+  assert.deepEqual(classSizeOptions.classes.map((item) => item.classId), ["CLS-P-1", "CLS-P-2"]);
+  assert.deepEqual(classSizeOptions.homeroomTeachers.map((item) => item.teacherId).sort(), ["T-P-HOME-1", "T-P-HOME-2"]);
+  assert.deepEqual(classSizeOptions.lifeTeachers.map((item) => item.teacherId), ["T-P-LIFE"], "生活老师必须单独列出");
+  assert.throws(
+    () =>
+      createOaRequest(db, primaryHead, {
+        templateKey: "class_size_confirm",
+        formData: {
+          termId: term.id,
+          classConfirmations: [
+            { classId: "CLS-P-1", studentCount: 45, homeroomTeacherId: "T-P-HOME-1" },
+            { classId: "CLS-P-2", studentCount: 44, homeroomTeacherId: "T-P-HOME-2" },
+          ],
+          lifeTeacherAssignments: [{ teacherId: "T-P-LIFE", studentCount: 90 }],
+        },
+      }),
+    /不能超过本学部学生总数/,
+    "生活老师负责学生数可以跨班，但合计不得超过本学部学生数",
+  );
   const request = createOaRequest(db, primaryHead, {
     templateKey: "class_size_confirm",
     formData: {
       termId: term.id,
       // 即使浏览器伪造了所属学部，服务端也必须按发起主任的范围覆盖。
       stageName: "高中部",
-      classDetail: "一年级1班,45\n一年级2班,44",
+      classConfirmations: [
+        { classId: "CLS-P-1", studentCount: 45, homeroomTeacherId: "T-P-HOME-1" },
+        { classId: "CLS-P-2", studentCount: 44, homeroomTeacherId: "T-P-HOME-2" },
+      ],
+      lifeTeacherAssignments: [{ teacherId: "T-P-LIFE", studentCount: 70 }],
       reason: "学期初核定",
     },
   });
@@ -514,11 +616,28 @@ function outboundForm(overrides = {}) {
   assert.equal(request.formData.stageName, "小学部", "浏览器不能伪造其他学部的人数确认");
   assert.equal(request.formData.effectiveMonth, undefined, "人数确认不再单独维护生效月份");
   assert.equal(request.formData.scopeInfo, undefined, "班级名单已能说明范围，不再单独填写确认范围");
+  assert.equal(request.formData.totalStudentCount, 89, "学生人数应由逐班明细汇总，不能由浏览器另传");
+  assert.equal(request.formData.lifeTeacherStudentTotal, 70, "生活老师按负责学生总数确认，可跨班但受总人数约束");
   assert.equal(request.steps.length, 1, "人数确认只需校长审批");
   assert.deepEqual(request.steps[0].approverRoles, ["principal"]);
   assert.equal(request.ccRecipients.length, 0, "校长审批前不应提前抄送");
   actOnOaRequest(db, request.id, "approve", principal, { comment: "同意" });
   assert.equal(request.status, "approved", "校长审批通过后完成");
+  assert.equal(db.classSizeConfirmations.length, 1, "校长通过后应写入学期人数快照");
+  assert.equal(db.classSizeConfirmations[0].classConfirmations[0].homeroomTeacherId, "T-P-HOME-1");
+  assert.equal(db.classSizeConfirmations[0].lifeTeacherAssignments[0].studentCount, 70);
+  const homeroomPreview = teacherPayrollPreview(db, "T-P-HOME-1", "2026-09");
+  assert.match(
+    homeroomPreview.components.find((item) => item.name === "班主任津贴")?.basis || "",
+    /45 人/,
+    "班主任津贴应读取已批准的逐班人数，而非人事档案旧值",
+  );
+  const lifePreview = teacherPayrollPreview(db, "T-P-LIFE", "2026-09");
+  assert.match(
+    lifePreview.components.find((item) => item.name === "工作量工资")?.basis || "",
+    /70 人/,
+    "生活老师工作量工资应读取已批准的负责学生总数",
+  );
   assert.deepEqual(
     request.ccRecipients.map((item) => item.accountId).sort(),
     [headquartersAdmin.id, headquartersFinance.id].sort(),
@@ -532,7 +651,11 @@ function outboundForm(overrides = {}) {
     () =>
       createOaRequest(db, primaryHead, {
         templateKey: "class_size_confirm",
-        formData: { termId: "TERM-NOT-EXIST", classDetail: "一年级1班,45" },
+        formData: {
+          termId: "TERM-NOT-EXIST",
+          classConfirmations: [{ classId: "CLS-P-1", studentCount: 45, homeroomTeacherId: "T-P-HOME-1" }],
+          lifeTeacherAssignments: [],
+        },
       }),
     /请选择系统中已建立的正式学期/,
     "人数确认不可手填或伪造不存在的学期",

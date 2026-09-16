@@ -30,13 +30,13 @@
         <div class="demo-account-panel" aria-label="Demo 快捷账号">
           <div class="demo-account-heading">
             <strong>Demo 快捷账号</strong>
-            <span>未接管账号点击即登录；已接管账号需输入本人当前密码</span>
+            <span>点击即可使用本地测试账号登录</span>
           </div>
           <section class="demo-account-group">
             <h2>总校</h2>
             <div class="demo-login-grid demo-login-grid-headquarters">
               <button class="ghost-button" data-demo-login="principal" type="button">校长（总校领导）</button>
-              <button class="ghost-button" data-demo-login="finance" type="button">总校财务（已接管）</button>
+              <button class="ghost-button" data-demo-login="finance" type="button">总校财务</button>
               <button class="ghost-button" data-demo-login="sysadmin" type="button">总校人事 + 行政</button>
               <button class="ghost-button" data-demo-login="security_manager" type="button">安全部主管</button>
             </div>
@@ -156,7 +156,7 @@
             <span aria-hidden="true">▤</span>
             组织与岗位
           </button>
-          <button class="nav-item" data-view="hrFlows" data-role="hr,system_admin,division_head" type="button">
+          <button class="nav-item" data-view="hrFlows" data-role="hr,system_admin,division_head,principal" type="button">
             <span aria-hidden="true">✓</span>
             人事审批
           </button>
@@ -549,10 +549,10 @@
                   <select class="lesson-select" id="scheduleTemplateSelect"></select>
                 </label>
                 <button class="ghost-button compact-button" id="addSchedulePeriod" type="button">
-                  新增节次
+                  添加日程
                 </button>
                 <button class="primary-button compact-button" id="saveSchedulePeriods" type="button">
-                  保存作息时间
+                  保存周表
                 </button>
               </div>
               <div class="period-template-list" id="periodTemplateList"></div>
@@ -669,7 +669,7 @@
             <div class="panel-heading">
               <div>
                 <h2>课程与分布规则</h2>
-                <p id="courseRulesHelp">配置本年级开设课程、周课时、连堂、每日分布和教室要求。</p>
+                <p id="courseRulesHelp">配置本年级开设课程、周课时、连堂、每日分布和教室要求。每节课的起止时间统一取自作息时间表。</p>
               </div>
               <div class="panel-heading-actions">
                 <button class="mini-button" id="toggleCourseEditMode" type="button">编辑</button>
@@ -682,14 +682,7 @@
               </label>
               <label class="field-label" for="newCourseWeekly">
                 <span>每周节数</span>
-                <input id="newCourseWeekly" type="number" min="1" max="12" value="2" />
-              </label>
-              <label class="field-label" for="newCourseDuration">
-                <span>每节时长</span>
-                <div class="input-with-unit">
-                  <input id="newCourseDuration" type="number" min="20" max="120" step="5" value="40" />
-                  <em>分钟</em>
-                </div>
+                <input id="newCourseWeekly" type="number" min="0.5" max="12" step="0.5" value="2" />
               </label>
               <label class="field-label" for="newCourseRoomType">
                 <span>教室要求</span>
@@ -1044,10 +1037,10 @@
           <section class="panel attendance-management-panel">
             <div class="panel-heading">
               <div>
-                <h2 id="attendanceManagementTitle">月度教师考勤</h2>
-                <p>学部主任按月上传本学部老师的考勤结果。系统会校验、留存，并按各学部已确认的考勤规则纳入未锁定工资核算。</p>
+                <h2 id="attendanceManagementTitle">月度考勤</h2>
+                <p>学部主任按月上传本学部老师的统一考勤结果。各学部仍按本地作息判定分钟数；系统统一按考核工资扣减，月度最多 20%，并保留税前应发最低工资保护。</p>
               </div>
-              <a class="ghost-button compact-button attendance-template-button" id="attendanceTemplateDownload" href="assets/教师月度考勤上传模板.xlsx" download>下载当前学部 Excel 模板</a>
+              <a class="ghost-button compact-button attendance-template-button" id="attendanceTemplateDownload" href="assets/全校统一月度考勤上传模板.xlsx" download>下载全校统一 Excel 模板</a>
             </div>
             <div class="attendance-management-toolbar">
               <label class="field-label compact-field" for="attendanceMonthInput">
@@ -1746,7 +1739,7 @@
             <div class="panel-heading">
               <div>
                 <h2 id="hrFlowsTitle">人事审批</h2>
-                <p>入职、调岗、离职流程：学部/人事发起，逐级审批，终审通过后系统自动执行建档、切换或离职生效。</p>
+                <p>入职、调岗按人事流程办理；离职固定由学部主任发起，经总校人事、校长审批后自动生效。</p>
               </div>
               <span class="status-pill" id="hrTodoPill">待办 0</span>
             </div>

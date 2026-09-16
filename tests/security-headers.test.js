@@ -183,6 +183,17 @@ try {
     assert.equal(validatePasswordStrength("k7Rm-2Qw9Xz", account), "");
   }
 
+  // 管理员“恢复默认密码”使用 123456 作为一次性临时口令；账号随后必须先改密，
+  // 因此这不等于放宽用户自助设置密码的强度要求。
+  {
+    const { createInitialData, resetAccountPassword } = await import("../server/storage.js");
+    const resetDb = createInitialData({ teacherCount: 1 });
+    const target = resetDb.accounts.find((item) => item.id === "ACC-FINANCE");
+    const actor = resetDb.accounts.find((item) => item.id === "ACC-SYSTEM-ADMIN");
+    const result = resetAccountPassword(resetDb, target.id, "123456", actor);
+    assert.equal(result.mustChangePassword, true, "默认口令只可作为强制改密前的临时凭据");
+  }
+
   // 接口层确实接上了这套校验（只验被拒的路径，不真的改口令）
   {
     const login = await fetch(`${BASE}/api/auth/login`, {

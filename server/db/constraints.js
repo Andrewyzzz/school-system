@@ -20,6 +20,7 @@ export const FOREIGN_KEYS = [
   { child: "classes", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "rooms", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "gradeCourseRules", field: "termId", parent: "terms", onDelete: "RESTRICT" },
+  { child: "gradeCourseCyclePairs", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "scheduleConstraints", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "schedulePeriodTemplates", field: "termId", parent: "terms", onDelete: "RESTRICT" },
   { child: "roomResourceOverrides", field: "termId", parent: "terms", onDelete: "RESTRICT" },

@@ -76,6 +76,221 @@ function classSizeStageForAccount(account) {
   return stageId;
 }
 
+// 批量加班单只能由拥有一个明确学部范围的主任发起。范围不能来自浏览器，
+// 否则小学主任可以伪造请求把初中老师放进同一张加班单。
+function overtimeBatchStageForAccount(account) {
+  if (account?.role !== "division_head") {
+    throw httpError(403, "只有学部主任可以发起批量加班申请");
+  }
+  const scopes = Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [];
+  const stageId = scopes.length === 1 ? scopes[0] : "";
+  if (!FINANCE_SCOPE_IDS.includes(stageId) || stageId === "headquarters") {
+    throw httpError(400, "当前账号未配置唯一的学部范围，无法发起批量加班申请");
+  }
+  return stageId;
+}
+
+function overtimeBatchStaffForStage(db, stageId) {
+  return (db.teachers || [])
+    .filter((teacher) => teacher.status === "active" && teacher.stageId === stageId)
+    .map((teacher) => ({
+      teacherId: teacher.id,
+      name: teacher.name || teacher.id,
+      employeeNo: teacher.employeeNo || "",
+      subjectName: teacher.primarySubjectName || teacher.subject || teacher.title || "教师",
+      stageId,
+      stageName: financeScopeLabel(stageId),
+    }))
+    .sort((a, b) => `${a.employeeNo} ${a.name}`.localeCompare(`${b.employeeNo} ${b.name}`, "zh-Hans-CN"));
+}
+
+// 给批量申请对话框提供已按当前主任权限过滤的候选人；路由层不能返回全校名单。
+export function listOvertimeBatchStaffOptions(db, account) {
+  ensureCollections(db);
+  const stageId = overtimeBatchStageForAccount(account);
+  return {
+    stageId,
+    stageName: financeScopeLabel(stageId),
+    staff: overtimeBatchStaffForStage(db, stageId),
+  };
+}
+
+// 班级人数确认不是一段自由文本。班级、班主任和生活老师候选人都由服务端按
+// “当前主任所辖学部 + 已选择学期”给出，提交时再次逐项核验，避免前端把其他
+// 学部的人或已离职人员塞进确认单。班级结构本身由排课端维护；确认单只是把本
+// 学期的实际人数与任命冻结下来，供薪资读取。
+function activeTeachersForClassSize(db, stageId) {
+  const employeesByTeacherId = new Map((db.employees || []).map((item) => [item.teacherId, item]));
+  return (db.teachers || [])
+    .filter((teacher) => {
+      if (teacher.stageId !== stageId || teacher.status !== "active") return false;
+      const employee = employeesByTeacherId.get(teacher.id);
+      return !employee || !["left", "disabled", "terminated"].includes(String(employee.status || "").toLowerCase());
+    })
+    .map((teacher) => ({ teacher, employee: employeesByTeacherId.get(teacher.id) || null }));
+}
+
+function isLifeTeacherCandidate(item) {
+  return (
+    String(item?.employee?.positionId || "") === "POS-LIFE-TEACHER" ||
+    String(item?.teacher?.salaryProfile?.salaryCategory || "") === "lifeTeacher"
+  );
+}
+
+function classSizeClassesForTermStage(db, termId, stageId) {
+  return (db.classes || [])
+    .filter((item) => item.stageId === stageId && item.active !== false && (!item.termId || item.termId === termId))
+    .slice()
+    .sort(
+      (left, right) =>
+        Number(left.grade || 0) - Number(right.grade || 0) ||
+        Number(left.displayOrder || 0) - Number(right.displayOrder || 0) ||
+        String(left.name || left.id).localeCompare(String(right.name || right.id), "zh-Hans-CN"),
+    );
+}
+
+function classSizeTeacherOption(item) {
+  const teacher = item.teacher;
+  return {
+    teacherId: teacher.id,
+    name: teacher.name || teacher.id,
+    employeeNo: teacher.employeeNo || "",
+    subjectName: teacher.primarySubjectName || teacher.subject || teacher.title || "教师",
+    positionName: item.employee?.positionName || item.employee?.position || "",
+  };
+}
+
+function existingClassSizeConfirmation(db, termId, stageId) {
+  return (db.classSizeConfirmations || [])
+    .filter((item) => item.termId === termId && item.stageId === stageId)
+    .sort((left, right) => String(right.approvedAt || right.updatedAt || "").localeCompare(String(left.approvedAt || left.updatedAt || "")))[0] || null;
+}
+
+export function listClassSizeConfirmationOptions(db, account, options = {}) {
+  ensureCollections(db);
+  const stageId = classSizeStageForAccount(account);
+  const termId = String(options.termId || "").trim();
+  const term = (db.terms || []).find((item) => item.id === termId);
+  if (!term) throw httpError(400, "请选择系统中已建立的正式学期");
+  const prior = existingClassSizeConfirmation(db, termId, stageId);
+  const allStaff = activeTeachersForClassSize(db, stageId);
+  const homeroomTeachers = allStaff.filter((item) => !isLifeTeacherCandidate(item)).map(classSizeTeacherOption);
+  const lifeTeachers = allStaff.filter(isLifeTeacherCandidate).map(classSizeTeacherOption);
+  const priorClasses = new Map((prior?.classConfirmations || []).map((item) => [item.classId, item]));
+  const priorLifeTeachers = new Map((prior?.lifeTeacherAssignments || []).map((item) => [item.teacherId, item]));
+  return {
+    term: { id: term.id, name: term.name, schoolYear: term.schoolYear || "" },
+    stageId,
+    stageName: financeScopeLabel(stageId),
+    classes: classSizeClassesForTermStage(db, term.id, stageId).map((item) => {
+      const saved = priorClasses.get(item.id);
+      return {
+        classId: item.id,
+        className: item.name || item.id,
+        grade: item.grade || "",
+        studentCount: Number(saved?.studentCount ?? item.studentCount ?? 0),
+        homeroomTeacherId: saved?.homeroomTeacherId || item.homeroomTeacherId || "",
+      };
+    }),
+    homeroomTeachers,
+    lifeTeachers: lifeTeachers.map((item) => ({
+      ...item,
+      studentCount: Number(priorLifeTeachers.get(item.teacherId)?.studentCount || 0),
+    })),
+    priorConfirmation: prior
+      ? { approvedAt: prior.approvedAt || "", sourceRequestId: prior.sourceRequestId || "", version: Number(prior.version || 1) }
+      : null,
+  };
+}
+
+function prepareClassSizeConfirmationFormData(db, account, formData) {
+  const stageId = classSizeStageForAccount(account);
+  const termId = String(formData.termId || "").trim();
+  const term = (db.terms || []).find((item) => item.id === termId);
+  if (!term) throw httpError(400, "请选择系统中已建立的正式学期");
+  const classes = classSizeClassesForTermStage(db, term.id, stageId);
+  if (!classes.length) throw httpError(409, "该学部当前学期尚未建立班级，不能确认学生人数");
+  const allStaff = activeTeachersForClassSize(db, stageId);
+  const homeroomTeachers = new Map(allStaff.filter((item) => !isLifeTeacherCandidate(item)).map((item) => [item.teacher.id, item]));
+  const lifeTeachers = new Map(allStaff.filter(isLifeTeacherCandidate).map((item) => [item.teacher.id, item]));
+  const submittedClasses = Array.isArray(formData.classConfirmations) ? formData.classConfirmations : [];
+  const byClassId = new Map();
+  submittedClasses.forEach((raw) => {
+    const classId = String(raw?.classId || "").trim();
+    if (classId) byClassId.set(classId, raw);
+  });
+  if (byClassId.size !== classes.length || classes.some((item) => !byClassId.has(item.id))) {
+    throw httpError(400, "请逐一填写本学部所有班级的人数并选择班主任");
+  }
+  const normalizedClasses = classes.map((item) => {
+    const raw = byClassId.get(item.id) || {};
+    const studentCount = Number(raw.studentCount);
+    const homeroomTeacherId = String(raw.homeroomTeacherId || "").trim();
+    if (!Number.isInteger(studentCount) || studentCount < 0) {
+      throw httpError(400, `「${item.name}」学生人数必须是非负整数`);
+    }
+    const teacher = homeroomTeachers.get(homeroomTeacherId);
+    if (!teacher) throw httpError(400, `请为「${item.name}」选择本学部在职班主任`);
+    return {
+      classId: item.id,
+      className: item.name || item.id,
+      grade: item.grade || "",
+      studentCount,
+      homeroomTeacherId: teacher.teacher.id,
+      homeroomTeacherName: teacher.teacher.name || teacher.teacher.id,
+      homeroomTeacherEmployeeNo: teacher.teacher.employeeNo || "",
+    };
+  });
+  const submittedLife = Array.isArray(formData.lifeTeacherAssignments) ? formData.lifeTeacherAssignments : [];
+  const byLifeTeacherId = new Map();
+  submittedLife.forEach((raw) => {
+    const teacherId = String(raw?.teacherId || "").trim();
+    if (teacherId) byLifeTeacherId.set(teacherId, raw);
+  });
+  const unknownLifeTeacherId = [...byLifeTeacherId.keys()].find((teacherId) => !lifeTeachers.has(teacherId));
+  if (unknownLifeTeacherId) throw httpError(403, "生活老师必须来自本学部在职生活老师名单");
+  const normalizedLife = [...lifeTeachers.values()].map((item) => {
+    const studentCount = Number(byLifeTeacherId.get(item.teacher.id)?.studentCount || 0);
+    if (!Number.isInteger(studentCount) || studentCount < 0) {
+      throw httpError(400, `「${item.teacher.name || item.teacher.id}」负责学生数必须是非负整数`);
+    }
+    return {
+      teacherId: item.teacher.id,
+      teacherName: item.teacher.name || item.teacher.id,
+      employeeNo: item.teacher.employeeNo || "",
+      studentCount,
+    };
+  });
+  const totalStudentCount = normalizedClasses.reduce((sum, item) => sum + item.studentCount, 0);
+  const lifeTeacherStudentTotal = normalizedLife.reduce((sum, item) => sum + item.studentCount, 0);
+  if (lifeTeacherStudentTotal > totalStudentCount) {
+    throw httpError(400, `生活老师负责学生合计 ${lifeTeacherStudentTotal} 人，不能超过本学部学生总数 ${totalStudentCount} 人`);
+  }
+  formData.stageId = stageId;
+  formData.stageName = financeScopeLabel(stageId);
+  formData.classConfirmations = normalizedClasses;
+  formData.lifeTeacherAssignments = normalizedLife;
+  formData.totalStudentCount = totalStudentCount;
+  formData.lifeTeacherStudentTotal = lifeTeacherStudentTotal;
+}
+
+function prepareOvertimeBatchFormData(db, account, formData) {
+  const stageId = overtimeBatchStageForAccount(account);
+  const staff = overtimeBatchStaffForStage(db, stageId);
+  const byTeacherId = new Map(staff.map((item) => [item.teacherId, item]));
+  const selectedIds = [...new Set((Array.isArray(formData.participantTeacherIds) ? formData.participantTeacherIds : [])
+    .map((id) => String(id || "").trim())
+    .filter(Boolean))];
+  if (!selectedIds.length) throw httpError(400, "请至少选择一位加班人员");
+  const invalidId = selectedIds.find((teacherId) => !byTeacherId.has(teacherId));
+  if (invalidId) throw httpError(403, "加班人员必须是本学部在职老师，请重新选择");
+  formData.stageId = stageId;
+  formData.stageName = financeScopeLabel(stageId);
+  formData.participantTeacherIds = selectedIds;
+  formData.participantTeacherNames = selectedIds.map((teacherId) => byTeacherId.get(teacherId).name);
+  formData.participantCount = selectedIds.length;
+}
+
 function httpError(statusCode, message, details = null) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -115,6 +330,22 @@ function requestTermForHistory(db, request = {}) {
 
 // 整单通过后落地的业务数据。预算额度与预算使用都只在整单最终通过后写入。
 function applyApprovedRequestEffects(db, request, account, actorName) {
+  if (request.templateKey === "class_size_confirm") {
+    const handler = sideEffectHandlers.applyClassSizeConfirmation;
+    if (!handler) throw httpError(503, "班级人数确认服务暂未就绪，请稍后重试");
+    request.appliedResult = handler(
+      db,
+      {
+        requestId: request.id,
+        formData: request.formData || {},
+        applicantAccountId: request.applicantAccountId,
+        applicantName: request.applicantName,
+        actorName,
+      },
+      account,
+    );
+    return;
+  }
   if (request.templateKey === "leave") {
     const handler = sideEffectHandlers.invalidateLeavePayroll;
     if (!handler) return;
@@ -501,17 +732,47 @@ export const OA_TEMPLATES = [
     name: "加班申请",
     icon: "🌙",
     category: "考勤",
+    // 从手填时长迁移为起止时间自动换算。服务端仍会在提交时重算，
+    // 不能只依赖只读输入框来防止篡改。
+    // v4：时间控件改为“小时 + 00/30 分钟”的下拉选择，避免原生 time
+    // 控件暴露任意分钟后再由服务端拒绝。
+    schemaVersion: 4,
     description: "周末、节假日及日常超时加班申请",
     applicantRoles: ["teacher", "admin", "finance", "hr", "division_head", "system_admin"],
     formFields: [
       { key: "overtimeDate", label: "加班日期", type: "date", required: true },
-      { key: "startTime", label: "开始时间", type: "text", required: true, placeholder: "如 18:00" },
-      { key: "endTime", label: "结束时间", type: "text", required: true, placeholder: "如 21:00" },
-      { key: "hours", label: "加班时长（小时）", type: "number", required: true },
+      { key: "startTime", label: "开始时间", type: "half_hour_time", required: true },
+      { key: "endTime", label: "结束时间", type: "half_hour_time", required: true, hint: "以半小时为单位；结束时间早于开始时间时，按次日结束计算" },
+      { key: "hours", label: "加班时长（小时）", type: "number", required: false, readonly: true, step: "0.5", hint: "系统按起止时间自动计算，精确到 0.5 小时" },
       { key: "overtimeType", label: "加班类型", type: "select", required: true, options: ["日常超时", "周末加班", "节假日加班", "夜班"] },
       { key: "reason", label: "加班事由", type: "textarea", required: true },
     ],
     steps: [{ name: "部门负责人确认", approverRoles: ["division_head", "admin", "hr", "system_admin"], approverMode: "any" }],
+  },
+  {
+    key: "overtime_batch",
+    name: "批量加班申请",
+    icon: "🌙",
+    category: "考勤",
+    schemaVersion: 2,
+    description: "学部主任为本学部多位老师统一发起加班申请",
+    applicantRoles: ["division_head"],
+    formFields: [
+      { key: "overtimeDate", label: "加班日期", type: "date", required: true },
+      { key: "startTime", label: "开始时间", type: "half_hour_time", required: true },
+      { key: "endTime", label: "结束时间", type: "half_hour_time", required: true, hint: "以半小时为单位；结束时间早于开始时间时，按次日结束计算" },
+      { key: "hours", label: "加班时长（小时）", type: "number", required: false, readonly: true, step: "0.5", hint: "系统按起止时间自动计算，精确到 0.5 小时" },
+      { key: "overtimeType", label: "加班类型", type: "select", required: true, options: ["日常超时", "周末加班", "节假日加班", "夜班"] },
+      { key: "reason", label: "加班事由", type: "textarea", required: true },
+      {
+        key: "participantTeacherIds",
+        label: "加班人员",
+        type: "teacher_multiselect",
+        required: true,
+        hint: "仅可选择本学部在职老师；可按姓名、工号或学科搜索并多选",
+      },
+    ],
+    steps: [{ name: "校长审批", approverRoles: ["principal"], approverMode: "any" }],
   },
   {
     key: "lesson_swap",
@@ -564,7 +825,7 @@ export const OA_TEMPLATES = [
     description: "学期初确认各班学生人数，作为班主任、生活教师津贴的计算依据",
     // 班级实有人数由学部掌握，统一由学部主任提交。学期与学部都使用系统主键，
     // 不接受手工名称；校长审批通过后才抄送总校人事行政和总校财务。
-    schemaVersion: 3,
+    schemaVersion: 4,
     accessVersion: 3,
     workflowVersion: 4,
     applicantRoles: ["division_head"],
@@ -572,7 +833,8 @@ export const OA_TEMPLATES = [
     formFields: [
       { key: "termId", label: "适用学期", type: "term", required: true, hint: "仅可选择系统中已建立、未完成且未归档的正式学期" },
       { key: "stageName", label: "人数所属学部", type: "text", required: true, readonly: true, hint: "按当前学部主任账号自动确定，不能跨学部填写" },
-      { key: "classDetail", label: "班级与人数明细", type: "textarea", required: true, hint: "每行一条，格式：班级名称,学生人数" },
+      { key: "classConfirmations", label: "班级人数与班主任", type: "class_size_rows", required: true, hint: "逐班确认学生人数，并从本学部在职教师中选择班主任" },
+      { key: "lifeTeacherAssignments", label: "生活老师负责学生数", type: "life_teacher_rows", required: false, hint: "生活老师可跨班负责；合计不得超过本学部学生总数" },
       { key: "reason", label: "说明", type: "textarea", required: false, hint: "人数变动原因等" },
     ],
     steps: [
@@ -752,6 +1014,15 @@ export function listTemplatesForRole(db, roleOrAccount = "") {
   return db.oaTemplates
     .filter((template) => template.status !== "disabled" && template.applicantRoles.includes(role))
     .filter((template) => template.key !== "budget_confirm" || !account || isHeadquartersFinance(account))
+    .filter(
+      (template) =>
+        template.key !== "overtime_batch" ||
+        !account ||
+        (account.role === "division_head" && (() => {
+          const scopes = Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [];
+          return scopes.length === 1 && FINANCE_SCOPE_IDS.includes(scopes[0]) && scopes[0] !== "headquarters";
+        })()),
+    )
     .filter(
       (template) =>
         template.key !== "payroll_approval" ||
@@ -1017,13 +1288,27 @@ function validateFormData(template, formData = {}) {
   const clean = {};
   template.formFields.forEach((field) => {
     const raw = formData[field.key];
+    const isMulti = ["multiselect", "teacher_multiselect"].includes(field.type);
+    const isStructured = ["class_size_rows", "life_teacher_rows"].includes(field.type);
+    const multiValues = isMulti
+      ? [...new Set((Array.isArray(raw) ? raw : raw ? [raw] : []).map((item) => String(item || "").trim()).filter(Boolean))]
+      : null;
     const value = typeof raw === "string" ? raw.trim() : raw;
-    const isEmpty = value === undefined || value === null || value === "";
+    const isEmpty = isMulti ? !multiValues.length : isStructured ? !Array.isArray(value) || !value.length : value === undefined || value === null || value === "";
     if (field.required && isEmpty) {
       throw httpError(400, `请填写「${field.label}」`);
     }
     if (isEmpty) {
-      clean[field.key] = "";
+      clean[field.key] = isMulti ? [] : "";
+      return;
+    }
+    if (isMulti) {
+      clean[field.key] = multiValues;
+      return;
+    }
+    if (isStructured) {
+      if (!Array.isArray(value)) throw httpError(400, `「${field.label}」格式无效`);
+      clean[field.key] = value;
       return;
     }
     if (field.type === "number") {
@@ -1073,8 +1358,31 @@ export function calculateLeaveDays(startDate, startHalf, endDate, endHalf) {
   return (endSlot - startSlot + 1) / 2;
 }
 
+function timeOfDayMinutes(value, label) {
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value || "").trim());
+  if (!match) throw httpError(400, `「${label}」时间格式无效，请选择有效时间`);
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+// 加班可跨越午夜（例如 22:00 至次日 02:00），但同一时刻并不表示 24 小时加班。
+// 此函数由前端展示和服务端提交校验共享同一口径，避免手输时长与实际区间不一致。
+export function calculateOvertimeHours(startTime, endTime) {
+  const startMinutes = timeOfDayMinutes(startTime, "开始时间");
+  const endMinutes = timeOfDayMinutes(endTime, "结束时间");
+  if (startMinutes % 30 !== 0 || endMinutes % 30 !== 0) {
+    throw httpError(400, "加班开始和结束时间仅支持每半小时选择一次");
+  }
+  if (startMinutes === endMinutes) throw httpError(400, "开始时间和结束时间不能相同");
+  const durationMinutes = endMinutes > startMinutes ? endMinutes - startMinutes : endMinutes + 24 * 60 - startMinutes;
+  return Number((durationMinutes / 60).toFixed(2));
+}
+
 // 请假、外出等带日期区间的模板做基本合理性校验
 function validateBusinessRules(templateKey, formData) {
+  if (["overtime", "overtime_batch"].includes(templateKey) && (formData.startTime || formData.endTime)) {
+    // 一律覆盖浏览器提交的 hours：前端展示为只读也不能替代服务端校验。
+    formData.hours = calculateOvertimeHours(formData.startTime, formData.endTime);
+  }
   if (templateKey === "leave") {
     // 不采信浏览器传来的 days，防止绕过界面篡改请假天数。
     formData.days = calculateLeaveDays(
@@ -1314,6 +1622,8 @@ function buildSummary(template, formData) {
       return `外出：${formData.startDate} ${formData.startHalf} 至 ${formData.endDate} ${formData.endHalf}`;
     case "overtime":
       return `${formData.overtimeType} ${formData.overtimeDate} ${formData.hours} 小时`;
+    case "overtime_batch":
+      return `${formData.overtimeType} ${formData.overtimeDate} ${formData.hours} 小时 · ${Number(formData.participantCount || 0)} 人`;
     case "lesson_swap":
       return `${formData.sourceLessonLabel || "待调课程"} ⇄ ${formData.counterpartLessonLabel || "协商课程"}`;
     case "class_size_confirm":
@@ -1555,6 +1865,25 @@ function stageIdForAccount(db, account) {
   return String(teacher?.stageId || "");
 }
 
+// 批量加班单完成后才抄送：总校人事行政、总校财务以及发起学部财务。
+// 账号编号不是人员主键，故以当前角色和财务范围反查，人员替换后无需改模板。
+function overtimeBatchCompletionCcAccountIds(db, request) {
+  const stageId = String(request?.formData?.stageId || "");
+  return [
+    ...new Set(
+      (db.accounts || [])
+        .filter((item) => item.status !== "disabled")
+        .filter((item) => {
+          if (["hr", "system_admin"].includes(item.role)) return true;
+          if (item.role !== "finance") return false;
+          const scope = financeScopeFor(item);
+          return scope === "headquarters" || scope === stageId;
+        })
+        .map((item) => item.id),
+    ),
+  ];
+}
+
 function resolveStepApproverAccounts(db, templateStep, applicant) {
   const ids = Array.isArray(templateStep.approverAccountIds) ? templateStep.approverAccountIds : [];
   if (!ids.length) return [];
@@ -1648,6 +1977,7 @@ export function createOaRequest(db, account, input = {}) {
   const formData = validateFormData(template, rawFormData);
   validateBusinessRules(template.key, formData);
   if (template.key === "lesson_swap") prepareLessonSwapFormData(db, account, formData);
+  if (template.key === "overtime_batch") prepareOvertimeBatchFormData(db, account, formData);
   const now = nowIso();
   let requestTerm = resolveRequestTerm(db, {
     termId: formData.termId,
@@ -1708,8 +2038,15 @@ export function createOaRequest(db, account, input = {}) {
     formData.budgetScopeName = financeScopeLabel(budgetScope);
   }
   if (template.key === "class_size_confirm") {
-    formData.stageId = classSizeStageId;
-    formData.stageName = financeScopeLabel(classSizeStageId);
+    const existing = (db.oaRequests || []).find(
+      (item) =>
+        item.templateKey === "class_size_confirm" &&
+        ["pending", "executing"].includes(item.status) &&
+        item.termId === formData.termId &&
+        item.formData?.stageId === classSizeStageId,
+    );
+    if (existing) throw httpError(409, "本学部该学期已有进行中的班级人数确认，请勿重复提交");
+    prepareClassSizeConfirmationFormData(db, account, formData);
   }
   // 预算核定按所选学部路由给唯一的学部主任；把学部同时固化在单据上，
   // 后续待办、权限过滤和台账查询都与这一个内部主键保持一致。
@@ -2009,8 +2346,12 @@ export function actOnOaRequest(db, requestId, action, account, input = {}) {
 
   request.status = "approved";
   request.completedAt = now;
-  if (template?.completionCcAccountIds?.length) {
-    addCcRecipients(db, request, template.completionCcAccountIds, account, template, "completed");
+  const completionCcAccountIds = [
+    ...(template?.completionCcAccountIds || []),
+    ...(request.templateKey === "overtime_batch" ? overtimeBatchCompletionCcAccountIds(db, request) : []),
+  ];
+  if (completionCcAccountIds.length) {
+    addCcRecipients(db, request, completionCcAccountIds, account, template, "completed");
   }
   request.timeline.push({
     action: "completed",

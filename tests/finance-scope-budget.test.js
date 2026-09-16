@@ -425,6 +425,17 @@ term.endDate = "2099-01-31";
   const payload = publicAccount(account("finance_primary"), db);
   assert.equal(payload.financeScope, "primary");
   assert.equal(payload.financeScopeName, "小学部");
+  const headquartersPayload = publicAccount(account("finance"), db);
+  assert.equal(
+    headquartersPayload.payrollExportAll,
+    true,
+    "总校财务未显式设置 payrollExportAll 时，前端仍应保留薪资配置与导出权限",
+  );
+  assert.equal(
+    publicAccount({ ...account("finance"), payrollExportAll: false }, db).payrollExportAll,
+    false,
+    "显式关闭总校财务导出权限时，前端必须如实反映",
+  );
   assert.equal(publicAccount(byRole("system_admin"), db).financeScope, "", "行政管理不带财务范围");
 }
 

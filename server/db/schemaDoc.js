@@ -54,6 +54,7 @@ export const COLLECTION_NOTES = {
   scheduleConstraints: { domain: "排课", label: "排课约束", note: "教师、教室、班级的不可用时段与偏好" },
   schedulePeriodTemplates: { domain: "排课", label: "作息模板", note: "各学部的节次时间安排" },
   gradeCourseRules: { domain: "排课", label: "年级课程规则", note: "各年级各科目的周课时数要求" },
+  gradeCourseCyclePairs: { domain: "排课", label: "单双周课程配对", note: "两门含 0.5 节课时的课程共享同一课位，分别在单周和双周出现" },
   teacherAssignments: { domain: "排课", label: "任课安排", note: "教师与班级科目的对应关系" },
   teacherSchedulingRules: { domain: "排课", label: "教师排课规则", note: "单个教师的排课偏好与限制" },
   teacherScheduleRules: { domain: "排课", label: "教师排课约束", note: "教师维度的不可用时段与连堂限制，排课求解时作为硬约束" },

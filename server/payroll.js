@@ -74,6 +74,10 @@ export const DEFAULT_PAYROLL_RULES = {
       primaryCoreLow: 3330,
       primarySpecial: 3130,
     },
+    // 学校自行维护的计薪活动。每一条均绑定一个年级；同名活动可在不同年级
+    // 分别配置单价。排课负责人只能在当前年级选择对应条目，发布后金额写入课次快照。
+    // 例如：{ id: "activity-break-g1", name: "大课间", gradeId: "elementary-g1", rate: 20, enabled: true }
+    customNonRegularPayItems: [],
     // 月度考核由工资核算员按分数录入：100 分即全额，分数直接就是百分比系数。
     // 例如 120 分 = 120%，80 分 = 80%。不再使用优秀/合格等等级档。
     stageLessonRules: {
@@ -171,6 +175,13 @@ export const DEFAULT_PAYROLL_RULES = {
         weekend: 30,
         substitute: 19,
       },
+    },
+    // 行政管理人员兼课：学部副主任／教学主任／德育主任按 1/3 基准，
+    // 其他需兼课干部按 1/2 基准。基准按自然周计；基准内不另发课时费，
+    // 超出部分才按所在学部、学科的正常正课单价计发。
+    administrativeTeachingLoadBaseline: {
+      oneThird: { high: 4, middle: 5, primary: 6 },
+      oneHalf: { high: 6, middle: 7, primary: 8 },
     },
     postAllowances: {
       high: {
@@ -337,6 +348,9 @@ export function normalizePayrollRules(rules = {}) {
     .find((value) => Number.isFinite(value) && value > 0);
   merged.teacherSalaryScheme.minimumWage = roundMoney(minimumWage);
   delete merged.teacherSalaryScheme.minimumWageByYear;
+  merged.teacherSalaryScheme.customNonRegularPayItems = normalizeCustomNonRegularPayItems(
+    merged.teacherSalaryScheme.customNonRegularPayItems,
+  );
   [
     "baseSalary",
     "positionSalary",
@@ -354,6 +368,45 @@ export function normalizePayrollRules(rules = {}) {
   });
   pruneDeprecatedSchemeKeys(merged.teacherSalaryScheme, defaults.teacherSalaryScheme);
   return merged;
+}
+
+/**
+ * 可计薪活动由总校财务维护。ID 是排班记录的稳定引用，名称和单价在排班发布时
+ * 形成快照，避免日后把「大课间」改名或停用后影响已经发生的工资明细。
+ */
+function normalizeCustomNonRegularPayItems(items = []) {
+  const usedIds = new Set();
+  return (Array.isArray(items) ? items : [])
+    .slice(0, 80)
+    .map((item, index) => {
+      const requestedId = String(item?.id || "").trim();
+      const baseId = /^[A-Za-z0-9_-]{1,64}$/.test(requestedId) ? requestedId : `activity-${index + 1}`;
+      let id = baseId;
+      let suffix = 2;
+      while (usedIds.has(id)) {
+        const suffixText = `-${suffix}`;
+        id = `${baseId.slice(0, Math.max(1, 64 - suffixText.length))}${suffixText}`;
+        suffix += 1;
+      }
+      usedIds.add(id);
+      const name = String(item?.name || "").trim().slice(0, 40);
+      // gradeId 为空的是旧版本遗留的全学段项目。读取时继续兼容，避免历史作息
+      // 无法打开；新建和保存由前端要求必须选择年级。
+      const gradeId = String(item?.gradeId || "").trim().slice(0, 64);
+      const gradeName = String(item?.gradeName || "").trim().slice(0, 40);
+      const stageId = String(item?.stageId || "").trim().slice(0, 32);
+      const rate = Number(item?.rate);
+      return {
+        id,
+        name,
+        gradeId,
+        gradeName,
+        stageId,
+        rate: Number.isFinite(rate) && rate >= 0 ? roundMoney(rate) : 0,
+        enabled: item?.enabled !== false,
+      };
+    })
+    .filter((item) => item.name);
 }
 
 // 废弃配置清理。deepMerge 只会补齐、不会删除，库里早先写入的键会一直留着：
@@ -667,6 +720,23 @@ function rateFromGradeMap(map = {}, grade = null, fallback = 0) {
 
 const PAYROLL_STAGE_LABELS = { kindergarten: "幼儿园", primary: "小学", middle: "初中", high: "高中" };
 
+export const ADMINISTRATIVE_TEACHING_LOAD_LABELS = {
+  none: "不适用",
+  oneThird: "行政兼课 1/3 工作量",
+  oneHalf: "行政兼课 1/2 工作量",
+};
+
+function administrativeTeachingLoadOf(value = "") {
+  const normalized = String(value || "").trim();
+  return Object.hasOwn(ADMINISTRATIVE_TEACHING_LOAD_LABELS, normalized) ? normalized : "none";
+}
+
+function administrativeTeachingWeeklyBaseline(scheme = {}, stageId = "", mode = "none") {
+  if (mode === "none") return 0;
+  const baseline = Number(scheme.administrativeTeachingLoadBaseline?.[mode]?.[stageId] || 0);
+  return Number.isFinite(baseline) && baseline > 0 ? baseline : 0;
+}
+
 function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable = false }) {
   const stageId = lesson.stageId || teacher.stageId;
   const subjectId = lesson.subjectId || teacher.primarySubjectId;
@@ -675,6 +745,20 @@ function lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, pay
   const stageRule = scheme.stageLessonRules?.[stageId] || {};
   const coefficient = coefficientFor(stageRule, subjectId, grade);
   const units = Number(lesson.units || 1);
+
+  // 自定义计薪活动（如大课间）不套正课或学科系数。单价在排班发布时
+  // 固化到课次，避免财务后来调整活动目录，反向修改已经排好的活动工资。
+  if (lesson.nonRegularPayItemId) {
+    const rate = Number(lesson.nonRegularPayRate);
+    const safeRate = Number.isFinite(rate) && rate >= 0 ? rate : 0;
+    const name = String(lesson.nonRegularPayItemName || lesson.subjectName || "自定义活动").trim();
+    return {
+      rate: safeRate,
+      amount: roundMoney(units * safeRate),
+      ruleName: name,
+      basis: `${name} ${safeRate} 元/节（排班计薪项目）`,
+    };
+  }
 
   if (type === "regular") {
     if (stageId === "high") {
@@ -994,46 +1078,46 @@ function manualComponents(profile) {
   return components;
 }
 
-function attendanceDeductionComponent(attendanceSettlement = null, { assessmentSalary = 0, grossBeforeAttendance = 0 } = {}) {
-  const fixedDeduction = Number(attendanceSettlement?.totalDeduction || 0);
-  const performanceDeductionRate = Math.max(0, Math.min(1, Number(attendanceSettlement?.performanceDeductionRate || 0)));
-  const performanceDeduction = roundMoney(Math.max(0, Number(assessmentSalary || 0)) * performanceDeductionRate);
-  const absenceDailyFraction = Math.max(0, Number(attendanceSettlement?.absenceDailyFraction || 0));
-  const dynamicAbsenceDeduction = roundMoney(
-    Math.max(0, Number(grossBeforeAttendance || 0)) * absenceDailyFraction * Math.max(0, Number(attendanceSettlement?.absenceDays || 0)),
-  );
-  const totalDeduction = roundMoney(fixedDeduction + performanceDeduction + dynamicAbsenceDeduction);
-  if (!attendanceSettlement?.applies || !Number.isFinite(totalDeduction) || totalDeduction <= 0) return null;
+function attendanceDeductionComponent(attendanceSettlement = null, { assessmentSalary = 0, grossBeforeAttendance = 0, minimumWage = 0 } = {}) {
+  if (!attendanceSettlement?.applies) return null;
+
+  // 2026-09 起，全校统一考勤只可扣减“考核工资”。旧学部按固定金额、
+  // 或以工资总额折算旷工的方式，不能再进入未锁定工资单。
+  const performanceDeductionRate = Math.max(0, Math.min(0.2, Number(attendanceSettlement.performanceDeductionRate || 0)));
+  const payableAssessmentSalary = Math.max(0, Number(assessmentSalary || 0));
+  const grossBefore = Math.max(0, Number(grossBeforeAttendance || 0));
+  const protectedMinimumWage = Math.max(0, Number(minimumWage || 0));
+  const requestedDeduction = roundMoney(payableAssessmentSalary * performanceDeductionRate);
+  const maximumAllowedDeduction = roundMoney(Math.max(0, grossBefore - protectedMinimumWage));
+  const appliedDeduction = roundMoney(Math.min(requestedDeduction, maximumAllowedDeduction));
+
+  // 考核工资为 0，或最低工资保护已经占满当月税前应发时，只保留考勤事实，
+  // 不从基本工资、补贴或课时费中继续扣减。
+  if (!performanceDeductionRate || !payableAssessmentSalary || !appliedDeduction) return null;
+
   const parts = [];
-  if (Number(attendanceSettlement.lateEarlyCount || 0) > 0 && performanceDeductionRate > 0 && attendanceSettlement.requiresPayrollContext) {
-    parts.push(`${attendanceSettlement.attendanceLabel || "迟到／早退"} ${attendanceSettlement.lateEarlyCount} 次`);
-  } else if (Number(attendanceSettlement.lateEarlyCount || 0) > 0) {
-    parts.push(`${attendanceSettlement.attendanceLabel || "迟到／早退"} ${attendanceSettlement.lateEarlyCount} 次，扣 ${roundMoney(attendanceSettlement.lateEarlyDeduction || 0)} 元`);
+  if (Number(attendanceSettlement.minorCount || 0)) parts.push(`轻微违纪 ${attendanceSettlement.minorCount} 次`);
+  if (Number(attendanceSettlement.generalCount || 0)) parts.push(`一般违纪 ${attendanceSettlement.generalCount} 次`);
+  if (Number(attendanceSettlement.seriousCount || attendanceSettlement.seriousOccurrenceCount || 0)) {
+    parts.push(`较重违纪 ${Number(attendanceSettlement.seriousCount || attendanceSettlement.seriousOccurrenceCount || 0)} 次`);
   }
-  if (Number(attendanceSettlement.missingPunchCount || 0) > 0) {
-    parts.push(`未补卡 ${attendanceSettlement.missingPunchCount} 次，扣 ${roundMoney(attendanceSettlement.missingPunchDeduction || 0)} 元`);
+  if (Number(attendanceSettlement.severeCount || 0)) parts.push(`严重违纪 ${attendanceSettlement.severeCount} 次`);
+  if (Number(attendanceSettlement.missedClassCount || 0)) parts.push(`旷课／空堂 ${attendanceSettlement.missedClassCount} 节`);
+  if (Number(attendanceSettlement.absenceDays || 0)) parts.push(`旷工 ${attendanceSettlement.absenceDays} 天`);
+  parts.push(`考核工资 ${roundMoney(payableAssessmentSalary)} 元 × ${Math.round(performanceDeductionRate * 100)}%`);
+  if (appliedDeduction < requestedDeduction) {
+    parts.push(`税前应发最低工资保护 ${roundMoney(protectedMinimumWage)} 元，实际扣 ${appliedDeduction} 元`);
+  } else {
+    parts.push(`扣 ${appliedDeduction} 元`);
   }
-  if (Number(attendanceSettlement.absenceDays || 0) > 0) {
-    if (absenceDailyFraction > 0) {
-      parts.push(`旷工 ${attendanceSettlement.absenceDays} 天 × 当月工资总额 1/22，扣 ${dynamicAbsenceDeduction} 元`);
-    } else {
-      parts.push(`无故旷工 ${attendanceSettlement.absenceDays} 天 × ${roundMoney(attendanceSettlement.absenceRate || 300)} 元，扣 ${roundMoney(attendanceSettlement.absenceDeduction || 0)} 元`);
-    }
-  }
-  if (Number(attendanceSettlement.seriousOccurrenceCount || 0) > 0) {
-    parts.push(`超时迟到／早退 ${attendanceSettlement.seriousOccurrenceCount} 次`);
-  }
-  if (Number(attendanceSettlement.missedClassCount || 0) > 0) {
-    parts.push(`旷课 ${attendanceSettlement.missedClassCount} 节（对应课次须标为已取消，不计课时工资）`);
-  }
-  if (performanceDeductionRate > 0) {
-    parts.push(`考核工资 ${roundMoney(assessmentSalary)} 元 × 考勤违纪扣除 ${Math.round(performanceDeductionRate * 100)}%，扣 ${performanceDeduction} 元`);
-  }
+
   return {
-    name: attendanceSettlement.componentName || "考勤扣款",
-    basis: `${attendanceSettlement.policyName || "考勤制度"}：${parts.join("；")}`,
-    amount: -roundMoney(totalDeduction),
+    name: attendanceSettlement.componentName || "全校统一考勤绩效扣减",
+    basis: `${attendanceSettlement.policyName || "全校统一考勤制度"}：${parts.join("；")}`,
+    amount: -appliedDeduction,
     category: "deduction",
+    requestedAttendanceDeduction: requestedDeduction,
+    attendanceMinimumWageProtection: roundMoney(Math.max(0, requestedDeduction - appliedDeduction)),
   };
 }
 
@@ -1171,6 +1255,7 @@ function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrat
   const attendanceDeduction = attendanceDeductionComponent(attendanceSettlement, {
     assessmentSalary: payrollComponents.find((component) => component.name === "考核工资")?.amount || 0,
     grossBeforeAttendance: payrollComponents.reduce((sum, component) => sum + Number(component.amount || 0), 0),
+    minimumWage: minimumWageForScheme(scheme),
   });
   const components = [...payrollComponents, attendanceDeduction].filter(Boolean);
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
@@ -1186,7 +1271,21 @@ function calculateLifeTeacherPayroll({ teacher, month, payrollRules, fixedProrat
     grossPay, tax, netPay: roundMoney(grossPay - tax), components, lines: [],
     calendarSettlement: { tag: hasHolidaySettlement ? "holiday" : "teaching", totalDays: totalCalendarDays, teachingDays, holidayDays, holidayRate: hasHolidaySettlement ? (employmentType === "agreement" ? 0.8 : holidayRate) : 1, managementLevel, employmentType, holidayEntries: calendarSettlement?.holidayEntries || [] },
     leaveSettlement: leaveSettlement ? { ...leaveSettlement, applied: employmentType === "normal" && Number(leaveSettlement.policyLeaveDays || 0) > 0 } : null,
-    attendanceSettlement: attendanceSettlement ? { ...attendanceSettlement, applied: Boolean(attendanceSettlement.applies) } : null,
+    attendanceSettlement: attendanceSettlement
+      ? {
+          ...attendanceSettlement,
+          applied: Boolean(attendanceSettlement.applies),
+          assessmentSalaryAtSettlement: roundMoney(payrollComponents.find((component) => component.name === "考核工资")?.amount || 0),
+          attendanceDeductionAmount: roundMoney(Math.abs(attendanceDeduction?.amount || 0)),
+          attendanceDeductionStatus: !Number(attendanceSettlement.performanceDeductionRate || 0)
+            ? "无考勤扣减"
+            : !Number(payrollComponents.find((component) => component.name === "考核工资")?.amount || 0)
+              ? "考核工资为 0，仅保留考勤记录"
+              : !attendanceDeduction
+                ? "税前应发已受最低工资保护，仅保留考勤记录"
+                : "已按考核工资扣减",
+        }
+      : null,
   };
 }
 
@@ -1265,6 +1364,12 @@ export function calculateDedicatedTeacherPayroll({
   }
   const sortedLessons = [...lessons].sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
   const highRegularWeekUnits = new Map();
+  // 行政兼课基准以“自然周”为单位：例如高中 1/3 是每周 4 节，而不是
+  // 整月累计 4 节。基准内属于行政岗位应承担的教学工作量，不另发课时工资；
+  // 从本周超出基准的那一节起，才按相应学段／学科的正常正课单价计薪。
+  const administrativeTeachingLoad = administrativeTeachingLoadOf(hrFacts?.administrativeTeachingLoad);
+  const administrativeTeachingBaseline = administrativeTeachingWeeklyBaseline(scheme, teacher.stageId, administrativeTeachingLoad);
+  const administrativeTeachingWeeklyUnits = new Map();
   const lines = sortedLessons.map((lesson) => {
     // 计薪口径：排给谁就算谁的，除非这节课被取消。
     //
@@ -1278,6 +1383,24 @@ export function calculateDedicatedTeacherPayroll({
     //   外出  原老师还会收到一条正常课时的只读投影，体现“原课时工资照发”
     const payable = lesson.status !== "cancelled";
     const rule = lessonRateAndBasis({ lesson, teacher, scheme, highRegularWeekUnits, payable });
+    const units = Number(lesson.units || 1);
+    const isAdministrativeBaselineLesson =
+      administrativeTeachingBaseline > 0 && payable && lesson.type === "regular";
+    const weekStart = isAdministrativeBaselineLesson ? weekKey(lesson.date) : "";
+    const priorWeeklyUnits = weekStart ? Number(administrativeTeachingWeeklyUnits.get(weekStart) || 0) : 0;
+    const baselineUnits = isAdministrativeBaselineLesson
+      ? Math.min(units, Math.max(administrativeTeachingBaseline - priorWeeklyUnits, 0))
+      : 0;
+    const excessUnits = isAdministrativeBaselineLesson ? Math.max(0, units - baselineUnits) : units;
+    if (weekStart) administrativeTeachingWeeklyUnits.set(weekStart, priorWeeklyUnits + units);
+    const payableUnits = isAdministrativeBaselineLesson ? excessUnits : payable ? units : 0;
+    const administrativeBasis = isAdministrativeBaselineLesson
+      ? `行政兼课 ${administrativeTeachingLoad === "oneThird" ? "1/3" : "1/2"} 工作量：本周正课基准 ${administrativeTeachingBaseline} 节，本节 ${baselineUnits} 节计入基准${excessUnits ? `，${excessUnits} 节超基准按 ${rule.rate} 元/节计薪` : "，未超基准不另计课时费"}`
+      : "";
+    const normalLessonAmount = payable ? rule.amount : 0;
+    const administrativeLessonAmount = isAdministrativeBaselineLesson
+      ? roundMoney(excessUnits * rule.rate)
+      : normalLessonAmount;
     return {
       lessonId: lesson.id,
       date: lesson.date,
@@ -1286,24 +1409,43 @@ export function calculateDedicatedTeacherPayroll({
       subjectName: lesson.subjectName,
       room: getRoomName(lesson),
       type: lesson.type,
-      units: Number(lesson.units || 1),
+      units,
+      payableUnits,
       rate: rule.rate,
-      ruleName: rule.ruleName,
+      ruleName: isAdministrativeBaselineLesson && excessUnits ? "行政兼课超基准正课" : rule.ruleName,
       basis:
         workStatus === "standby"
           ? `${rule.basis}；待岗期间课时不另计薪`
           : employmentType === "agreement"
             ? `${rule.basis}；协议教师课时不另计薪`
-            : lesson.outboundOriginalPay
-              ? `${rule.basis}；外出期间已安排代课，原任课老师课时工资照发`
-              : rule.basis,
+            : administrativeBasis ||
+              (lesson.outboundOriginalPay
+                ? `${rule.basis}；外出期间已安排代课，原任课老师课时工资照发`
+                : rule.basis),
       status: lesson.status,
-      amount: employmentType === "agreement" || workStatus === "standby" ? 0 : payable ? rule.amount : 0,
-      payable: employmentType === "agreement" || workStatus === "standby" ? false : payable,
+      amount: employmentType === "agreement" || workStatus === "standby" ? 0 : administrativeLessonAmount,
+      payable: employmentType === "agreement" || workStatus === "standby" ? false : payableUnits > 0,
     };
   });
 
   const lessonAmount = roundMoney(lines.reduce((sum, line) => sum + line.amount, 0));
+  const administrativeTeachingWeeks = Array.from(administrativeTeachingWeeklyUnits.entries()).map(([weekStart, scheduledUnits]) => ({
+    weekStart,
+    scheduledUnits,
+    baselineUnits: Math.min(scheduledUnits, administrativeTeachingBaseline),
+    excessUnits: Math.max(0, scheduledUnits - administrativeTeachingBaseline),
+  }));
+  const administrativeTeachingSummary = administrativeTeachingBaseline
+    ? {
+        mode: administrativeTeachingLoad,
+        label: ADMINISTRATIVE_TEACHING_LOAD_LABELS[administrativeTeachingLoad],
+        weeklyBaseline: administrativeTeachingBaseline,
+        scheduledRegularUnits: administrativeTeachingWeeks.reduce((sum, item) => sum + item.scheduledUnits, 0),
+        baselineCoveredUnits: administrativeTeachingWeeks.reduce((sum, item) => sum + item.baselineUnits, 0),
+        excessUnits: administrativeTeachingWeeks.reduce((sum, item) => sum + item.excessUnits, 0),
+        weeks: administrativeTeachingWeeks,
+      }
+    : null;
   const prorate = Math.min(Math.max(Number(fixedProrationFactor) || 1, 0), 1);
   const rawFixedComponents = [
     baseSalaryComponent(profile, scheme),
@@ -1368,8 +1510,10 @@ export function calculateDedicatedTeacherPayroll({
     ? applyLeaveSettlementPolicy(fixedComponents, leaveSettlement)
     : fixedComponents;
   const lessonComponent = {
-    name: "课时工资",
-    basis: "按实际完成课次、课型、学段、学科系数和高中超课时规则汇总",
+    name: administrativeTeachingSummary ? "行政兼课超基准课时费" : "课时工资",
+    basis: administrativeTeachingSummary
+      ? `${administrativeTeachingSummary.label}：每自然周 ${administrativeTeachingSummary.weeklyBaseline} 节正课计入行政兼课基准，本月 ${administrativeTeachingSummary.scheduledRegularUnits} 节，超基准 ${administrativeTeachingSummary.excessUnits} 节按相应学段、学科正课单价计薪`
+      : "按实际完成课次、课型、学段、学科系数和高中超课时规则汇总",
     amount: lessonAmount,
     category: "lesson",
   };
@@ -1417,6 +1561,7 @@ export function calculateDedicatedTeacherPayroll({
   const attendanceDeduction = attendanceDeductionComponent(attendanceSettlement, {
     assessmentSalary: payrollComponents.find((component) => component.name === "考核工资")?.amount || 0,
     grossBeforeAttendance: payrollComponents.reduce((sum, component) => sum + Number(component.amount || 0), 0),
+    minimumWage,
   });
   const components = [...payrollComponents, attendanceDeduction].filter(Boolean);
   const grossPay = roundMoney(components.reduce((sum, component) => sum + component.amount, 0));
@@ -1450,6 +1595,7 @@ export function calculateDedicatedTeacherPayroll({
     employmentType,
     workStatus,
     agreementMonthlySalary: employmentType === "agreement" ? agreementMonthlySalary : 0,
+    administrativeTeaching: administrativeTeachingSummary,
     grossPay,
     tax,
     netPay,
@@ -1472,7 +1618,19 @@ export function calculateDedicatedTeacherPayroll({
         }
       : null,
     attendanceSettlement: attendanceSettlement
-      ? { ...attendanceSettlement, applied: Boolean(attendanceSettlement.applies) }
+      ? {
+          ...attendanceSettlement,
+          applied: Boolean(attendanceSettlement.applies),
+          assessmentSalaryAtSettlement: roundMoney(payrollComponents.find((component) => component.name === "考核工资")?.amount || 0),
+          attendanceDeductionAmount: roundMoney(Math.abs(attendanceDeduction?.amount || 0)),
+          attendanceDeductionStatus: !Number(attendanceSettlement.performanceDeductionRate || 0)
+            ? "无考勤扣减"
+            : !Number(payrollComponents.find((component) => component.name === "考核工资")?.amount || 0)
+              ? "考核工资为 0，仅保留考勤记录"
+              : !attendanceDeduction
+                ? "税前应发已受最低工资保护，仅保留考勤记录"
+                : "已按考核工资扣减",
+        }
       : null,
   };
 }

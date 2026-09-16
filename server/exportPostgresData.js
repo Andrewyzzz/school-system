@@ -67,8 +67,9 @@ function normalizeAttendanceAction(action = "") {
 }
 
 function normalizePeriodType(type = "regular") {
+  if (type === "morning") return "morning_study";
   if (type === "selfStudy") return "self_study";
-  if (["regular", "self_study", "activity", "evening_study"].includes(type)) return type;
+  if (["regular", "self_study", "morning_study", "activity", "evening_study"].includes(type)) return type;
   return "regular";
 }
 
@@ -467,6 +468,26 @@ function buildRows(db) {
           sqlString(rule.roomType || rule.roomTypeId),
           sqlBoolean(rule.enabled !== false),
           sqlJson(rule),
+        ],
+      ),
+    );
+  });
+
+  (db.gradeCourseCyclePairs || []).forEach((pair) => {
+    rows.push(
+      insertSql(
+        "grade_course_cycle_pairs",
+        ["id", "term_id", "stage_id", "grade_id", "odd_subject_id", "even_subject_id", "metadata", "created_at", "updated_at"],
+        [
+          sqlText(pair.id),
+          sqlText(pair.termId || currentTerm),
+          sqlText(pair.stageId),
+          sqlText(gradeIdFor(pair.stageId, pair.grade)),
+          sqlText(pair.oddSubjectId),
+          sqlText(pair.evenSubjectId),
+          sqlJson(pair),
+          sqlText(pair.createdAt || pair.updatedAt || db.meta?.createdAt),
+          sqlText(pair.updatedAt || db.meta?.updatedAt),
         ],
       ),
     );

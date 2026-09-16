@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   canExportAllPayrollDetails,
+  canManagePayrollConfig,
   canViewAllPayrollDetails,
   canViewDivisionPayrollDetails,
   divisionPayrollScopeFor,
@@ -18,10 +19,13 @@ const unscopedDivisionHead = { role: "division_head", payrollReadDivision: true,
 
 assert.equal(canViewAllPayrollDetails(finance), true);
 assert.equal(canExportAllPayrollDetails(finance), true);
+assert.equal(canManagePayrollConfig(finance), true);
 assert.equal(canViewAllPayrollDetails(financeWithoutExport), true);
 assert.equal(canExportAllPayrollDetails(financeWithoutExport), false);
+assert.equal(canManagePayrollConfig(financeWithoutExport), true);
 assert.equal(canViewAllPayrollDetails(readOnlyPrincipal), true);
 assert.equal(canExportAllPayrollDetails(readOnlyPrincipal), false);
+assert.equal(canManagePayrollConfig(readOnlyPrincipal), false);
 assert.equal(canViewAllPayrollDetails(hrAdminViewer), true);
 assert.equal(canExportAllPayrollDetails(hrAdminViewer), false);
 assert.equal(canViewAllPayrollDetails(unapprovedPrincipal), false);
@@ -33,6 +37,7 @@ assert.equal(canExportAllPayrollDetails(payrollExporter), true);
 assert.equal(divisionPayrollScopeFor(divisionHead), "primary");
 assert.equal(canViewDivisionPayrollDetails(divisionHead), true);
 assert.equal(canExportAllPayrollDetails(divisionHead), false);
+assert.equal(canManagePayrollConfig(divisionHead), false);
 assert.equal(divisionPayrollScopeFor(unscopedDivisionHead), "");
 assert.equal(canViewDivisionPayrollDetails(unscopedDivisionHead), false);
 

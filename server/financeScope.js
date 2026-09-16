@@ -81,6 +81,18 @@ export function canExportAllPayrollDetails(account) {
   );
 }
 
+/**
+ * 薪资配置是总校财务的日常配置职责，不能与“导出工资明细”混为同一项授权。
+ * 导出会产生可离线传播的文件，仍须由 canExportAllPayrollDetails 单独控制。
+ */
+export function canManagePayrollConfig(account) {
+  return Boolean(
+    account?.role === "finance" &&
+      financeScopeFor(account) === HEADQUARTERS_SCOPE &&
+      account.financeReadAll,
+  );
+}
+
 // 经授权的校领导或总校人事行政，薪资权限与财务权限严格分开：
 // 只读取全校薪资，不进入核算、复核、锁定、工资规则或人员薪酬档案维护流程。
 export function canViewAllPayrollDetails(account) {

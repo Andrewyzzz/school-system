@@ -181,6 +181,10 @@ function ensureSchedulingStore(db) {
   if (!Array.isArray(db.auditLogs)) db.auditLogs = [];
   if (!Array.isArray(db.notifications)) db.notifications = [];
   if (!Array.isArray(db.gradeCourseRules)) db.gradeCourseRules = [];
+  // 两周循环课程（例如 A 课 0.5 节、B 课 6.5 节）不是两份互不相关的
+  // 周课时配置。它们必须共享同一个课位，分别出现在单周和双周，因此单独保存
+  // 配对关系，避免在排课时被当成两门普通课程独立安排。
+  if (!Array.isArray(db.gradeCourseCyclePairs)) db.gradeCourseCyclePairs = [];
   if (!Array.isArray(db.scheduleConstraints)) db.scheduleConstraints = [];
   if (!Array.isArray(db.teacherScheduleRules)) db.teacherScheduleRules = [];
   if (!Array.isArray(db.scheduleChangeRequests)) db.scheduleChangeRequests = [];
@@ -326,6 +330,7 @@ function timeToMinutes(value) {
 }
 
 function periodTypeLabel(type = "regular") {
+  if (type === "morning") return "早自习";
   if (type === "selfStudy") return "自习";
   if (type === "activity") return "活动";
   if (type === "evening") return "晚自习";
@@ -333,9 +338,70 @@ function periodTypeLabel(type = "regular") {
 }
 
 function nonRegularPeriodDefaultContent(type = "selfStudy") {
+  if (type === "morning") return "早自习";
   if (type === "activity") return "活动";
   if (type === "evening") return "晚自习";
   return "自习";
+}
+
+// 非正课的计薪项目由总校财务按年级维护。排课端只拿到当前年级可选的
+// 项目名称；真正的金额在服务端保存作息表时写入，避免前端篡改单价。
+function configuredNonRegularPayItems(db, { includeDisabled = false, gradeId = "" } = {}) {
+  const items = db.payrollRules?.teacherSalaryScheme?.customNonRegularPayItems || [];
+  const scopedGradeId = String(gradeId || "").trim();
+  return (Array.isArray(items) ? items : [])
+    .filter(
+      (item) =>
+        item &&
+        item.name &&
+        (includeDisabled || item.enabled !== false) &&
+        // 无年级字段是历史配置，仍可在各年级读取，直到总校财务补齐。
+        (!scopedGradeId || !item.gradeId || String(item.gradeId) === scopedGradeId),
+    )
+    .map((item) => ({
+      id: String(item.id || "").trim(),
+      name: String(item.name || "").trim(),
+      gradeId: String(item.gradeId || "").trim(),
+      gradeName: String(item.gradeName || "").trim(),
+      rate: Math.max(0, Number(item.rate || 0)),
+      enabled: item.enabled !== false,
+    }))
+    .filter((item) => item.id && item.name);
+}
+
+function resolveNonRegularPayItem(db, period = {}, { gradeId = "" } = {}) {
+  if (period.type === "regular") {
+    return {
+      ...period,
+      nonRegularPayItemId: "",
+      nonRegularPayItemName: "",
+      nonRegularPayRate: 0,
+      nonRegularPayGradeId: "",
+    };
+  }
+  const itemId = String(period.nonRegularPayItemId || "").trim();
+  if (!itemId) {
+    return {
+      ...period,
+      nonRegularPayItemId: "",
+      nonRegularPayItemName: "",
+      nonRegularPayRate: 0,
+      nonRegularPayGradeId: "",
+    };
+  }
+  const item = configuredNonRegularPayItems(db, { gradeId }).find((candidate) => candidate.id === itemId);
+  if (!item) {
+    const error = new Error("所选计薪项目不存在、已停用或不适用于当前年级，请在薪资配置中重新选择");
+    error.statusCode = 400;
+    throw error;
+  }
+  return {
+    ...period,
+    nonRegularPayItemId: item.id,
+    nonRegularPayItemName: item.name,
+    nonRegularPayRate: item.rate,
+    nonRegularPayGradeId: item.gradeId,
+  };
 }
 
 function isRegularSchedulePeriod(period) {
@@ -344,6 +410,15 @@ function isRegularSchedulePeriod(period) {
 
 function regularSchedulePeriods(periods = []) {
   return (periods || []).filter(isRegularSchedulePeriod);
+}
+
+// 正课时长由作息表节次统一决定，不能再被单门课程覆盖。
+// fallback 仅用于兼容尚未带有起止时间的历史课次。
+function schedulePeriodDurationMinutes(period = {}, fallback = DEFAULT_LESSON_DURATION_MINUTES) {
+  const [timeStart = "", timeEnd = ""] = String(period.time || "").split("-");
+  const start = timeToMinutes(period.startTime || timeStart);
+  const end = timeToMinutes(period.endTime || timeEnd);
+  return start !== null && end !== null && end > start ? end - start : fallback;
 }
 
 const DEFAULT_SCHEDULE_DAY_INDEXES = [0, 1, 2, 3, 4];
@@ -403,7 +478,7 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       }
       return;
     }
-    const type = ["regular", "selfStudy", "activity", "evening"].includes(period.type) ? period.type : "regular";
+    const type = ["regular", "morning", "selfStudy", "activity", "evening"].includes(period.type) ? period.type : "regular";
     const dayIndexes = normalizeScheduleDayIndexes(period.dayIndexes);
     if (strict && type === "regular" && dayIndexes.some((dayIndex) => dayIndex > 4)) {
       const error = new Error(`第 ${index + 1} 个时段包含周末；周六、周日只能配置为固定非正课日程`);
@@ -433,6 +508,10 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       content: type === "regular" ? "" : String(period.content || "").trim().slice(0, 80),
       responsibleTeacherId,
       responsibleRole,
+      nonRegularPayItemId: type === "regular" ? "" : String(period.nonRegularPayItemId || "").trim(),
+      nonRegularPayItemName: type === "regular" ? "" : String(period.nonRegularPayItemName || "").trim().slice(0, 40),
+      nonRegularPayRate: type === "regular" ? 0 : Math.max(0, Number(period.nonRegularPayRate || 0)),
+      nonRegularPayGradeId: type === "regular" ? "" : String(period.nonRegularPayGradeId || "").trim().slice(0, 64),
       dayIndexes,
     });
   });
@@ -478,6 +557,10 @@ function normalizeSchedulePeriods(periods = [], options = {}) {
       content: period.type === "regular" ? "" : period.content || "",
       responsibleTeacherId: period.type === "regular" ? "" : period.responsibleTeacherId || "",
       responsibleRole: period.type === "regular" ? "" : period.responsibleRole || "",
+      nonRegularPayItemId: period.type === "regular" ? "" : period.nonRegularPayItemId || "",
+      nonRegularPayItemName: period.type === "regular" ? "" : period.nonRegularPayItemName || "",
+      nonRegularPayRate: period.type === "regular" ? 0 : Math.max(0, Number(period.nonRegularPayRate || 0)),
+      nonRegularPayGradeId: period.type === "regular" ? "" : period.nonRegularPayGradeId || "",
       dayIndexes: [...period.dayIndexes],
     };
   });
@@ -684,6 +767,102 @@ function courseCycleFields(value, subjectId = "", classAlternating = undefined) 
     cycleLessonCounts: alternateByClass ? [upper, upper] : [upper, lower],
     classAlternating: alternateByClass,
   };
+}
+
+function alternatingCoursePairsForScope(db, division, grade, term = currentTerm(db)) {
+  const subjectNames = new Map((db.subjects || []).map((subject) => [subject.id, subject.name]));
+  return termMergedRows(
+    db.gradeCourseCyclePairs || [],
+    term,
+    (pair) => pair.stageId === division.stageId && Number(pair.grade) === Number(grade.grade),
+    (pair) => pair.id,
+  )
+    .filter((pair) => pair.oddSubjectId && pair.evenSubjectId)
+    .map((pair) => ({
+      ...pair,
+      oddSubjectName: subjectNames.get(pair.oddSubjectId) || pair.oddSubjectId,
+      evenSubjectName: subjectNames.get(pair.evenSubjectId) || pair.evenSubjectId,
+    }));
+}
+
+// 兼容已经录入的 0.5 节课程：旧数据尚未保存配对关系时，只要半节课程数量成对，
+// 也按稳定的默认顺序生成两周轮换配置。这样升级后不用先手动重录课程规则；
+// 教务仍可在「课程与分布规则」中调整并保存成明确的单周/双周配对。
+function defaultAlternatingCoursePairs(courseRules = [], scope = {}) {
+  const halfLessonSubjectIds = courseRules
+    .filter((rule) => rule.enabled && !Number.isInteger(Number(rule.sourceWeeklyLessons || 0)))
+    .map((rule) => String(rule.subjectId || "").trim())
+    .filter(Boolean)
+    .sort();
+  if (!halfLessonSubjectIds.length || halfLessonSubjectIds.length % 2) return [];
+  return Array.from({ length: halfLessonSubjectIds.length / 2 }, (_, index) => ({
+    id: scopedConfigId("CYCLE-AUTO", scope.termId, scope.stageId, scope.grade, String(index + 1)),
+    termId: scope.termId,
+    termName: scope.termName || "",
+    stageId: scope.stageId,
+    grade: scope.grade,
+    oddSubjectId: halfLessonSubjectIds[index * 2],
+    evenSubjectId: halfLessonSubjectIds[index * 2 + 1],
+    autoGenerated: true,
+  }));
+}
+
+function normalizeAlternatingCoursePairs(options = {}, nextRules = [], scope = {}) {
+  const halfLessonSubjectIds = nextRules
+    .filter((rule) => rule.enabled && !Number.isInteger(Number(rule.sourceWeeklyLessons || 0)))
+    .map((rule) => rule.subjectId)
+    .sort();
+  const halfSet = new Set(halfLessonSubjectIds);
+  if (!halfLessonSubjectIds.length) return [];
+  if (halfLessonSubjectIds.length % 2) {
+    const error = new Error("0.5 节课程必须两两配对：请为每门半节课程选择对应的单周或双周课程");
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const submittedPairs = Array.isArray(options.cyclePairs) ? options.cyclePairs : [];
+  // 首次把半节课程录入系统时，先给出稳定、可编辑的默认配对。前端会在保存后
+  // 显示“单周课程 / 双周课程”选择器，教务可按实际情况调整。
+  const sourcePairs = submittedPairs.length
+    ? submittedPairs
+    : Array.from({ length: halfLessonSubjectIds.length / 2 }, (_, index) => ({
+        oddSubjectId: halfLessonSubjectIds[index * 2],
+        evenSubjectId: halfLessonSubjectIds[index * 2 + 1],
+      }));
+  const seen = new Set();
+  const normalizedPairs = sourcePairs.map((pair, index) => {
+    const oddSubjectId = String(pair.oddSubjectId || "").trim();
+    const evenSubjectId = String(pair.evenSubjectId || "").trim();
+    if (!halfSet.has(oddSubjectId) || !halfSet.has(evenSubjectId) || oddSubjectId === evenSubjectId) {
+      const error = new Error("单双周配对只能选择两门不同的 0.5 节课程");
+      error.statusCode = 400;
+      throw error;
+    }
+    if (seen.has(oddSubjectId) || seen.has(evenSubjectId)) {
+      const error = new Error("每门 0.5 节课程只能出现在一组单双周配对中");
+      error.statusCode = 400;
+      throw error;
+    }
+    seen.add(oddSubjectId);
+    seen.add(evenSubjectId);
+    return {
+      id: scopedConfigId("CYCLE", scope.termId, scope.stageId, scope.grade, String(index + 1)),
+      termId: scope.termId,
+      termName: scope.termName,
+      stageId: scope.stageId,
+      grade: scope.grade,
+      oddSubjectId,
+      evenSubjectId,
+      updatedAt: new Date().toISOString(),
+      updatedByAccountId: scope.actorAccountId || "",
+    };
+  });
+  if (seen.size !== halfLessonSubjectIds.length) {
+    const error = new Error("每门 0.5 节课程都必须出现在一组单双周配对中");
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalizedPairs;
 }
 
 function normalizeDurationMinutes(value, fallback = DEFAULT_LESSON_DURATION_MINUTES) {
@@ -1195,6 +1374,24 @@ export function buildSchedulingConfig(db, options = {}) {
     termStartDate: calendarRange.startDate,
     weekStart: scheduleWeekStart,
   });
+  const storedCyclePairs = alternatingCoursePairsForScope(db, division, grade, term).filter((pair) => {
+    const oddRule = courseRules.find((rule) => rule.subjectId === pair.oddSubjectId);
+    const evenRule = courseRules.find((rule) => rule.subjectId === pair.evenSubjectId);
+    return (
+      oddRule?.enabled &&
+      evenRule?.enabled &&
+      !Number.isInteger(Number(oddRule.sourceWeeklyLessons || 0)) &&
+      !Number.isInteger(Number(evenRule.sourceWeeklyLessons || 0))
+    );
+  });
+  const cyclePairs = storedCyclePairs.length
+    ? storedCyclePairs
+    : defaultAlternatingCoursePairs(courseRules, {
+        termId: term.id,
+        termName: term.name,
+        stageId: division.stageId,
+        grade: grade.grade,
+      });
   const subjects = schedulingSubjects(db, division, grade, term, courseRules);
   const classStructure = gradeClassStructure(classes);
   const constraints = publicScheduleConstraints(db, division, grade, term);
@@ -1235,12 +1432,19 @@ export function buildSchedulingConfig(db, options = {}) {
     scheduleTemplateOptions,
     periodTemplates,
     courseRules,
+    cyclePairs,
     constraints,
     teacherRules,
     changeRequests: publicScheduleChangeRequests(db, division, grade, term),
     subjects,
     teachers: schedulingTeacherRows(db, subjects),
     nonRegularTeachers: schedulingNonRegularTeacherRows(db, division),
+    nonRegularPayItems: configuredNonRegularPayItems(db, { gradeId: grade.id }).map((item) => ({
+      id: item.id,
+      name: item.name,
+      gradeId: item.gradeId,
+      gradeName: item.gradeName,
+    })),
     divisions: DIVISIONS.map((item) => ({
       id: item.id,
       name: item.name,
@@ -1635,7 +1839,9 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
   const highClassCategory = isHighDivision(division)
     ? normalizeHighClassCategory(options.highClassCategory || options.scheduleTemplateKey, "c")
     : "";
-  const periods = normalizeSchedulePeriods(options.periods || [], { strict: true });
+  const periods = normalizeSchedulePeriods(options.periods || [], { strict: true }).map((period) =>
+    resolveNonRegularPayItem(db, period, { gradeId: grade.id }),
+  );
   if (!regularSchedulePeriods(periods).length) {
     const error = new Error("请至少保留 1 个正课节次用于自动排课");
     error.statusCode = 400;
@@ -1643,6 +1849,11 @@ export function updateSchedulePeriods(db, options = {}, actorAccount = null) {
   }
   const responsibleTeacherIds = new Set(schedulingNonRegularTeacherRows(db, division).map((teacher) => teacher.id));
   periods.forEach((period) => {
+    if (period.type !== "regular" && period.nonRegularPayItemId && !period.responsibleTeacherId && !period.responsibleRole) {
+      const error = new Error(`“${period.nonRegularPayItemName}”属于计薪日程，必须指定负责老师或负责岗位`);
+      error.statusCode = 400;
+      throw error;
+    }
     if (period.type === "regular" || period.responsibleRole || !period.responsibleTeacherId) return;
     if (!responsibleTeacherIds.has(period.responsibleTeacherId)) {
       const error = new Error("请选择当前学部在职老师作为非正课负责人");
@@ -1758,6 +1969,13 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
   }
 
   const nextRules = Array.from(bySubject.values());
+  const nextCyclePairs = normalizeAlternatingCoursePairs(options, nextRules, {
+    termId: term.id,
+    termName: term.name,
+    stageId: division.stageId,
+    grade: grade.grade,
+    actorAccountId: actorAccount?.id || "",
+  });
   db.gradeCourseRules = (db.gradeCourseRules || []).filter(
     (rule) =>
       !(
@@ -1768,6 +1986,15 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
       ),
   );
   db.gradeCourseRules.push(...nextRules);
+  db.gradeCourseCyclePairs = (db.gradeCourseCyclePairs || []).filter(
+    (pair) =>
+      !(
+        itemBelongsToTerm(pair, term) &&
+        pair.stageId === division.stageId &&
+        Number(pair.grade) === Number(grade.grade)
+      ),
+  );
+  db.gradeCourseCyclePairs.push(...nextCyclePairs);
   clearScheduleDraftForScope(db, division, grade, term);
   db.meta.updatedAt = new Date().toISOString();
   db.auditLogs.push({
@@ -1778,6 +2005,7 @@ export function updateGradeCourseRules(db, options = {}, actorAccount = null) {
     stageId: division.stageId,
     grade: grade.grade,
     enabledSubjectCount: nextRules.filter((rule) => rule.enabled).length,
+    cyclePairCount: nextCyclePairs.length,
     createdAt: db.meta.updatedAt,
   });
 
@@ -2198,6 +2426,168 @@ export function requiredScheduleLessonCount(config) {
       ),
     0,
   );
+}
+
+function isAlternatingCycleConfig(config) {
+  return Array.isArray(config?.cyclePairs) && config.cyclePairs.length > 0;
+}
+
+function alternatingCycleWeekStarts(config) {
+  const currentIndex = cycleWeekIndex(config.termStartDate, config.weekStart, 2);
+  const oddWeekStart = currentIndex === 0 ? config.weekStart : addDays(config.weekStart, -7);
+  return { oddWeekStart, evenWeekStart: addDays(oddWeekStart, 7) };
+}
+
+function configWithAlternatingPairsRemoved(config) {
+  const pairedSubjectIds = new Set((config.cyclePairs || []).flatMap((pair) => [pair.oddSubjectId, pair.evenSubjectId]));
+  const floorWeeklyLessons = (row) =>
+    pairedSubjectIds.has(row.subjectId || row.id)
+      ? Math.floor(Number(row.sourceWeeklyLessons ?? row.weeklyLessons ?? 0))
+      : Number(row.weeklyLessons || 0);
+  return {
+    ...config,
+    courseRules: (config.courseRules || []).map((rule) => ({
+      ...rule,
+      weeklyLessons: floorWeeklyLessons(rule),
+      classAlternating: false,
+    })),
+    subjects: (config.subjects || []).map((subject) => ({
+      ...subject,
+      weeklyLessons: floorWeeklyLessons(subject),
+      classAlternating: false,
+    })),
+  };
+}
+
+function projectAssignmentsToWeek(assignments, fromWeekStart, toWeekStart) {
+  const dayOffset = Math.round(
+    (new Date(`${toWeekStart}T00:00:00`).getTime() - new Date(`${fromWeekStart}T00:00:00`).getTime()) / 86400000,
+  );
+  return (assignments || []).map((assignment) => ({
+    ...assignment,
+    id: `PROJECTED-${assignment.id}`,
+    date: addDays(assignment.date, dayOffset),
+    sourceLabel: assignment.sourceLabel || "另一周已发布课表",
+  }));
+}
+
+function alternatingTaskForSubject(config, schoolClass, subject, pairId, cycleWeek) {
+  const teacherIds = Array.isArray(subject.classTeacherIds?.[schoolClass.id]) && subject.classTeacherIds[schoolClass.id].length
+    ? subject.classTeacherIds[schoolClass.id]
+    : subject.teacherIds || [];
+  const requiredRoomType = normalizeRoomType(subject.requiredRoomType, "homeroom");
+  return {
+    id: `CYCLE-${pairId}-${cycleWeek}-${schoolClass.id}-${subject.id}`,
+    classId: schoolClass.id,
+    className: schoolClass.name,
+    classIndex: Number(schoolClass.index || 0),
+    highClassCategory: schoolClass.highClassCategory || "",
+    scheduleTemplateKey: scheduleTemplateKeyForConfigClass(config, schoolClass),
+    room: schoolClass.room,
+    roomId: schoolClass.roomId,
+    subjectId: subject.id,
+    subjectName: subject.name,
+    subject,
+    teacherIds,
+    durationMinutes: subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+    requiredRoomType,
+    difficulty: 240 + (requiredRoomType === "homeroom" ? 0 : 100) - Math.min(teacherIds.length, 12) * 5,
+  };
+}
+
+function alternatingPairCandidates(oddConfig, evenConfig, oddState, evenState, pairTask, random) {
+  const oddCandidates = buildCandidateList(oddConfig, oddState, pairTask.oddTask, [], random);
+  const evenCandidates = buildCandidateList(evenConfig, evenState, pairTask.evenTask, [], random);
+  const evenByCell = new Map();
+  evenCandidates.forEach((candidate) => {
+    const key = `${candidate.slot.dayIndex}:${candidate.slot.period}`;
+    if (!evenByCell.has(key)) evenByCell.set(key, []);
+    evenByCell.get(key).push(candidate);
+  });
+  return oddCandidates.flatMap((oddCandidate) => {
+    const key = `${oddCandidate.slot.dayIndex}:${oddCandidate.slot.period}`;
+    return (evenByCell.get(key) || []).map((evenCandidate) => ({
+      oddCandidate,
+      evenCandidate,
+      score: oddCandidate.score + evenCandidate.score,
+    }));
+  }).sort((left, right) => left.score - right.score);
+}
+
+function placeAlternatingPairTasks(oddConfig, evenConfig, oddAssignments, evenAssignments, externalOdd, externalEven) {
+  const random = seededRandom(hashString(`${oddConfig.termId}:${oddConfig.divisionId}:${oddConfig.gradeId}:${oddConfig.weekStart}:cycle`));
+  const oddState = createSolverState(oddConfig, oddAssignments, externalOdd);
+  const evenState = createSolverState(evenConfig, evenAssignments, externalEven);
+  const pairTasks = [];
+  (oddConfig.classes || []).forEach((schoolClass) => {
+    (oddConfig.cyclePairs || []).forEach((pair) => {
+      const oddSubject = oddConfig.subjects.find((subject) => subject.id === pair.oddSubjectId);
+      const evenSubject = evenConfig.subjects.find((subject) => subject.id === pair.evenSubjectId);
+      if (!oddSubject || !evenSubject) return;
+      pairTasks.push({
+        pair,
+        classId: schoolClass.id,
+        oddTask: alternatingTaskForSubject(oddConfig, schoolClass, oddSubject, pair.id, "odd"),
+        evenTask: alternatingTaskForSubject(evenConfig, schoolClass, evenSubject, pair.id, "even"),
+      });
+    });
+  });
+
+  const remaining = [...pairTasks];
+  let nodes = 0;
+  const maxNodes = 16000;
+  function search() {
+    if (!remaining.length) return true;
+    if (nodes >= maxNodes) return false;
+    nodes += 1;
+    let selected = null;
+    remaining.forEach((task, index) => {
+      const candidates = alternatingPairCandidates(oddConfig, evenConfig, oddState, evenState, task, random);
+      if (!selected || candidates.length < selected.candidates.length) selected = { task, index, candidates };
+    });
+    if (!selected?.candidates.length) return false;
+    remaining.splice(selected.index, 1);
+    const branchLimit = Math.min(selected.candidates.length, 14);
+    for (let index = 0; index < branchLimit; index += 1) {
+      const choice = selected.candidates[index];
+      const oddAssignment = {
+        ...assignmentFromCandidate(oddConfig, selected.task.oddTask, choice.oddCandidate),
+        cycleWeek: "odd",
+        cyclePairId: selected.task.pair.id,
+        alternatingWithSubjectId: selected.task.evenTask.subjectId,
+      };
+      const evenAssignment = {
+        ...assignmentFromCandidate(evenConfig, selected.task.evenTask, choice.evenCandidate),
+        cycleWeek: "even",
+        cyclePairId: selected.task.pair.id,
+        alternatingWithSubjectId: selected.task.oddTask.subjectId,
+      };
+      oddState.assignments.push(oddAssignment);
+      evenState.assignments.push(evenAssignment);
+      markSolverAssignment(oddState, oddAssignment);
+      markSolverAssignment(evenState, evenAssignment);
+      if (search()) return true;
+      unmarkSolverAssignment(oddState, oddAssignment);
+      unmarkSolverAssignment(evenState, evenAssignment);
+      oddState.assignments.pop();
+      evenState.assignments.pop();
+    }
+    remaining.splice(selected.index, 0, selected.task);
+    return false;
+  }
+
+  if (!search()) {
+    const error = new Error("无法为所有单双周替换课程找到同一课位；请检查任课老师、教室或禁排规则");
+    error.statusCode = 400;
+    error.details = { unassignedCyclePairs: remaining.map((task) => ({ classId: task.classId, pairId: task.pair.id })) };
+    throw error;
+  }
+  return {
+    oddAssignments: oddState.assignments,
+    evenAssignments: evenState.assignments,
+    taskCount: pairTasks.length,
+    nodes,
+  };
 }
 
 function classParticipatesThisWeek(config, subject, classId) {
@@ -2973,7 +3363,10 @@ function normalizeLockedAssignment(config, assignment) {
     ...assignment,
     className: assignment.className || schoolClass?.name || assignment.classId,
     teacherName: assignment.teacherName || teacherName(config, assignment.teacherId),
-    durationMinutes: assignment.durationMinutes || subject?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+    durationMinutes: schedulePeriodDurationMinutes(
+      period,
+      assignment.durationMinutes || subject?.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+    ),
     dayIndex: dayIndexForDate(config, assignment.date),
     time: assignment.time || period?.time || "",
     scheduleTemplateKey: assignment.scheduleTemplateKey || scheduleTemplateKeyForConfigClass(config, schoolClass || assignment.classId),
@@ -3223,7 +3616,7 @@ function assignmentFromCandidate(config, task, candidate) {
     className: task.className,
     subjectId: task.subjectId,
     subjectName: task.subjectName,
-    durationMinutes: task.durationMinutes,
+    durationMinutes: schedulePeriodDurationMinutes(candidate.slot, task.durationMinutes),
     teacherId: candidate.teacherId,
     teacherName: teacherName(config, candidate.teacherId),
     date: candidate.slot.date,
@@ -4588,7 +4981,7 @@ function generateGreedyScheduleAssignments(config, options = {}) {
         className: schoolClass.name,
         subjectId: subject.id,
         subjectName: subject.name,
-        durationMinutes: subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+        durationMinutes: schedulePeriodDurationMinutes(best.slot, subject.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES),
         teacherId: best.teacherId,
         teacherName: teacherName(config, best.teacherId),
         date: best.slot.date,
@@ -4838,6 +5231,89 @@ function draftKey(config) {
   return `${config.termId}:${config.divisionId}:${config.gradeId}`;
 }
 
+// 排课草稿不是独立于基础数据的静态文件：班级、作息、课程规则、任课关系或教室
+// 任一项调整后，继续编辑旧草稿会把已失效的关系重新带回课表。生成时保存一份
+// 轻量指纹，后续发布/调整/重排时必须仍与当前基础数据一致。
+function canonicalizeScheduleConfig(value) {
+  if (Array.isArray(value)) return value.map((item) => canonicalizeScheduleConfig(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalizeScheduleConfig(value[key])]),
+  );
+}
+
+function scheduleConfigFingerprint(config) {
+  const basis = {
+    termId: config.termId,
+    termStartDate: config.termStartDate,
+    termEndDate: config.termEndDate,
+    divisionId: config.divisionId,
+    gradeId: config.gradeId,
+    weekStart: config.weekStart,
+    classes: (config.classes || []).map((item) => ({
+      id: item.id,
+      active: item.active !== false,
+      roomId: item.roomId || "",
+      classType: item.classType || "",
+      highClassCategory: item.highClassCategory || "",
+      homeroomTeacherId: item.homeroomTeacherId || "",
+    })),
+    rooms: (config.rooms || []).map((item) => ({
+      id: item.id,
+      roomType: item.roomType || "",
+      capacity: Number(item.capacity || 0),
+    })),
+    periods: config.periodTemplates || { default: config.periods || [] },
+    subjects: (config.subjects || []).map((item) => ({
+      id: item.id,
+      enabled: item.enabled !== false,
+      weeklyLessons: Number(item.weeklyLessons || 0),
+      durationMinutes: Number(item.durationMinutes || 0),
+      classTeacherIds: item.classTeacherIds || {},
+      classTeacherMeta: item.classTeacherMeta || {},
+      preferredDayPart: item.preferredDayPart || "",
+      allowConsecutive: item.allowConsecutive !== false,
+      maxConsecutivePerClass: Number(item.maxConsecutivePerClass || 0),
+      minPerClassPerDay: Number(item.minPerClassPerDay || 0),
+      maxPerClassPerDay: Number(item.maxPerClassPerDay || 0),
+      minWeeklyDays: Number(item.minWeeklyDays || 0),
+    })),
+    cyclePairs: (config.cyclePairs || []).map((pair) => ({
+      id: pair.id,
+      oddSubjectId: pair.oddSubjectId,
+      evenSubjectId: pair.evenSubjectId,
+    })),
+    constraints: config.constraints || [],
+    teacherRules: config.teacherRules || [],
+    teachers: (config.teachers || []).map((item) => ({
+      id: item.id,
+      status: item.status || "",
+      eligible: item.eligible !== false,
+      subjectId: item.subjectId || item.primarySubjectId || "",
+      teachableSubjectIds: item.teachableSubjectIds || [],
+    })),
+  };
+  const serialized = JSON.stringify(canonicalizeScheduleConfig(basis));
+  let hash = 2166136261;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash = Math.imul(hash ^ serialized.charCodeAt(index), 16777619);
+  }
+  return `schedule-config-v1:${(hash >>> 0).toString(16)}:${serialized.length}`;
+}
+
+function assertDraftConfigurationCurrent(draft, config) {
+  // 兼容上线前已存在的历史草稿；本次会清理已确认的旧演示草稿。之后新生成的
+  // 草稿都会带指纹并受到保护，不会因基础数据变化而被误发布或误调整。
+  if (!draft?.configurationFingerprint) return;
+  if (draft.configurationFingerprint === scheduleConfigFingerprint(config)) return;
+  const error = new Error("排课基础数据已变更，请重新生成课表草稿后再继续操作");
+  error.statusCode = 409;
+  error.code = "SCHEDULE_DRAFT_CONFIG_STALE";
+  throw error;
+}
+
 function scheduleScopeMatches(item, config) {
   return (
     termScopeMatches(config, item) &&
@@ -4875,6 +5351,32 @@ function bumpDraftRevision(draft) {
 
 function refreshDraftConflicts(db, config, draft) {
   if (!draft) return null;
+  if (draft.cycle?.mode === "alternating-week") {
+    const oddConfig = buildSchedulingConfig(db, {
+      termId: config.termId,
+      divisionId: config.divisionId,
+      gradeId: config.gradeId,
+      weekStart: draft.cycle.oddWeekStart,
+    });
+    const evenConfig = buildSchedulingConfig(db, {
+      termId: config.termId,
+      divisionId: config.divisionId,
+      gradeId: config.gradeId,
+      weekStart: draft.cycle.evenWeekStart,
+    });
+    const oddAssignments = (draft.assignments || []).filter((assignment) => assignment.cycleWeek !== "even");
+    const evenAssignments = (draft.assignments || []).filter((assignment) => assignment.cycleWeek === "even");
+    const externalOdd = globalTeacherBusyAssignments(db, oddConfig);
+    const externalEven = globalTeacherBusyAssignments(db, evenConfig);
+    draft.conflicts = [
+      ...validateScheduleConflicts(oddAssignments, { externalAssignments: externalOdd, config: oddConfig, checkCourseDistribution: false }),
+      ...validateScheduleConflicts(evenAssignments, { externalAssignments: externalEven, config: evenConfig, checkCourseDistribution: false }),
+    ];
+    draft.globalBusyCount = externalOdd.length + externalEven.length;
+    draft.updatedAt = draft.updatedAt || "";
+    draft.revision = draftRevision(draft);
+    return draft;
+  }
   const externalAssignments = globalTeacherBusyAssignments(db, config);
   draft.conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
   draft.globalBusyCount = externalAssignments.length;
@@ -4891,6 +5393,114 @@ export function findScheduleDraft(db, options = {}) {
   return refreshDraftConflicts(db, config, draft);
 }
 
+function generateAlternatingCycleSchedule(db, options, config) {
+  const { oddWeekStart, evenWeekStart } = alternatingCycleWeekStarts(config);
+  const oddConfig = buildSchedulingConfig(db, { ...options, weekStart: oddWeekStart });
+  const evenConfig = buildSchedulingConfig(db, { ...options, weekStart: evenWeekStart });
+  const oddBaseConfig = configWithAlternatingPairsRemoved(oddConfig);
+  const evenBaseConfig = configWithAlternatingPairsRemoved(evenConfig);
+  const externalOdd = globalTeacherBusyAssignments(db, oddConfig);
+  const externalEven = globalTeacherBusyAssignments(db, evenConfig);
+  // 先把双周已发布占用投影到单周求解空间。这样基础课位一开始就同时避开
+  // 两周的跨年级老师/教室占用，而不是生成后才发现双周冲突。
+  const externalEvenProjected = projectAssignmentsToWeek(externalEven, evenWeekStart, oddWeekStart);
+  const baseExternal = [...externalOdd, ...externalEvenProjected];
+  const precheck = buildSchedulePrecheck(oddBaseConfig, { externalAssignments: baseExternal });
+  assertSchedulePrecheckPasses(precheck);
+  const baseSolution = generateScheduleSolution(oddBaseConfig, {
+    externalAssignments: baseExternal,
+    precheck,
+  });
+  const baseRequiredCount = requiredScheduleLessonCount(oddBaseConfig);
+  if (baseSolution.assignments.length !== baseRequiredCount) {
+    const error = new Error(`基础课程尚有 ${baseRequiredCount - baseSolution.assignments.length} 节未排入两周课表，不能生成单双周替换课位`);
+    error.statusCode = 400;
+    error.details = { baseRequiredCount, generatedLessonCount: baseSolution.assignments.length };
+    throw error;
+  }
+
+  const oddBaseAssignments = baseSolution.assignments.map((assignment) => ({
+    ...assignment,
+    id: `CYCLE-ODD-BASE-${assignment.id}`,
+    cycleWeek: "odd",
+    cycleType: "fixed",
+  }));
+  const evenBaseAssignments = baseSolution.assignments.map((assignment) => ({
+    ...assignment,
+    id: `CYCLE-EVEN-BASE-${assignment.id}`,
+    date: addDays(assignment.date, 7),
+    cycleWeek: "even",
+    cycleType: "fixed",
+  }));
+  const oddBaseConflicts = validateScheduleConflicts(oddBaseAssignments, {
+    externalAssignments: externalOdd,
+    config: oddBaseConfig,
+    checkCourseDistribution: false,
+  });
+  const evenBaseConflicts = validateScheduleConflicts(evenBaseAssignments, {
+    externalAssignments: externalEven,
+    config: evenBaseConfig,
+    checkCourseDistribution: false,
+  });
+  if (oddBaseConflicts.length || evenBaseConflicts.length) {
+    const error = new Error("基础课程在单双周存在老师、班级或教室冲突，无法生成两周循环课表");
+    error.statusCode = 400;
+    error.details = { conflicts: [...oddBaseConflicts, ...evenBaseConflicts] };
+    throw error;
+  }
+
+  const paired = placeAlternatingPairTasks(
+    oddConfig,
+    evenConfig,
+    oddBaseAssignments,
+    evenBaseAssignments,
+    externalOdd,
+    externalEven,
+  );
+  const oddAssignments = paired.oddAssignments;
+  const evenAssignments = paired.evenAssignments;
+  const oddConflicts = validateScheduleConflicts(oddAssignments, {
+    externalAssignments: externalOdd,
+    config: oddConfig,
+    checkCourseDistribution: false,
+  });
+  const evenConflicts = validateScheduleConflicts(evenAssignments, {
+    externalAssignments: externalEven,
+    config: evenConfig,
+    checkCourseDistribution: false,
+  });
+  const assignments = [...oddAssignments, ...evenAssignments];
+  const requiredLessonCount = baseRequiredCount * 2 + paired.taskCount * 2;
+  return {
+    assignments,
+    conflicts: [...oddConflicts, ...evenConflicts],
+    precheck: {
+      ...precheck,
+      cycleMode: "alternating-week",
+      oddWeekStart,
+      evenWeekStart,
+      taskCount: requiredLessonCount,
+      requiredLessonCount,
+    },
+    requiredLessonCount,
+    globalBusyCount: externalOdd.length + externalEven.length,
+    cycle: {
+      mode: "alternating-week",
+      cycleWeeks: 2,
+      oddWeekStart,
+      evenWeekStart,
+      pairs: clone(config.cyclePairs || []),
+    },
+    solver: {
+      ...baseSolution.meta,
+      algorithm: `${baseSolution.meta?.algorithm || "constraint-search"}+alternating-week-pairs`,
+      alternatingPairTaskCount: paired.taskCount,
+      alternatingPairSearchNodes: paired.nodes,
+      description: "基础课程在单双周固定；半节课程在同一课位单周/双周替换，并同时校验两周冲突。",
+    },
+  };
+}
+
 export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   assertSchedulingAccess(db, actorAccount, options, "生成");
   ensureSchedulingStore(db);
@@ -4900,13 +5510,14 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
   assertDraftRevision(previousDraft, options);
   assertTeacherAssignmentsComplete(config);
   const externalAssignments = globalTeacherBusyAssignments(db, config);
-  const precheck = buildSchedulePrecheck(config, { externalAssignments });
-  assertSchedulePrecheckPasses(precheck);
-  const solution = generateScheduleSolution(config, { externalAssignments, precheck });
+  const cycleResult = isAlternatingCycleConfig(config) ? generateAlternatingCycleSchedule(db, options, config) : null;
+  const precheck = cycleResult?.precheck || buildSchedulePrecheck(config, { externalAssignments });
+  if (!cycleResult) assertSchedulePrecheckPasses(precheck);
+  const solution = cycleResult || generateScheduleSolution(config, { externalAssignments, precheck });
   const assignments = solution.assignments;
   const conflicts = solution.conflicts || validateScheduleConflicts(assignments, { externalAssignments, config });
   const now = formatDateTimeMinute();
-  const requiredCount = requiredScheduleLessonCount(config);
+  const requiredCount = cycleResult?.requiredLessonCount || requiredScheduleLessonCount(config);
   const draft = {
     id: `DRAFT-${draftKey(config)}-${Date.now()}`,
     status: "draft",
@@ -4929,9 +5540,11 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
     publishedAt: "",
     assignments,
     conflicts,
-    globalBusyCount: externalAssignments.length,
+    globalBusyCount: cycleResult?.globalBusyCount ?? externalAssignments.length,
     precheck,
-    solver: solution.meta,
+    solver: cycleResult?.solver || solution.meta,
+    cycle: cycleResult?.cycle || null,
+    configurationFingerprint: scheduleConfigFingerprint(config),
     lockedCount: 0,
     publishedLessonIds: [],
     generatedByAccountId: actorAccount?.id || "",
@@ -4952,9 +5565,9 @@ export function generateScheduleDraft(db, options = {}, actorAccount = null) {
     gradeId: config.gradeId,
     assignmentCount: assignments.length,
     conflictCount: conflicts.length,
-    solverAlgorithm: solution.meta.algorithm,
-    solverScore: solution.meta.score,
-    solverAttemptsRun: solution.meta.attemptsRun,
+    solverAlgorithm: (cycleResult?.solver || solution.meta).algorithm,
+    solverScore: (cycleResult?.solver || solution.meta).score,
+    solverAttemptsRun: (cycleResult?.solver || solution.meta).attemptsRun,
     createdAt: db.meta.updatedAt,
   });
 
@@ -4991,6 +5604,10 @@ function lessonFromAssignment(draft, assignment, scheduleVersionId = "") {
     period: assignment.period,
     scheduleTemplateKey: assignment.scheduleTemplateKey || "default",
     highClassCategory: assignment.highClassCategory || "",
+    cycleWeek: assignment.cycleWeek || "",
+    cycleType: assignment.cycleType || "",
+    cyclePairId: assignment.cyclePairId || "",
+    alternatingWithSubjectId: assignment.alternatingWithSubjectId || "",
   };
 }
 
@@ -5005,47 +5622,55 @@ function nonRegularLessonsFromPeriods(config, draft, scheduleVersionId = "") {
     : [{ key: "default", label: "", classes: config.classes || [], periods: config.periods || [] }];
   const lifeTeachers = (config.nonRegularTeachers || []).filter((teacher) => teacher.isLifeTeacher);
 
-  const lessonFromPeriod = (template, period, dayIndex, responsibility = {}) => ({
-    id: `NONREG-${draft.id}-${template.key}-${addDays(config.weekStart, dayIndex)}-${period.period}${responsibility.idSuffix || ""}`,
-    teacherId: responsibility.teacherId || period.responsibleTeacherId || "",
-    responsibleTeacherId: responsibility.teacherId || period.responsibleTeacherId || "",
-    responsibleTeacherIds: responsibility.teacherIds || [responsibility.teacherId || period.responsibleTeacherId].filter(Boolean),
-    responsibleRole: period.responsibleRole || "",
-    responsibleTeacherName: responsibility.teacherName || period.responsibleTeacherName || "",
-    classId: responsibility.classId || "",
-    className:
-      responsibility.className ||
-      (template.classes || []).map((schoolClass) => schoolClass.name).join("、") ||
-      `${draft.gradeName}${template.label}`,
-    subjectId: "",
-    subjectName: period.content || nonRegularPeriodDefaultContent(period.type),
-    durationMinutes:
-      Math.max((timeToMinutes(period.endTime) || 0) - (timeToMinutes(period.startTime) || 0), 0) ||
-      DEFAULT_LESSON_DURATION_MINUTES,
-    roomId: "",
-    room: "",
-    date: addDays(config.weekStart, dayIndex),
-    time: period.time,
-    type: period.type,
-    units: 0,
-    status: "scheduled",
-    source: "backend-nonregular",
-    nonPayable: true,
-    scheduleImpact: false,
-    nonRegular: true,
-    schedulingDraftId: draft.id,
-    scheduleVersionId,
-    termId: draft.termId,
-    termName: draft.termName,
-    divisionId: draft.divisionId,
-    gradeId: draft.gradeId,
-    stageId: draft.stageId,
-    grade: draft.grade,
-    period: period.period,
-    scheduleTemplateKey: template.key,
-    highClassCategory: config.stageId === "high" ? template.key : "",
-    dayIndex,
-  });
+  const lessonFromPeriod = (template, period, dayIndex, responsibility = {}) => {
+    const payable = Boolean(period.nonRegularPayItemId);
+    return {
+      id: `NONREG-${draft.id}-${template.key}-${addDays(config.weekStart, dayIndex)}-${period.period}${responsibility.idSuffix || ""}`,
+      teacherId: responsibility.teacherId || period.responsibleTeacherId || "",
+      responsibleTeacherId: responsibility.teacherId || period.responsibleTeacherId || "",
+      responsibleTeacherIds: responsibility.teacherIds || [responsibility.teacherId || period.responsibleTeacherId].filter(Boolean),
+      responsibleRole: period.responsibleRole || "",
+      responsibleTeacherName: responsibility.teacherName || period.responsibleTeacherName || "",
+      classId: responsibility.classId || "",
+      className:
+        responsibility.className ||
+        (template.classes || []).map((schoolClass) => schoolClass.name).join("、") ||
+        `${draft.gradeName}${template.label}`,
+      subjectId: "",
+      subjectName: period.content || nonRegularPeriodDefaultContent(period.type),
+      durationMinutes:
+        Math.max((timeToMinutes(period.endTime) || 0) - (timeToMinutes(period.startTime) || 0), 0) ||
+        DEFAULT_LESSON_DURATION_MINUTES,
+      roomId: "",
+      room: "",
+      date: addDays(config.weekStart, dayIndex),
+      time: period.time,
+      type: period.type,
+      units: payable ? 1 : 0,
+      status: "scheduled",
+      source: "backend-nonregular",
+      nonPayable: !payable,
+      // 可计薪的固定日程与正课一样占用老师时间，避免跨年级或同日程重复安排。
+      scheduleImpact: payable,
+      nonRegular: true,
+      nonRegularPayItemId: payable ? period.nonRegularPayItemId : "",
+      nonRegularPayItemName: payable ? period.nonRegularPayItemName : "",
+      nonRegularPayRate: payable ? Number(period.nonRegularPayRate || 0) : 0,
+      nonRegularPayGradeId: payable ? period.nonRegularPayGradeId || "" : "",
+      schedulingDraftId: draft.id,
+      scheduleVersionId,
+      termId: draft.termId,
+      termName: draft.termName,
+      divisionId: draft.divisionId,
+      gradeId: draft.gradeId,
+      stageId: draft.stageId,
+      grade: draft.grade,
+      period: period.period,
+      scheduleTemplateKey: template.key,
+      highClassCategory: config.stageId === "high" ? template.key : "",
+      dayIndex,
+    };
+  };
 
   return templates.flatMap((template) =>
     (template.periods || [])
@@ -5066,6 +5691,18 @@ function nonRegularLessonsFromPeriods(config, draft, scheduleVersionId = "") {
           }
           if (period.responsibleRole === "life_teacher") {
             const teacherIds = lifeTeachers.map((teacher) => teacher.id);
+            // 公共生活日程原来是一条广播事件。若标记计薪，必须拆成每位生活老师
+            // 各一条课次，才能在工资中准确列出人、节数与金额。
+            if (period.nonRegularPayItemId) {
+              return lifeTeachers.map((teacher) =>
+                lessonFromPeriod(template, period, dayIndex, {
+                  idSuffix: `-${teacher.id}`,
+                  teacherId: teacher.id,
+                  teacherIds: [teacher.id],
+                  teacherName: teacher.name,
+                }),
+              );
+            }
             return [
               lessonFromPeriod(template, period, dayIndex, {
                 teacherId: teacherIds[0] || "",
@@ -5078,6 +5715,86 @@ function nonRegularLessonsFromPeriods(config, draft, scheduleVersionId = "") {
         }),
       ),
   );
+}
+
+function cycleAssignmentsForPublication(draft, config) {
+  const cycle = draft.cycle || {};
+  const oddTemplate = (draft.assignments || []).filter((assignment) => assignment.cycleWeek !== "even");
+  const evenTemplate = (draft.assignments || []).filter((assignment) => assignment.cycleWeek === "even");
+  const templates = { odd: oddTemplate, even: evenTemplate };
+  const startDate = draft.weekStart || cycle.oddWeekStart || config.weekStart;
+  const endDate = config.termEndDate || startDate;
+  const cycleAnchor = cycle.oddWeekStart || config.weekStart;
+  const cycleIndexAt = (weekStart) =>
+    Math.max(
+      0,
+      Math.floor((new Date(`${weekStart}T00:00:00`).getTime() - new Date(`${cycleAnchor}T00:00:00`).getTime()) / (7 * 86400000)),
+    );
+  const weekStarts = [];
+  for (let weekStart = startDate; weekStart <= endDate; weekStart = addDays(weekStart, 7)) {
+    weekStarts.push(weekStart);
+  }
+  const assignments = weekStarts.flatMap((weekStart) => {
+    const cycleIndex = cycleIndexAt(weekStart);
+    const cycleWeek = cycleIndex % 2 === 0 ? "odd" : "even";
+    const templateStart = cycleWeek === "odd" ? cycle.oddWeekStart : cycle.evenWeekStart;
+    const weekOffsetDays = Math.round(
+      (new Date(`${weekStart}T00:00:00`).getTime() - new Date(`${templateStart}T00:00:00`).getTime()) / 86400000,
+    );
+    return (templates[cycleWeek] || []).flatMap((assignment) => {
+      const date = addDays(assignment.date, weekOffsetDays);
+      return date >= startDate && date <= endDate
+        ? [{ ...assignment, id: `${assignment.id}-W${cycleIndex + 1}`, date, cycleWeek }]
+        : [];
+    });
+  });
+  return { assignments, weekStarts, startDate, endDate };
+}
+
+function globalTeacherBusyAssignmentsForRange(db, config, startDate, endDate, { excludeLessonIds = [] } = {}) {
+  const excluded = new Set((excludeLessonIds || []).map(String));
+  const publishedAssignments = (db.lessonInstances || [])
+    .filter((lesson) => !excluded.has(String(lesson.id)))
+    .filter((lesson) => termScopeMatches(config, lesson))
+    .filter((lesson) => lesson.date >= startDate && lesson.date <= endDate)
+    .filter((lesson) => !currentScope(config, lesson))
+    .filter((lesson) => lesson.status !== "cancelled")
+    .filter((lesson) => lesson.scheduleImpact !== false)
+    .map((lesson) => lessonAsExternalAssignment(db, lesson))
+    .filter(Boolean);
+  const lockedDraftAssignments = (db.scheduleDrafts || [])
+    .filter((otherDraft) => termScopeMatches(config, otherDraft))
+    .filter((otherDraft) => !currentScope(config, otherDraft))
+    .filter((otherDraft) => otherDraft.status !== "published")
+    .flatMap((otherDraft) =>
+      (otherDraft.assignments || [])
+        .filter((assignment) => assignment.locked)
+        .filter((assignment) => assignment.date >= startDate && assignment.date <= endDate)
+        .map((assignment) => draftAssignmentAsExternal(otherDraft, assignment)),
+    );
+  return [...publishedAssignments, ...lockedDraftAssignments];
+}
+
+function paidNonRegularAssignments(lessons = []) {
+  return lessons
+    .filter((lesson) => lesson?.nonRegular && lesson.nonPayable !== true)
+    .map((lesson) => ({
+      id: `PAYABLE-${lesson.id}`,
+      classId: lesson.classId || `NONREG-${lesson.id}`,
+      className: lesson.className || "非正课活动",
+      subjectId: `nonregular-${lesson.nonRegularPayItemId || lesson.id}`,
+      subjectName: lesson.nonRegularPayItemName || lesson.subjectName || "计薪活动",
+      teacherId: lesson.teacherId,
+      teacherName: lesson.responsibleTeacherName || "负责老师",
+      durationMinutes: lesson.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+      date: lesson.date,
+      dayIndex: lesson.dayIndex,
+      period: lesson.period,
+      time: lesson.time,
+      roomId: "",
+      room: "",
+      nonRegular: true,
+    }));
 }
 
 function assignmentVersionSignature(assignment) {
@@ -5189,6 +5906,9 @@ function createPublishedScheduleVersion(db, config, draft, lessons, actorAccount
     stageId: config.stageId,
     grade: config.grade,
     weekStart: config.weekStart,
+    publicationStartDate: draft.publicationStartDate || draft.weekStart,
+    publicationEndDate: draft.publicationEndDate || addDays(draft.weekStart, 6),
+    cycle: clone(draft.cycle || null),
     draftId: draft.id,
     publishedAt: now,
     publishedByAccountId: actorAccount?.id || "",
@@ -5220,6 +5940,7 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     throw error;
   }
   assertDraftRevision(draft, options);
+  assertDraftConfigurationCurrent(draft, config);
 
   if (!draft.assignments?.length) {
     const error = new Error("排课草稿为空，不能发布");
@@ -5227,7 +5948,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     throw error;
   }
 
-  const requiredCount = requiredScheduleLessonCount(config);
+  const alternatingCycle = draft.cycle?.mode === "alternating-week";
+  const requiredCount = alternatingCycle ? Number(draft.requiredLessonCount || 0) : requiredScheduleLessonCount(config);
   if (Number(draft.requiredLessonCount || 0) !== requiredCount) {
     const error = new Error("课程规则已变更，请重新生成排课草稿后再发布");
     error.statusCode = 400;
@@ -5245,8 +5967,37 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
     throw error;
   }
 
-  const externalAssignments = globalTeacherBusyAssignments(db, config);
-  const conflicts = validateScheduleConflicts(draft.assignments || [], { externalAssignments, config });
+  const scheduleVersionId = `SVER-${draftKey(config)}-${Date.now()}`;
+  const cyclePublication = alternatingCycle ? cycleAssignmentsForPublication(draft, config) : null;
+  const publicationAssignments = cyclePublication?.assignments || draft.assignments || [];
+  const nonRegularLessons = alternatingCycle
+    ? cyclePublication.weekStarts.flatMap((weekStart) =>
+        nonRegularLessonsFromPeriods(
+          buildSchedulingConfig(db, {
+            termId: config.termId,
+            divisionId: config.divisionId,
+            gradeId: config.gradeId,
+            weekStart,
+          }),
+          draft,
+          scheduleVersionId,
+        ),
+      )
+    : nonRegularLessonsFromPeriods(config, draft, scheduleVersionId);
+  const payableNonRegularLessons = nonRegularLessons.filter((lesson) => lesson.nonPayable !== true);
+  const missingResponsible = payableNonRegularLessons.find((lesson) => !lesson.teacherId);
+  if (missingResponsible) {
+    const error = new Error(`计薪活动“${missingResponsible.nonRegularPayItemName || missingResponsible.subjectName}”缺少可用负责人，请先维护对应老师或岗位`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const externalAssignments = alternatingCycle
+    ? globalTeacherBusyAssignmentsForRange(db, config, cyclePublication.startDate, cyclePublication.endDate)
+    : globalTeacherBusyAssignments(db, config);
+  const conflicts = validateScheduleConflicts(
+    [...publicationAssignments, ...paidNonRegularAssignments(payableNonRegularLessons)],
+    { externalAssignments, config, checkCourseDistribution: !alternatingCycle },
+  );
   if (conflicts.length) {
     draft.conflicts = conflicts;
     draft.globalBusyCount = externalAssignments.length;
@@ -5257,10 +6008,10 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   }
 
   const now = formatDateTimeMinute();
-  const scheduleVersionId = `SVER-${draftKey(config)}-${Date.now()}`;
-  const regularLessons = draft.assignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
-  const nonRegularLessons = nonRegularLessonsFromPeriods(config, draft, scheduleVersionId);
+  const regularLessons = publicationAssignments.map((assignment) => lessonFromAssignment(draft, assignment, scheduleVersionId));
   const lessons = [...regularLessons, ...nonRegularLessons];
+  const publicationStartDate = cyclePublication?.startDate || draft.weekStart;
+  const publicationEndDate = cyclePublication?.endDate || addDays(draft.weekStart, 6);
   db.lessonInstances = db.lessonInstances
     .filter(
       (lesson) =>
@@ -5269,8 +6020,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
           termScopeMatches(config, lesson) &&
           lesson.divisionId === draft.divisionId &&
           lesson.gradeId === draft.gradeId &&
-          lesson.date >= draft.weekStart &&
-          lesson.date <= addDays(draft.weekStart, 6)
+          lesson.date >= publicationStartDate &&
+          lesson.date <= publicationEndDate
         ),
     )
     .concat(lessons);
@@ -5280,6 +6031,8 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
   draft.publishedAt = now;
   draft.conflicts = [];
   draft.globalBusyCount = externalAssignments.length;
+  draft.publicationStartDate = publicationStartDate;
+  draft.publicationEndDate = publicationEndDate;
   draft.publishedLessonIds = lessons.map((lesson) => lesson.id);
   draft.publishedByAccountId = actorAccount?.id || "";
   draft.scheduleVersionId = scheduleVersionId;
@@ -5292,7 +6045,9 @@ export function publishScheduleDraft(db, options = {}, actorAccount = null) {
         .flatMap((lesson) => [lesson.teacherId, ...(lesson.responsibleTeacherIds || [])])
         .filter(Boolean),
       title: `${draft.termName}${draft.divisionName}${draft.gradeName}课表已发布`,
-      text: `${draft.termName}自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
+      text: alternatingCycle
+        ? `${draft.termName}起自 ${publicationStartDate} 的单双周循环课表已发布到老师端，请按单周／双周课表完成签入签出。`
+        : `${draft.termName}自然周 ${draft.weekStart} 起的课表已发布到老师端，请按课表完成签入签出。`,
       level: "info",
     },
     actorAccount,
@@ -5348,8 +6103,8 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
           termScopeMatches(config, lesson) &&
           lesson.divisionId === targetVersion.divisionId &&
           lesson.gradeId === targetVersion.gradeId &&
-          lesson.date >= targetVersion.weekStart &&
-          lesson.date <= addDays(targetVersion.weekStart, 6)
+          lesson.date >= (targetVersion.publicationStartDate || targetVersion.weekStart) &&
+          lesson.date <= (targetVersion.publicationEndDate || addDays(targetVersion.weekStart, 6))
         ),
     )
     .concat(lessons);
@@ -5380,16 +6135,22 @@ export function rollbackScheduleVersion(db, options = {}, actorAccount = null) {
     divisionName: targetVersion.divisionName,
     gradeName: targetVersion.gradeName,
     weekStart: targetVersion.weekStart,
-    requiredLessonCount: requiredScheduleLessonCount(config),
+    requiredLessonCount: targetVersion.cycle?.mode === "alternating-week"
+      ? Number(targetVersion.assignmentCount || 0)
+      : requiredScheduleLessonCount(config),
     generatedLessonCount: targetVersion.assignmentCount,
     unassignedCount: 0,
     generatedAt: targetVersion.publishedAt,
     confirmedAt: now,
     publishedAt: now,
     assignments: clone(targetVersion.assignments || []),
+    cycle: clone(targetVersion.cycle || null),
+    publicationStartDate: targetVersion.publicationStartDate || targetVersion.weekStart,
+    publicationEndDate: targetVersion.publicationEndDate || addDays(targetVersion.weekStart, 6),
     conflicts: [],
     globalBusyCount: 0,
     solver: { algorithm: "rollback", status: "restored", scheduleVersionId: targetVersion.id },
+    configurationFingerprint: scheduleConfigFingerprint(config),
     lockedCount: (targetVersion.assignments || []).filter((assignment) => assignment.locked).length,
     publishedLessonIds: lessons.map((lesson) => lesson.id),
     publishedByAccountId: targetVersion.publishedByAccountId || "",
@@ -5548,7 +6309,7 @@ function validatePublishedLessonChange(db, config, lesson, next, { excludeLesson
     className: lesson.className,
     subjectId: lesson.subjectId,
     subjectName: lesson.subjectName,
-    durationMinutes: lesson.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES,
+    durationMinutes: schedulePeriodDurationMinutes(period, lesson.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES),
     teacherId: next.teacherId,
     teacherName: teacherName(config, next.teacherId),
     date: next.date,
@@ -5994,9 +6755,15 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
     throw error;
   }
   assertDraftRevision(draft, options);
+  assertDraftConfigurationCurrent(draft, config);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表暂不允许直接调整，请重新生成草稿或走调课流程");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (draft.cycle?.mode === "alternating-week") {
+    const error = new Error("单双周循环课表不能只调整其中一周；请修改课程配对、任课老师或约束后重新生成，系统会同时校验两周");
     error.statusCode = 400;
     throw error;
   }
@@ -6105,10 +6872,7 @@ export function adjustScheduleAssignment(db, options = {}, actorAccount = null) 
 
   assignment.teacherId = nextTeacherId;
   assignment.teacherName = teacherName(config, nextTeacherId);
-  assignment.durationMinutes =
-    config.subjects.find((subject) => subject.id === assignment.subjectId)?.durationMinutes ||
-    assignment.durationMinutes ||
-    DEFAULT_LESSON_DURATION_MINUTES;
+  assignment.durationMinutes = schedulePeriodDurationMinutes(period, assignment.durationMinutes || DEFAULT_LESSON_DURATION_MINUTES);
   assignment.date = nextDate;
   assignment.dayIndex = nextDayIndex;
   assignment.period = period.period;
@@ -6167,9 +6931,15 @@ export function setScheduleAssignmentLock(db, options = {}, actorAccount = null)
     throw error;
   }
   assertDraftRevision(draft, options);
+  assertDraftConfigurationCurrent(draft, config);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表不能修改锁定状态");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (draft.cycle?.mode === "alternating-week") {
+    const error = new Error("单双周循环课表不支持单节锁定；请修改课程配对或约束后重新生成，确保两周始终同步");
     error.statusCode = 400;
     throw error;
   }
@@ -6277,9 +7047,15 @@ export function regenerateUnlockedScheduleAssignments(db, options = {}, actorAcc
     throw error;
   }
   assertDraftRevision(draft, options);
+  assertDraftConfigurationCurrent(draft, config);
 
   if (draft.status === "published") {
     const error = new Error("已发布课表不能重新排未锁定课程");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (draft.cycle?.mode === "alternating-week") {
+    const error = new Error("单双周循环课表请整体重新生成，不能只重排其中一周的未锁定课程");
     error.statusCode = 400;
     throw error;
   }

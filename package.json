@@ -12,6 +12,7 @@
     "test:high-timetable": "node tests/high-school-multi-timetable.test.js",
     "test:multi-subject": "node tests/multi-subject-scheduling.test.js",
     "test:fractional-cycle": "node tests/fractional-course-cycle.test.js",
+    "test:alternating-cycle": "node tests/alternating-course-pairs.test.js",
     "test:term-lifecycle": "node tests/term-lifecycle.test.js",
     "test:academic-calendar": "node tests/academic-calendar.test.js",
     "load-test": "node scripts/load-test.js",

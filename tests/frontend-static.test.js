@@ -192,9 +192,12 @@ const lines = app.split("\n");
   assert.match(app, /quickLoginDemo\("teacher_primary"\)/, "快捷键应登录演示老师账号");
   assert.match(
     app,
-    /username === "finance"[\s\S]{0,250}fy260907-0019[\s\S]{0,250}本人当前密码/,
-    "总校财务接管后快捷入口只能填正式用户名，不能再用旧 Demo 凭据假登录",
+    /async function quickLoginDemo\(username\)[\s\S]{0,700}const password = "123456"[\s\S]{0,350}loginUsername[\s\S]{0,180}await authenticate\(loginUsername, password\)/,
+    "本地总校财务快捷入口应映射真实工号、自动填写默认测试密码并登录",
   );
+  assert.match(app, /username === "finance"[\s\S]{0,120}fy260907-0019/, "总校财务快捷入口应映射名册接管后的正式工号");
+  assert.doesNotMatch(app, /本人当前密码/, "本地快捷入口不应再遗留手动输入密码分支");
+  assert.doesNotMatch(html, /总校财务（已接管）/, "总校财务快捷按钮应明确为可一键登录的本地测试账号");
   assert.doesNotMatch(
     app,
     /const demoAccepted = authenticateDemo\(/,
@@ -222,6 +225,18 @@ const lines = app.split("\n");
     /lesson\.status === "cancelled" \? statusTag\(lesson\.status\) : ""/,
     "老师课表只应给已取消课次显示状态标签",
   );
+}
+
+// ---------------------------------------------------------------------------
+// 6.1 双周课位：修改课时后应即时补出配对行，不能要求先失败一次才能保存
+// ---------------------------------------------------------------------------
+{
+  const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
+  assert.match(html, /id="newCourseWeekly"[^>]*step="0\.5"/, "新增课程应允许直接录入 2.5、3.5 等半节课时");
+  assert.match(app, /function refreshAlternatingCoursePairEditor\(/, "修改周课时后应刷新单双周配对区");
+  assert.match(app, /event\.target\.closest\("\[data-course-rule-weekly\]"\)[\s\S]{0,120}refreshAlternatingCoursePairEditor\(\)/, "周课时输入变化应即时补出配对行");
+  assert.match(app, /function validateAlternatingCoursePairs\(/, "保存前应校验所有带 .5 课时课程已完整配对");
+  assert.match(app, /两门带 \.5 课时的课程共用同一个课位/, "界面说明应覆盖 2.5、3.5 等全部半节课时组合");
 }
 
 // ---------------------------------------------------------------------------
@@ -392,10 +407,10 @@ const lines = app.split("\n");
   const server = await fs.readFile(new URL("../server/server.js", import.meta.url), "utf-8");
   assert.match(
     app,
-    /role === "finance" && \["hrOrg", "payrollConfig"\]\.includes\(viewName\) && !canExportAllPayrollDetails\(\)/,
+    /role === "finance" && \["hrOrg", "payrollConfig"\]\.includes\(viewName\) && !canManagePayrollConfig\(\)/,
     "学部财务的视图权限应隐藏组织与岗位、薪资配置",
   );
-  assert.match(app, /if \(!backendMode\(\) \|\| !canExportAllPayrollDetails\(\)\) return;/, "学部财务不应请求薪资配置接口");
+  assert.match(app, /if \(!backendMode\(\) \|\| !canManagePayrollConfig\(\)\) return;/, "学部财务不应请求薪资配置接口");
   assert.match(server, /仅总校财务可以查看薪资配置/, "后端应拒绝学部财务读取薪资配置");
   assert.match(server, /仅总校财务可以维护薪资配置/, "后端应拒绝学部财务修改薪资配置");
   assert.match(server, /仅总校财务可以查看组织与岗位/, "后端应拒绝学部财务读取组织与岗位");
@@ -616,7 +631,7 @@ const lines = app.split("\n");
 }
 
 // ---------------------------------------------------------------------------
-// 27. 月度教师考勤由学部主任上传；小学、初中、高中按已确认制度进入工资重算
+// 27. 月度考勤由学部主任上传；四个学部统一按制度进入工资重算
 // ---------------------------------------------------------------------------
 {
   const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
@@ -628,39 +643,101 @@ const lines = app.split("\n");
   assert.match(html, /data-view="attendanceManagement" data-role="division_head,system_admin,principal"/, "考勤入口应给学部主任上传、校长与行政查看");
   assert.match(html, /id="attendanceTemplateDownload"/, "考勤页应提供模板下载入口");
   assert.match(html, /id="attendanceUploadFile"/, "考勤页应提供 .xlsx 上传控件");
-  assert.match(html, /按各学部已确认的考勤规则纳入未锁定工资核算/, "考勤页说明不应再误称所有学部都只留存、不影响工资");
+  assert.match(html, /统一按考核工资扣减，月度最多 20%/, "考勤页应说明全校统一考勤扣减口径");
   assert.doesNotMatch(html, /上传本学部老师的四次打卡记录。系统先校验和留存，暂不自动影响工资核算/, "考勤页不应保留已过时的四次打卡说明");
   assert.match(app, /function uploadAttendanceWorkbook\(/, "前端应提交月度考勤表");
-  assert.match(app, /小学部已启用考勤扣款/, "小学部入口应明确已启用考勤扣款规则");
-  assert.match(app, /初中部已启用迟到／早退、旷工考勤规则/, "初中部入口应明确已启用考勤规则");
-  assert.match(app, /高中部请使用专用考勤结果表/, "高中部入口应提示使用专用结果表");
-  assert.match(app, /attendanceTemplateForStage/, "考勤模板应随学部自动切换");
+  assert.match(app, /已按全校统一口径切换/, "考勤入口应明确说明已切换为全校统一口径");
+  assert.match(app, /全校统一月度考勤上传模板\.xlsx/, "考勤入口应统一下载同一份模板");
+  assert.match(app, /月度最多 20%/, "考勤入口应提示月度扣减上限");
+  assert.match(app, /税前应发不低于最低工资/, "考勤入口应提示最低工资保护");
   assert.match(server, /url\.pathname === "\/api\/attendance\/uploads"/, "服务端应提供考勤上传与读取接口");
   assert.match(server, /requireAuth\(req, res, db, \["division_head", "system_admin"\]\)/, "上传接口只允许学部主任或行政管理账号");
   assert.match(attendance, /只能\$\{action\}本学部考勤数据/, "后端必须按学部收敛考勤访问范围");
-  assert.match(attendance, /PRIMARY_ATTENDANCE_POLICY/, "考勤模块应声明小学部已确认制度");
-  assert.match(attendance, /limit: "07:45"/, "小学部上午迟到阈值应为 7:45");
-  assert.match(attendance, /limit: "14:15"/, "小学部下午迟到阈值应为 14:15");
-  assert.match(attendance, /lateRate: 30/, "小学部迟到应按 30 元／次处理");
-  assert.match(attendance, /missingPunchRate: 50/, "小学部未补卡应按 50 元／次处理");
-  assert.match(attendance, /absenceRate: 200/, "小学部旷工应按 200 元／天处理");
-  assert.match(attendance, /PRIMARY_MAKEUP_HEADERS/, "小学部模板应要求逐次明确补卡状态");
-  assert.match(attendance, /MIDDLE_ATTENDANCE_POLICY/, "考勤模块应保留初中部已确认制度");
-  assert.match(attendance, /limit: "07:50"/, "初中部上午迟到阈值应来自打卡通知");
-  assert.match(attendance, /limit: "17:25"/, "初中部下午早退阈值应来自打卡通知");
-  assert.match(attendance, /absenceRate: 300/, "初中部旷工应按 300 元／天处理");
-  assert.match(attendance, /HIGH_ATTENDANCE_POLICY/, "考勤模块应声明高中部已确认制度");
-  assert.match(attendance, /minorOccurrenceRate: 0\.02/, "高中部轻微迟到／未签退应从第三次起按考核工资 2% 处理");
-  assert.match(attendance, /seriousOccurrenceRate: 0\.03/, "高中部超时迟到／早退应按考核工资 3% 处理");
-  assert.match(attendance, /multipleMissedClassRate: 0\.15/, "高中部两节及以上旷课应按考核工资 15% 处理");
-  assert.match(attendance, /absenceWorkDailyFraction: 1 \/ 22/, "高中部旷工应按当月工资总额 1/22 处理");
-  assert.match(payroll, /当月工资总额 1\/22/, "工资单应展示高中部旷工的日工资口径");
-  assert.match(payroll, /componentName/, "工资单应按学部单列对应的考勤扣款");
-  assert.match(payroll, /未补卡/, "工资单应在考勤扣款中列出未补卡扣款");
+  assert.match(attendance, /UNIFIED_ATTENDANCE_POLICY/, "考勤模块应声明全校统一制度");
+  assert.match(attendance, /minorMax: 10, generalMax: 30/, "10 分钟及 30 分钟边界应精确写入规则");
+  assert.match(attendance, /minor: \{ 1: 0\.03, 2: 0\.08 \}/, "轻微违纪应按统一档位计算");
+  assert.match(attendance, /general: \{ 1: 0\.1, 2: 0\.18, 3: 0\.2 \}/, "一般违纪应按统一档位计算");
+  assert.match(attendance, /monthlyCap: 0\.2/, "考勤扣减应有 20% 月度上限");
+  assert.match(attendance, /UNIFIED_ATTENDANCE_HEADERS/, "上传表应要求统一考勤事实列");
+  assert.match(attendance, /"迟到分钟"/, "统一模板应含迟到分钟列");
+  assert.match(attendance, /"免责认定"/, "统一模板应含免责认定列");
+  assert.match(payroll, /全校统一考勤只可扣减“考核工资”/, "工资单不得再按旧学部固定金额扣款");
+  assert.match(payroll, /minimumWage/, "工资单应依据最低工资作保护");
+  assert.match(payroll, /Math\.min\(requestedDeduction, maximumAllowedDeduction\)/, "最低工资保护应实际限制扣款金额");
   assert.match(storage, /attendanceSettlementForTeacher/, "工资预览应读取当前版本考勤结算事实");
   assert.match(storage, /attendanceUploads: \[\]/, "数据库应保存考勤上传版本");
   assert.match(storage, /attendancePunchRecords: \[\]/, "数据库应保存标准化打卡明细");
   assert.match(styles, /\.attendance-management-toolbar/, "考勤上传区域应有独立布局样式");
+}
+
+// ---------------------------------------------------------------------------
+// 28. 小学作息按完整周视图维护，不再要求逐条理解星期复选框
+// ---------------------------------------------------------------------------
+{
+  const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
+  const styles = await fs.readFile(new URL("../styles.css", import.meta.url), "utf-8");
+  assert.match(app, /function primaryScheduleWeekHtml\(/, "小学作息应提供独立周视图");
+  assert.match(app, /\[0, 1, 2, 3, 4, 5, 6\]/, "周视图应固定展示周一至周日七列");
+  assert.match(app, /data-add-schedule-period-day=/, "每一天都应提供添加日程入口");
+  assert.match(app, /data-edit-schedule-period=/, "点击周表中的日程应能进入修改状态");
+  assert.doesNotMatch(app, /schedule-weekend-panel/, "周末日程不应再显示为独立面板");
+  assert.match(app, /\["morning", "早自习"\]/, "固定日程应支持早自习");
+  assert.match(app, /\["evening", "晚自习"\]/, "固定日程应支持晚自习");
+  assert.match(app, /活动（可自命名）/, "活动日程应允许自定义名称");
+  assert.match(app, /适用年级/, "自定义计薪活动应要求选择适用年级");
+  assert.match(app, /customPayActivityGradeOptions/, "活动配置应提供年级选择器");
+  assert.match(app, /同名活动可为不同年级分别配置单价/, "活动配置应说明可按年级分别定价");
+  assert.doesNotMatch(app, /\["selfStudy", "自习（历史类型）"\]/, "新建日程不应再提供历史自习类型");
+  assert.match(app, /历史自习（仅保留既有日程）/, "既有历史自习仍应安全保留，不能因编辑而被静默改型");
+  assert.match(app, /validateSchedulePeriodRows\(ordered\)/, "加入周表前必须复用时间冲突与周末正课校验");
+  assert.match(html, /id="addSchedulePeriod"[\s\S]{0,100}添加日程/, "页面主操作也应使用添加日程口径");
+  assert.match(styles, /grid-template-columns: repeat\(7, minmax\(190px, 1fr\)\)/, "周一至周日应采用并列的周表布局");
+  assert.match(styles, /\.schedule-period-inline-editor/, "添加和修改日程应使用清晰的独立编辑区");
+}
+
+// ---------------------------------------------------------------------------
+// 29. 批量加班：起止时间自动计算，学部主任只能勾选本学部老师
+// ---------------------------------------------------------------------------
+{
+  const oa = await fs.readFile(new URL("../server/oa.js", import.meta.url), "utf-8");
+  const server = await fs.readFile(new URL("../server/server.js", import.meta.url), "utf-8");
+  const styles = await fs.readFile(new URL("../styles.css", import.meta.url), "utf-8");
+  assert.match(oa, /key: "overtime_batch"/, "应提供学部主任发起的批量加班模板");
+  assert.match(oa, /type: "teacher_multiselect"/, "批量加班人员应使用可多选的老师选择器");
+  assert.match(oa, /calculateOvertimeHours/, "加班时长必须由服务端按起止时间计算");
+  assert.match(oa, /overtimeBatchCompletionCcAccountIds/, "批量加班办结后应动态抄送人事与对应财务");
+  assert.match(server, /\/api\/oa\/overtime-batch-staff-options/, "服务端应按当前学部提供批量加班人员候选名单");
+  assert.match(app, /function overtimeDurationCalculation\(/, "个人和批量加班表单应共享起止时间换算");
+  assert.match(app, /function syncOvertimeDuration\(/, "加班时长展示应随时间选择自动更新");
+  assert.match(app, /field\.type === "half_hour_time"/, "加班时间不应再使用浏览器原生分钟选择器");
+  assert.match(app, /\["", "00", "30"\]/, "分钟下拉只能提供整点和半点");
+  assert.match(app, /data-teacher-multi-search/, "批量人员选择器应支持搜索");
+  assert.match(styles, /\.dialog-personnel-picker/, "批量人员选择器应有独立布局样式");
+  assert.match(styles, /\.dialog-half-hour-time/, "半小时选择器应有独立前端布局");
+}
+
+// ---------------------------------------------------------------------------
+// 30. 并列表单：下拉框不能因通用底部留白而与输入框上下错位
+// ---------------------------------------------------------------------------
+{
+  const styles = await fs.readFile(new URL("../styles.css", import.meta.url), "utf-8");
+  assert.match(
+    styles,
+    /\.field-label\s*>\s*\.lesson-select\s*\{[\s\S]*?margin-bottom:\s*0;/,
+    "标签内的下拉框必须取消通用底部间距，和同排输入框底部对齐"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 31. 正课时长只由作息表统一维护，课程规则不得重复录入
+// ---------------------------------------------------------------------------
+{
+  const html = await fs.readFile(new URL("../index.html", import.meta.url), "utf-8");
+  const scheduling = await fs.readFile(new URL("../server/scheduling.js", import.meta.url), "utf-8");
+  assert.doesNotMatch(html, /id="newCourseDuration"/, "新增课程不应重复录入单节时长");
+  assert.doesNotMatch(app, /data-course-rule-duration=/, "课程规则不应重复录入单节时长");
+  assert.match(html, /每节课的起止时间统一取自作息时间表/, "应明确说明正课时间的唯一来源");
+  assert.match(scheduling, /function schedulePeriodDurationMinutes\(/, "课次时长应按作息表节次自动计算");
 }
 
 console.log("frontend static checks passed");

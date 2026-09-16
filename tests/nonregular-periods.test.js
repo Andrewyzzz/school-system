@@ -38,8 +38,17 @@ function configureClassTeachers(db, admin) {
 const db = createInitialData({ teacherCount: 1000 });
 const admin = actor(db, "admin");
 configureClassTeachers(db, admin);
+db.payrollRules.teacherSalaryScheme.customNonRegularPayItems = [
+  { id: "big-break-g1", name: "大课间", stageId: "primary", gradeId: "elementary-g1", gradeName: "一年级", rate: 20, enabled: true },
+  { id: "big-break-g2", name: "大课间", stageId: "primary", gradeId: "elementary-g2", gradeName: "二年级", rate: 35, enabled: true },
+];
 
 const before = buildSchedulingConfig(db, { divisionId: "elementary", gradeId: "elementary-g1" });
+assert.deepEqual(
+  before.nonRegularPayItems.map((item) => item.id),
+  ["big-break-g1"],
+  "一年级作息只能选择为一年级配置的活动单价",
+);
 const responsibleTeacher = before.nonRegularTeachers[0];
 assert.ok(responsibleTeacher, "应能选择当前学部老师作为非正课负责人");
 const lifeTeacher = db.teachers.find(
@@ -70,7 +79,34 @@ const periods = [
     responsibleTeacherId: lifeTeacher.id,
     dayIndexes: [6],
   },
+  {
+    period: before.periods.length + 2,
+    label: "大课间",
+    startTime: "12:00",
+    endTime: "12:20",
+    type: "activity",
+    content: "大课间",
+    responsibleTeacherId: responsibleTeacher.id,
+    nonRegularPayItemId: "big-break-g1",
+    dayIndexes: [6],
+  },
 ];
+assert.throws(
+  () =>
+    updateSchedulePeriods(
+      db,
+      {
+        stageId: "primary",
+        grade: 1,
+        periods: periods.map((period) =>
+          period.nonRegularPayItemId === "big-break-g1" ? { ...period, nonRegularPayItemId: "big-break-g2" } : period,
+        ),
+      },
+      admin,
+    ),
+  /不适用于当前年级/,
+  "服务端必须拒绝伪造其他年级计薪活动的排班请求",
+);
 const updated = updateSchedulePeriods(db, { stageId: "primary", grade: 1, periods }, admin);
 const selfStudy = updated.config.periods.find((period) => period.type === "selfStudy");
 assert.equal(selfStudy?.content, "午间阅读", "固定内容应保存到作息模板");
@@ -78,6 +114,11 @@ assert.equal(selfStudy?.responsibleTeacherId, responsibleTeacher.id, "负责人�
 assert.equal(selfStudy?.responsibleTeacherName, responsibleTeacher.name, "配置返回时应带负责人姓名");
 const sundayDuty = updated.config.periods.find((period) => period.content === "周日返校接待");
 assert.deepEqual(sundayDuty?.dayIndexes, [6], "周日固定日程应保存周日生效范围");
+assert.equal(
+  updated.config.periods.find((period) => period.content === "大课间")?.nonRegularPayItemName,
+  "大课间",
+  "计薪活动应保存其配置名称",
+);
 
 const result = generateScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 assert.equal(result.draft.conflicts.length, 0, "正课草稿应无冲突");
@@ -91,7 +132,7 @@ assert.ok(
 
 const published = publishScheduleDraft(db, { divisionId: "elementary", gradeId: "elementary-g1" }, admin);
 const nonRegular = published.lessons.filter((lesson) => lesson.nonRegular);
-assert.equal(nonRegular.length, 6, "工作日固定时段发布五次，周日固定日程单独发布一次");
+assert.equal(nonRegular.length, 7, "工作日固定时段发布五次，两项周日固定日程分别发布一次");
 assert.ok(
   nonRegular.filter((lesson) => lesson.type === "selfStudy").every(
     (lesson) =>
@@ -110,6 +151,13 @@ assert.equal(new Date(`${publishedSundayDuty.date}T12:00:00`).getDay(), 0, "周�
 assert.equal(publishedSundayDuty.teacherId, lifeTeacher.id, "周日固定日程应发送给所选生活老师");
 assert.equal(publishedSundayDuty.units, 0, "周日固定日程不产生课时");
 assert.equal(publishedSundayDuty.nonPayable, true, "周日固定日程不计薪");
+const paidBigBreak = nonRegular.find((lesson) => lesson.nonRegularPayItemId === "big-break-g1");
+assert.ok(paidBigBreak, "应生成大课间计薪活动");
+assert.equal(paidBigBreak.units, 1, "计薪活动按一节记入工资");
+assert.equal(paidBigBreak.nonPayable, false, "选择计薪项目后不应标记为不计薪");
+assert.equal(paidBigBreak.nonRegularPayRate, 20, "活动单价应在发布时写入课次快照");
+assert.equal(paidBigBreak.nonRegularPayGradeId, "elementary-g1", "课次快照应记录活动的适用年级");
+assert.equal(paidBigBreak.scheduleImpact, true, "计薪活动应占用老师时间，参与冲突校验");
 const lifeTeacherTerminal = teacherLessonsForWeek(db, lifeTeacher.id, published.config.weekStart);
 assert.ok(
   lifeTeacherTerminal.some((lesson) => lesson.id === publishedSundayDuty.id),
@@ -125,7 +173,7 @@ const grid = buildScheduleGrid(db, {
 });
 const gridEntries = grid.cells.flat().flat();
 const displayed = gridEntries.filter((entry) => entry.nonRegular);
-assert.equal(displayed.length, 6, "每个班的最终课表都应显示工作日与周日固定日程");
+assert.equal(displayed.length, 7, "每个班的最终课表都应显示工作日与周日固定日程");
 assert.ok(
   displayed.filter((entry) => entry.type === "selfStudy").every(
     (entry) => entry.type === "selfStudy" && entry.typeName === "自习" && entry.subjectName === "午间阅读",
@@ -137,13 +185,13 @@ assert.match(buildScheduleExcel(grid), /周日返校接待/, "导出的七天课
 
 const payroll = teacherPayrollPreview(db, responsibleTeacher.id, published.config.weekStart.slice(0, 7));
 assert.ok(
-  payroll.lines.every((line) => !String(line.lessonId || "").startsWith("NONREG-")),
-  "非正课负责人不应获得额外课时工资",
+  payroll.lines.some((line) => line.lessonId === paidBigBreak.id && line.ruleName === "大课间" && line.amount === 20),
+  "选择计薪项目的非正课应按配置单价进入工资明细",
 );
 const records = queryTeacherLessonRecords(db, responsibleTeacher.id, published.config.weekStart.slice(0, 7));
 assert.ok(
-  records.records.every((record) => !String(record.lessonId || "").startsWith("NONREG-")),
-  "非正课不应进入教师课时核对记录",
+  records.records.some((record) => record.lessonId === paidBigBreak.id && record.resultText.includes("大课间：20 元/节")),
+  "计薪活动应进入老师的课时核对记录",
 );
 
 // 周日日程可以按岗位分发：各班班主任收到本班任务，所有生活老师收到年级公共生活任务。

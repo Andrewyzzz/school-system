@@ -42,6 +42,7 @@ function lessonBelongsToTeacher(lesson, teacherId) {
 }
 
 function nonRegularTypeLabel(type = "") {
+  if (type === "morning") return "早自习";
   if (type === "selfStudy") return "自习";
   if (type === "activity") return "活动";
   if (type === "evening") return "晚自习";
