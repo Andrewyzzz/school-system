@@ -79,7 +79,9 @@ fi
 log "3/8 创建运行账号与目录"
 # ---------------------------------------------------------------------------
 id -u "${APP_USER}" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "${APP_USER}"
-mkdir -p "${APP_DIR}" "${BACKUP_DIR}"
+# systemd 的 ReadWritePaths 要求目标目录在服务启动前已经存在；否则即使
+# Node 和数据库都正常，安全沙箱也会在真正执行应用前拦下服务。
+mkdir -p "${APP_DIR}" "${APP_DIR}/server/data/attachments" "${APP_DIR}/backups" "${BACKUP_DIR}"
 chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" "${BACKUP_DIR}"
 # 备份里是全校工资与身份证，目录权限必须收紧
 chmod 700 "${BACKUP_DIR}"
@@ -200,7 +202,7 @@ fi
 # ---------------------------------------------------------------------------
 log "7/8 配置系统服务"
 # ---------------------------------------------------------------------------
-sed -e "s|@APP_DIR@|${APP_DIR}|g" -e "s|@APP_USER@|${APP_USER}|g" \
+sed -e "s|@APP_DIR@|${APP_DIR}|g" -e "s|@APP_USER@|${APP_USER}|g" -e "s|@BACKUP_DIR@|${BACKUP_DIR}|g" \
   "${APP_DIR}/deploy/school-system.service" > /etc/systemd/system/school-system.service
 systemctl daemon-reload
 systemctl enable school-system >/dev/null

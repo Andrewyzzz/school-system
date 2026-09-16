@@ -98,6 +98,8 @@ const productionEnv = await read("config/production.env.example");
   );
   assert.match(install, /pg_database WHERE datname[\s\S]{0,120}createdb/, "建库前应先判断是否已存在");
   assert.match(install, /id -u "\$\{APP_USER\}"[\s\S]{0,80}useradd/, "建账号前应先判断是否已存在");
+  assert.match(install, /\$\{APP_DIR\}\/server\/data\/attachments/, "服务启动前必须创建附件目录");
+  assert.match(install, /\$\{APP_DIR\}\/backups/, "服务启动前必须创建应用备份目录");
   assert.match(install, /DB_DRIVER=postgres/, "安装脚本必须显式启用 PostgreSQL，不能静默回落到 JSON");
   assert.match(productionEnv, /^DB_DRIVER=postgres$/m, "生产配置模板必须显式启用 PostgreSQL");
   assert.match(install, /ATTACHMENT_DIR=.*server\/data\/attachments/, "安装脚本必须配置附件目录，确保备份包含上传文件");
@@ -146,6 +148,8 @@ const productionEnv = await read("config/production.env.example");
   assert.match(unit, /After=.*postgresql\.service/, "启动顺序必须排在数据库之后");
   assert.match(unit, /Restart=always/, "崩溃必须自动拉起");
   assert.match(unit, /StartLimitBurst=/, "反复崩溃时要停下来，否则日志被刷爆、真正的原因被冲掉");
+  assert.match(unit, /\[Unit\][\s\S]*StartLimitIntervalSec=300/, "StartLimit 必须放在 [Unit]，否则新版 systemd 会忽略");
+  assert.ok(!/Documentation=file:/.test(unit), "systemd 不接受 file:// Documentation，避免部署时产生无效配置警告");
   assert.match(unit, /LimitNOFILE=65535/, "1000+ 在线 + SSE 长连接，默认 1024 个句柄不够");
   assert.match(unit, /WantedBy=multi-user\.target/, "缺少这行就无法开机自启");
 
@@ -157,6 +161,7 @@ const productionEnv = await read("config/production.env.example");
     /ReadWritePaths=.*server\/data/.test(unit) && /ReadWritePaths=.*backups/.test(unit),
     "数据目录与备份目录必须可写，否则服务起来了却存不了数据",
   );
+  assert.match(unit, /@BACKUP_DIR@/, "服务单元应使用部署时指定的备份目录，而不是写死路径");
   assert.match(unit, /User=@APP_USER@/, "不得以 root 运行");
   assert.ok(!/User=root/.test(unit), "绝不能以 root 运行应用");
 }
