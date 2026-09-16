@@ -1067,6 +1067,13 @@ function backfillFinanceScopeAccounts(db, defaultPasswordHash) {
   return changed;
 }
 
+// 真实名册已接管人员与账号后，不能再启动时补回快捷演示账号；否则原本已经
+// 清理的虚拟校长、学部主任、财务和教师会重新出现，权限也会落到错误的人身上。
+// 该标记只由受控名册迁移器写入，旧演示库仍继续沿用原先的兼容补齐逻辑。
+function isRealRosterMode(db) {
+  return String(db?.meta?.personnelSource || "") === "real_roster";
+}
+
 // demo 账号矩阵升级：旧库只补缺项，不删除或改名既有账号，避免历史审批与审计记录断链。
 function backfillDemoAccountMatrix(db, defaults) {
   let changed = false;
@@ -1344,10 +1351,13 @@ export function normalizeDatabase(db) {
   let changed = normalizeAccountDisplayNames(db);
   if (backfillTermScopedRows(db)) changed = true;
   const defaults = createInitialData({ teacherCount: db.meta?.teacherCount || DEFAULT_TEACHER_COUNT });
-  if (backfillFinanceScopeAccounts(db, defaults.accounts.find((item) => item.id === "ACC-FINANCE")?.passwordHash)) {
-    changed = true;
+  const realRosterMode = isRealRosterMode(db);
+  if (!realRosterMode) {
+    if (backfillFinanceScopeAccounts(db, defaults.accounts.find((item) => item.id === "ACC-FINANCE")?.passwordHash)) {
+      changed = true;
+    }
+    if (backfillDemoAccountMatrix(db, defaults)) changed = true;
   }
-  if (backfillDemoAccountMatrix(db, defaults)) changed = true;
   if (backfillKindergartenCatalog(db, defaults)) changed = true;
   if (backfillPayrollBasisLabels(db)) changed = true;
   const arrayKeys = [
@@ -1417,7 +1427,7 @@ export function normalizeDatabase(db) {
   if (normalizeTeacherAssignments(db)) {
     changed = true;
   }
-  if (ensureDivisionHeadTeachingCapabilities(db)) {
+  if (!realRosterMode && ensureDivisionHeadTeachingCapabilities(db)) {
     changed = true;
   }
 
@@ -1494,48 +1504,50 @@ export function normalizeDatabase(db) {
     changed = true;
   }
 
-  const demoTeacher = (db.teachers || []).find((teacher) => teacher.id === "T0003");
-  const demoTeacherAccount = (db.accounts || []).find((account) => account.username === "teacher");
-  if (demoTeacher && demoTeacherAccount && demoTeacherAccount.teacherId !== demoTeacher.id) {
-    demoTeacherAccount.teacherId = demoTeacher.id;
-    demoTeacherAccount.name = demoTeacher.name;
-    demoTeacherAccount.department = demoTeacher.department || demoTeacher.stageName || "高中部";
-    changed = true;
-  }
-
-  if (!(db.accounts || []).some((account) => account.username === "classroom")) {
-    const classroomAccount = (defaults.accounts || []).find((account) => account.username === "classroom");
-    if (classroomAccount) {
-      db.accounts.push(classroomAccount);
+  if (!realRosterMode) {
+    const demoTeacher = (db.teachers || []).find((teacher) => teacher.id === "T0003");
+    const demoTeacherAccount = (db.accounts || []).find((account) => account.username === "teacher");
+    if (demoTeacher && demoTeacherAccount && demoTeacherAccount.teacherId !== demoTeacher.id) {
+      demoTeacherAccount.teacherId = demoTeacher.id;
+      demoTeacherAccount.name = demoTeacher.name;
+      demoTeacherAccount.department = demoTeacher.department || demoTeacher.stageName || "高中部";
       changed = true;
     }
-  }
 
-  if (!(db.accounts || []).some((account) => account.username === "sysadmin")) {
-    const systemAdminAccount = (defaults.accounts || []).find((account) => account.username === "sysadmin");
-    if (systemAdminAccount) {
-      db.accounts.push(systemAdminAccount);
-      changed = true;
-    }
-  }
-
-  if (!(db.accounts || []).some((account) => account.username === "hr")) {
-    const hrAccount = (defaults.accounts || []).find((account) => account.username === "hr");
-    if (hrAccount) {
-      db.accounts.push(hrAccount);
-      changed = true;
-    }
-  }
-
-  ["head_kindergarten", "head_primary", "head_middle", "head_high"].forEach((username) => {
-    if (!(db.accounts || []).some((account) => account.username === username)) {
-      const headAccount = (defaults.accounts || []).find((account) => account.username === username);
-      if (headAccount) {
-        db.accounts.push(headAccount);
+    if (!(db.accounts || []).some((account) => account.username === "classroom")) {
+      const classroomAccount = (defaults.accounts || []).find((account) => account.username === "classroom");
+      if (classroomAccount) {
+        db.accounts.push(classroomAccount);
         changed = true;
       }
     }
-  });
+
+    if (!(db.accounts || []).some((account) => account.username === "sysadmin")) {
+      const systemAdminAccount = (defaults.accounts || []).find((account) => account.username === "sysadmin");
+      if (systemAdminAccount) {
+        db.accounts.push(systemAdminAccount);
+        changed = true;
+      }
+    }
+
+    if (!(db.accounts || []).some((account) => account.username === "hr")) {
+      const hrAccount = (defaults.accounts || []).find((account) => account.username === "hr");
+      if (hrAccount) {
+        db.accounts.push(hrAccount);
+        changed = true;
+      }
+    }
+
+    ["head_kindergarten", "head_primary", "head_middle", "head_high"].forEach((username) => {
+      if (!(db.accounts || []).some((account) => account.username === username)) {
+        const headAccount = (defaults.accounts || []).find((account) => account.username === username);
+        if (headAccount) {
+          db.accounts.push(headAccount);
+          changed = true;
+        }
+      }
+    });
+  }
 
   (db.rooms || []).forEach((room) => {
     if (!room.roomType) {

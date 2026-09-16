@@ -1,5 +1,5 @@
 import { hashPassword } from "./auth.js";
-import { deepMerge, defaultTeacherSalaryProfile } from "./payroll.js";
+import { deepMerge, defaultLifeTeacherSalaryProfile, defaultTeacherSalaryProfile } from "./payroll.js";
 
 const REQUIRED_COLUMNS = ["employeeNo", "name", "stageId", "department", "primarySubjectId", "username"];
 const OPTIONAL_COLUMNS = [
@@ -25,6 +25,12 @@ const OPTIONAL_COLUMNS = [
   "busDuty",
   "attendanceDeduction",
   "manualItemsJson",
+  // 无任教学科的在岗人员（例如生活老师、尚待人事补齐兼课科目的学部主任）
+  // 仍需进入人员、薪资和登录链路，但绝不能进入自动排课候选池。
+  "nonSchedulable",
+  "lifeTeacher",
+  // 多学科任教从名册保留为可任教范围；primarySubjectId 仍决定默认展示和薪资科目系数。
+  "teachableSubjectIds",
 ];
 const ALL_COLUMNS = [...REQUIRED_COLUMNS, ...OPTIONAL_COLUMNS];
 
@@ -112,6 +118,10 @@ function numberValue(value, fallback = 0) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function subjectIdList(value) {
+  return [...new Set(String(value || "").split(/[;；,，、\s]+/).map(normalizeText).filter(Boolean))];
+}
+
 function parseManualItemsJson(value, row, errors) {
   const text = normalizeText(value);
   if (!text) return [];
@@ -130,7 +140,16 @@ function parseManualItemsJson(value, row, errors) {
 }
 
 function salaryProfileFromRow(row, baseTeacher, errors) {
-  const defaults = defaultTeacherSalaryProfile(baseTeacher);
+  const lifeTeacher = booleanValue(row.lifeTeacher);
+  const defaults = lifeTeacher
+    ? defaultLifeTeacherSalaryProfile(baseTeacher)
+    : defaultTeacherSalaryProfile(baseTeacher);
+  if (lifeTeacher) {
+    return deepMerge(defaults, {
+      attendanceDeduction: numberValue(row.attendanceDeduction, defaults.attendanceDeduction),
+      manualItems: parseManualItemsJson(row.manualItemsJson, row, errors),
+    });
+  }
   const patch = {
     qualificationGrade: normalizeText(row.qualificationGrade) || defaults.qualificationGrade,
     schoolYears: numberValue(row.schoolYears, defaults.schoolYears),
@@ -265,9 +284,12 @@ export function previewTeacherImport(db, csvText = "", options = {}) {
       qingbeiClass: normalizeText(row.qingbeiClass),
       attendanceDeduction: normalizeText(row.attendanceDeduction),
       manualItemsJson: normalizeText(row.manualItemsJson),
+      nonSchedulable: booleanValue(row.nonSchedulable),
+      lifeTeacher: booleanValue(row.lifeTeacher),
+      teachableSubjectIds: subjectIdList(row.teachableSubjectIds),
     };
 
-    REQUIRED_COLUMNS.forEach((column) => {
+    REQUIRED_COLUMNS.filter((column) => column !== "primarySubjectId").forEach((column) => {
       if (!normalized[column]) {
         errors.push({
           rowNumber: normalized.rowNumber,
@@ -276,6 +298,20 @@ export function previewTeacherImport(db, csvText = "", options = {}) {
         });
       }
     });
+    if (!normalized.primarySubjectId && !normalized.nonSchedulable) {
+      errors.push({
+        rowNumber: normalized.rowNumber,
+        field: "primarySubjectId",
+        message: "任课人员必须填写 primarySubjectId；非排课人员请标记 nonSchedulable",
+      });
+    }
+    if (normalized.lifeTeacher && !normalized.nonSchedulable) {
+      errors.push({
+        rowNumber: normalized.rowNumber,
+        field: "nonSchedulable",
+        message: "生活老师必须标记为 nonSchedulable",
+      });
+    }
 
     if (normalized.employeeNo && existingEmployeeNos.has(normalized.employeeNo)) {
       errors.push({
@@ -308,6 +344,14 @@ export function previewTeacherImport(db, csvText = "", options = {}) {
         message: `科目 ${normalized.primarySubjectId} 不存在`,
       });
     }
+    normalized.teachableSubjectIds.forEach((subjectId) => {
+      if (subjectIds.has(subjectId)) return;
+      errors.push({
+        rowNumber: normalized.rowNumber,
+        field: "teachableSubjectIds",
+        message: `可任教学科 ${subjectId} 不存在`,
+      });
+    });
 
     if (normalized.status && !["active", "disabled"].includes(normalized.status)) {
       errors.push({
@@ -407,6 +451,11 @@ export function commitTeacherImport(db, csvText = "", actorAccount = null) {
       department: row.department || stage?.name || "",
       primarySubjectId: row.primarySubjectId,
       primarySubjectName: subject?.name || "",
+      teachableSubjectIds: row.teachableSubjectIds.filter((subjectId) => subjectId !== row.primarySubjectId),
+      teachableSubjectNames: row.teachableSubjectIds
+        .filter((subjectId) => subjectId !== row.primarySubjectId)
+        .map((subjectId) => subjectById(db, subjectId)?.name || subjectId),
+      nonSchedulable: row.nonSchedulable,
       title: row.title || "任课教师",
       phone: row.phone,
       status: row.status,
@@ -422,10 +471,13 @@ export function commitTeacherImport(db, csvText = "", actorAccount = null) {
       role: "teacher",
       teacherId,
       name: row.name,
+      employeeNo: row.employeeNo,
+      title: teacher.title,
       department: teacher.department,
       status: row.status,
       mustChangePassword: true,
       createdAt,
+      ...(row.lifeTeacher ? { roles: ["teacher", "life_teacher"] } : {}),
     };
 
     db.teachers.push(teacher);
