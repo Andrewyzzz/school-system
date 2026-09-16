@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import pg from "pg";
 import { auditConstraintsAndIndexes, ensureConstraintsAndIndexes } from "./constraints.js";
 import { archivedLoadFilter } from "../ledgers.js";
+import { APPEND_ONLY_COLLECTIONS } from "./roles.js";
 import {
   collectionNeedsEncryption,
   decryptRowFromStorage,
@@ -22,6 +23,7 @@ import {
 const SINGLETON_TABLE = "app_singletons";
 const REGISTRY_TABLE = "app_collections";
 const UPSERT_CHUNK_SIZE = 500;
+const APPEND_ONLY_COLLECTION_SET = new Set(APPEND_ONLY_COLLECTIONS);
 
 let pool = null;
 
@@ -237,6 +239,7 @@ export async function persistDatabaseToPostgres(db) {
       await ensureCollectionTable(client, shadow, collectionKey);
       const rows = db[collectionKey];
       const previous = shadow.collections.get(collectionKey) || new Map();
+      const appendOnly = APPEND_ONLY_COLLECTION_SET.has(collectionKey);
       const needsEncryption = collectionNeedsEncryption(collectionKey);
       const next = new Map();
       const upserts = [];
@@ -253,8 +256,15 @@ export async function persistDatabaseToPostgres(db) {
         const serialized = `${index}:${JSON.stringify(row)}`;
         next.set(rowId, serialized);
         if (previous.get(rowId) !== serialized) {
+          // 审计日志在库层已被严格限制为“只能追加”。通用 UPSERT 会在
+          // SQL 解析阶段要求 UPDATE 权限，即便本次实际只插入一行，也会
+          // 被数据库拒绝；更不应为了省事给它 UPDATE 权限。既有审计行
+          // 一旦在内存中发生变化，直接中止保存，防止任何改写被掩盖。
+          if (appendOnly && previous.has(rowId)) {
+            throw new Error(`只追加集合 ${collectionKey} 的既有记录发生变化：${rowId}`);
+          }
           const stored = needsEncryption ? encryptRowForStorage(collectionKey, row) : row;
-          upserts.push({ rowId, seq: index, serializedData: JSON.stringify(stored) });
+          upserts.push({ rowId, seq: index, serializedData: JSON.stringify(stored), plainRow: row });
         }
       });
 
@@ -262,6 +272,10 @@ export async function persistDatabaseToPostgres(db) {
       previous.forEach((_, rowId) => {
         if (!next.has(rowId)) deletions.push(rowId);
       });
+
+      if (appendOnly && deletions.length) {
+        throw new Error(`只追加集合 ${collectionKey} 不允许删除既有记录`);
+      }
 
       for (const batch of chunk(upserts, UPSERT_CHUNK_SIZE)) {
         const values = [];
@@ -271,12 +285,43 @@ export async function persistDatabaseToPostgres(db) {
           values.push(`($${base + 1}, $${base + 2}, $${base + 3}::jsonb, now())`);
           params.push(item.rowId, item.seq, item.serializedData);
         });
-        await client.query(
-          `INSERT INTO ${quotedTableFor(collectionKey)} (id, seq, data, updated_at)
-           VALUES ${values.join(", ")}
-           ON CONFLICT (id) DO UPDATE SET seq = EXCLUDED.seq, data = EXCLUDED.data, updated_at = now();`,
-          params,
-        );
+        if (appendOnly) {
+          // 不使用 ON CONFLICT ... DO UPDATE：它会要求 UPDATE 权限，
+          // 与审计日志的只追加授权相矛盾；冲突时只接受内容完全一致的重试。
+          // 影子快照会在一次失败保存后作废。此时同一条已经落库的审计
+          // 记录会再次进入待写列表，因此允许“内容完全相同”的冲突无害
+          // 跳过；若库中同 ID 内容不同，仍必须报错，不能掩盖篡改。
+          const inserted = await client.query(
+            `INSERT INTO ${quotedTableFor(collectionKey)} (id, seq, data, updated_at)
+             VALUES ${values.join(", ")}
+             ON CONFLICT (id) DO NOTHING
+             RETURNING id;`,
+            params,
+          );
+          if (inserted.rows.length !== batch.length) {
+            const insertedIds = new Set(inserted.rows.map((row) => String(row.id)));
+            const conflicted = batch.filter((item) => !insertedIds.has(item.rowId));
+            const existing = await client.query(
+              `SELECT id, seq, data FROM ${quotedTableFor(collectionKey)} WHERE id = ANY($1::text[])`,
+              [conflicted.map((item) => item.rowId)],
+            );
+            const existingById = new Map(existing.rows.map((row) => [String(row.id), row]));
+            const changed = conflicted.find((item) => {
+              const row = existingById.get(item.rowId);
+              return !row || Number(row.seq) !== item.seq || stableStringify(row.data) !== stableStringify(item.plainRow);
+            });
+            if (changed) {
+              throw new Error(`只追加集合 ${collectionKey} 的记录与已存记录不一致：${changed.rowId}`);
+            }
+          }
+        } else {
+          await client.query(
+            `INSERT INTO ${quotedTableFor(collectionKey)} (id, seq, data, updated_at)
+             VALUES ${values.join(", ")}
+             ON CONFLICT (id) DO UPDATE SET seq = EXCLUDED.seq, data = EXCLUDED.data, updated_at = now();`,
+            params,
+          );
+        }
         upsertCount += batch.length;
       }
       for (const batch of chunk(deletions, UPSERT_CHUNK_SIZE)) {

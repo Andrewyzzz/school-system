@@ -119,6 +119,17 @@ const auditRow = reloadedAudit.auditLogs.find((entry) => entry.action === "m1-te
 assert.ok(auditRow, "无 id 行应被持久化");
 assert.ok(auditRow._rowId, "无 id 行应带引擎生成的 _rowId");
 
+// 审计集合只能追加：既有记录被改写时，持久层必须拒绝，不能为了通用 UPSERT
+// 给程序账号开放 UPDATE 权限。失败后的影子快照重建也不能导致重复插入。
+const originalAuditAction = db.auditLogs[db.auditLogs.length - 1].action;
+db.auditLogs[db.auditLogs.length - 1].action = "tampered-audit-log";
+await assert.rejects(
+  () => persistDatabaseToPostgres(db),
+  /只追加集合 auditLogs 的既有记录发生变化/,
+  "既有审计日志不得被持久层改写",
+);
+db.auditLogs[db.auditLogs.length - 1].action = originalAuditAction;
+
 // 6. 重复主键必须拒绝（防静默覆盖）
 db.teachers.push({ ...db.teachers[0] });
 await assert.rejects(() => persistDatabaseToPostgres(db), /重复主键/);
