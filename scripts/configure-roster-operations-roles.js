@@ -53,7 +53,7 @@ function validatePlan(plan) {
     const role = String(user?.role || "").trim();
     const mode = String(user?.mode || "existing_teacher").trim();
     const stageIds = uniqueStrings(user?.scopeStageIds || []);
-    if (!employeeNo || !name || !ALLOWED_ROLES.has(role) || !["existing_teacher", "create_personnel"].includes(mode) || stageIds.length !== 1) {
+    if (!employeeNo || !name || !ALLOWED_ROLES.has(role) || !["existing_teacher", "existing_personnel", "create_personnel"].includes(mode) || stageIds.length !== 1) {
       throw new Error("业务岗位计划包含无效的工号、姓名、角色或学部范围");
     }
     if (userNos.has(employeeNo)) throw new Error(`业务岗位计划工号重复：${employeeNo}`);
@@ -153,7 +153,8 @@ async function main() {
   const { input, commit } = options(process.argv.slice(2));
   const plan = validatePlan(JSON.parse(await fs.readFile(input, "utf8")));
   const userNos = plan.users.map((user) => String(user.employeeNo));
-  const existingTeacherUsers = plan.users.filter((user) => user.mode !== "create_personnel");
+  const existingUsers = plan.users.filter((user) => user.mode !== "create_personnel");
+  const existingTeacherUsers = existingUsers.filter((user) => (user.mode || "existing_teacher") === "existing_teacher");
   const createdPersonnelUsers = plan.users.filter((user) => user.mode === "create_personnel");
   const teacherNos = plan.teacherPatches.map((patch) => String(patch.employeeNo));
   const pool = new Pool({ connectionString: PG_URL, max: 1 });
@@ -166,11 +167,11 @@ async function main() {
       [userNos],
     );
     const accountByNo = new Map(accountRows.rows.map((row) => [String(row.data.employeeNo || ""), row]));
-    const missingTeacherAccounts = existingTeacherUsers
+    const missingAccounts = existingUsers
       .map((user) => String(user.employeeNo))
       .filter((employeeNo) => !accountByNo.has(employeeNo));
-    if (missingTeacherAccounts.length) {
-      const missing = missingTeacherAccounts;
+    if (missingAccounts.length) {
+      const missing = missingAccounts;
       throw new Error(`待配置人员账号不完整，已拒绝变更：${missing.join("、")}`);
     }
     existingTeacherUsers.forEach((user) => {
@@ -225,7 +226,7 @@ async function main() {
 
     const summary = {
       mode: commit ? "commit" : "dry-run",
-      updatedTeacherOperationAccounts: existingTeacherUsers.length,
+      updatedExistingOperationAccounts: existingUsers.length,
       createdPersonnelOperationAccounts: createdPersonnelUsers.length,
       patchedTeacherGrades: plan.teacherPatches.length,
     };
@@ -240,14 +241,32 @@ async function main() {
     const employeeSeq = await nextSequence(client, "employees");
     const auditId = `AUDIT-ROSTER-OPERATIONS-ROLES-${Date.now()}`;
     await client.query("BEGIN");
-    for (const user of existingTeacherUsers) {
+    for (const user of existingUsers) {
       const row = accountByNo.get(String(user.employeeNo));
-      await client.query(
+      const accountUpdate = await client.query(
         `UPDATE app_accounts
-         SET data = data || $2::jsonb, updated_at = now()
+         SET data = ${user.role === "finance" ? "(data - 'schedulingGradeIds')" : "data"} || $2::jsonb,
+             updated_at = now()
          WHERE id = $1`,
         [row.id, JSON.stringify(accountPatch(user))],
       );
+      if (accountUpdate.rowCount !== 1) throw new Error(`无法更新岗位账号：${user.employeeNo}`);
+      if (user.role === "finance") {
+        const employeeUpdate = await client.query(
+          `UPDATE app_employees
+           SET data = data || $2::jsonb, updated_at = now()
+           WHERE data->>'accountId' = $1`,
+          [
+            row.id,
+            JSON.stringify({
+              orgUnitId: PERSONNEL_ORG_BY_STAGE[user.scopeStageIds[0]],
+              positionId: "POS-FINANCE-STAFF",
+              updatedAt: now,
+            }),
+          ],
+        );
+        if (employeeUpdate.rowCount !== 1) throw new Error(`财务人员档案不完整：${user.employeeNo}`);
+      }
     }
     for (const [index, user] of createdPersonnelUsers.entries()) {
       const accountId = personnelAccountId(user);
