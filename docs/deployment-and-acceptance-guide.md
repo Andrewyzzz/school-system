@@ -20,7 +20,7 @@ sudo bash deploy/install.sh
 # 放入并解开迁移包后，停止服务再恢复
 sudo systemctl stop school-system
 sudo -u school node --env-file=config/production.env scripts/restore-db.js <备份文件名> --force
-sudo -u postgres env DATABASE_URL=postgresql:///school_system \
+sudo -u postgres env DATABASE_URL='postgresql://postgres@/school_system?host=/var/run/postgresql' \
   node scripts/provision-db-roles.js
 sudo systemctl start school-system
 ```

@@ -167,9 +167,11 @@ CONFEOF
 
   # 不使用 sudo -E：Ubuntu 26 已禁用该方式，变量会被静默丢掉，
   # 结果就是刚创建的 school_app 没有口令，应用无法连接数据库。
+  # node-postgres 默认会把没有 host 的连接串当作 localhost TCP；
+  # Ubuntu 本机 postgres 账号没有 TCP 口令，必须明确走 peer Unix Socket。
   sudo -u postgres env \
     DB_APP_PASSWORD="${DB_APP_PWD}" DB_OPS_PASSWORD="${DB_OPS_PWD}" DB_READONLY_PASSWORD="${DB_RO_PWD}" \
-    DATABASE_URL="postgresql:///${DB_NAME}" \
+    DATABASE_URL="postgresql://postgres@/${DB_NAME}?host=/var/run/postgresql" \
     node "${APP_DIR}/scripts/provision-db-roles.js" >/dev/null
 
   # 空库首次启动时由应用创建文档表与索引；PostgreSQL 15+ 默认不再给 PUBLIC
@@ -231,7 +233,7 @@ echo "  ${HEALTH}" | head -c 300; echo
 
 # 应用首次启动才会生成业务表；此时重新授权并挂上审计触发器，避免首次
 # 授权时看见的是空库而导致运维/只读账号没有已存在表的正确权限。
-sudo -u postgres env DATABASE_URL="postgresql:///${DB_NAME}" \
+sudo -u postgres env DATABASE_URL="postgresql://postgres@/${DB_NAME}?host=/var/run/postgresql" \
   node "${APP_DIR}/scripts/provision-db-roles.js" >/dev/null
 ok "数据库权限与审计触发器已复核"
 

@@ -119,6 +119,8 @@ const productionEnv = await read("config/production.env.example");
   assert.match(install, /PIP_WHEELHOUSE=/, "必须支持使用传入的 OR-Tools 离线软件包");
   assert.ok(!/sudo -u postgres -E/.test(install), "新版 Ubuntu 的 sudo -E 会丢失数据库口令，不能使用");
   assert.match(install, /sudo -u postgres env[\s\\]+DB_APP_PASSWORD=/, "数据库口令必须通过 env 显式传给 postgres 账号");
+  assert.match(install, /postgresql:\/\/postgres@\/\$\{DB_NAME\}\?host=\/var\/run\/postgresql/, "初始化数据库必须走 postgres 的 Unix Socket，而不是无口令 TCP");
+  assert.ok(!/DATABASE_URL="postgresql:\/\/\/\$\{DB_NAME\}"/.test(install), "没有 host 的 node-postgres 连接串会误走 TCP localhost");
   assert.match(install, /GRANT CREATE ON SCHEMA public TO school_app/, "空库首次启动时程序账号必须能建表");
   assert.match(install, /数据库权限与审计触发器已复核/, "应用建表后必须重新授权并挂上审计触发器");
 }
