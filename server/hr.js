@@ -1896,7 +1896,16 @@ export function ensureHrData(db) {
 
   // 行政、财务、排课和管理账号同样是学校人员，应纳入档案以维护人员层级。
   // 教室屏等设备账号不属于人员，不建立人员档案。
-  const personnelAccountRoles = new Set(["system_admin", "admin", "finance", "hr", "division_head", "principal"]);
+  const personnelAccountRoles = new Set([
+    "system_admin",
+    "admin",
+    "finance",
+    "hr",
+    "division_hr",
+    "attendance_manager",
+    "division_head",
+    "principal",
+  ]);
   const employeesByAccountId = new Set(db.employees.map((employee) => employee.accountId).filter(Boolean));
   (db.accounts || [])
     .filter((account) => !account.teacherId && personnelAccountRoles.has(account.role))
@@ -1920,7 +1929,9 @@ export function ensureHrData(db) {
             : "POS-ADMIN-STAFF";
       db.employees.push({
         id: `EMP-ACCOUNT-${account.id}`,
-        employeeNo: account.id,
+        // 名册接管后的管理兼岗账号同样应以人事工号建档；不能把系统账号 ID
+        // 误当成工号，否则后续考勤、审批和花名册无法按同一工号关联。
+        employeeNo: account.employeeNo || account.id,
         personName: account.name || account.username,
         gender: "",
         birthDate: "",
@@ -2116,9 +2127,9 @@ function orgUnitStageId(db, orgUnitId) {
   return "";
 }
 
-// 学部负责人的数据范围：scopeStageIds → 组织节点集合（学部 division 及其子树）
+// 学部主任与学部人事的数据范围：scopeStageIds → 组织节点集合（学部 division 及其子树）
 export function hrScopeFor(db, account) {
-  if (!account || account.role !== "division_head") return null;
+  if (!account || !["division_head", "division_hr"].includes(account.role)) return null;
   const stageIds = new Set(
     Array.isArray(account.scopeStageIds) ? account.scopeStageIds.map(String) : [],
   );
@@ -2143,7 +2154,7 @@ export function assertEmployeeInScope(db, account, employee) {
 function canActOnFlowStep(db, account, flow, stepDef) {
   if (!account || !stepDef) return false;
   if (!stepDef.approverRoles.includes(account.role)) return false;
-  if (account.role === "division_head" && stepDef.scope) {
+  if (["division_head", "division_hr"].includes(account.role) && stepDef.scope) {
     const stageId = stepDef.scope === "to" ? flow.payload.toStageId : flow.payload.fromStageId;
     const scope = hrScopeFor(db, account);
     // 非教学部门流程没有学部归属，学部负责人不处理，交由 hr/总校
@@ -2183,13 +2194,18 @@ export function createHrFlow(db, account, input = {}, context = {}) {
   if (!definition || flowType === "profile_update") {
     throw httpError(400, `流程类型无效：${flowType}`);
   }
-  if (!["division_head", "hr", "system_admin"].includes(account?.role || "")) {
-    throw httpError(403, "只有学部负责人、人事专员或行政管理可以发起人事流程");
+  if (!["division_head", "division_hr", "hr", "system_admin"].includes(account?.role || "")) {
+    throw httpError(403, "只有学部负责人、学部人事、人事专员或行政管理可以发起人事流程");
   }
   // 离职是用人学部对本学部人员提出的事项：人事只审批，校长只终审。
   // 这样不会绕开课程交接与最终离职处理留痕。
   if (flowType === "offboard" && account?.role !== "division_head") {
     throw httpError(403, "离职申请仅可由所属学部主任发起");
+  }
+  // 学部人事只负责为本学部补充招聘资料并上报总校人事；调岗涉及两个组织，
+  // 不能由单一学部越过目标学部直接发起。
+  if (account?.role === "division_hr" && flowType !== "onboard") {
+    throw httpError(403, "学部人事仅可发起本学部入职申请");
   }
   const reason = requireReason(input.reason, `发起${definition.label}流程`);
   const now = nowIso();
@@ -2204,10 +2220,10 @@ export function createHrFlow(db, account, input = {}, context = {}) {
     const position = findPosition(db, String(input.positionId || "").trim());
     if (!position || position.status !== "active") throw httpError(400, "必须选择有效的岗位");
     const stageId = orgUnitStageId(db, orgUnit.id);
-    if (account.role === "division_head") {
+    if (["division_head", "division_hr"].includes(account.role)) {
       const scope = hrScopeFor(db, account);
       if (!stageId || !scope.stageIds.has(stageId)) {
-        throw httpError(403, "学部负责人只能为本学部发起入职");
+        throw httpError(403, "只能为本学部发起入职");
       }
     }
     const lifeTeacherPosition = isLifeTeacherPosition(position);

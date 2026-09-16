@@ -89,7 +89,7 @@ export const KNOWN_ENUMS = {
   "employees.workStatus": "employed 就业 / standby 待岗（待岗工资按全校统一最低工资标准的 80% 加住房补贴结算）",
   "teachers.status": "active 在职 / archived 已归档",
   "accounts.status": "active 启用 / disabled 停用",
-  "accounts.role": "teacher 教师 / admin 教务 / hr 人事 / finance 财务 / division_head 学部负责人 / principal 校领导 / system_admin 行政管理 / classroom 教室屏",
+  "accounts.role": "teacher 教师 / admin 教务排课 / hr 总校人事 / division_hr 学部人事 / attendance_manager 考勤负责人 / finance 财务 / division_head 学部负责人 / principal 校领导 / system_admin 行政管理 / classroom 教室屏",
   "terms.status": "active 进行中 / archived 已归档",
   "academicCalendarPeriods.type": "teaching 教学学期 / winter_break 寒假 / summer_break 暑假",
   "lessonInstances.status": "scheduled 待上课 / cancelled 已取消（请假未安排代课，不计薪）",

@@ -982,7 +982,7 @@ const views = {
     el: document.querySelector("#academicCalendarView"),
   },
   attendanceManagement: {
-    role: "division_head,system_admin,principal",
+    role: "division_head,attendance_manager,system_admin,principal",
     title: "考勤管理",
     el: document.querySelector("#attendanceManagementView"),
   },
@@ -1017,7 +1017,7 @@ const views = {
     el: document.querySelector("#teacherImportView"),
   },
   hrEmployees: {
-    role: "hr,system_admin,division_head",
+    role: "hr,system_admin,division_head,division_hr",
     title: "人员档案",
     el: document.querySelector("#hrEmployeesView"),
   },
@@ -1032,7 +1032,7 @@ const views = {
     el: document.querySelector("#hrOrgView"),
   },
   hrFlows: {
-    role: "hr,system_admin,division_head,principal",
+    role: "hr,system_admin,division_head,division_hr,principal",
     title: "人事审批",
     el: document.querySelector("#hrFlowsView"),
   },
@@ -1587,6 +1587,8 @@ function roleTitle(role) {
   if (role === "admin") return "学部排课负责人";
   if (role === "system_admin") return "总校人事 + 行政";
   if (role === "hr") return "人事账号";
+  if (role === "division_hr") return "学部人事";
+  if (role === "attendance_manager") return "考勤负责人";
   if (role === "division_head") return "学部主任";
   if (role === "principal") return "校长（总校领导）";
   if (role === "security_manager") return "安全部主管";
@@ -17547,7 +17549,7 @@ function syncLifeTeacherPositionChoices(orgSelector, positionSelector) {
 }
 
 function hrCanViewEmployees() {
-  return isHrManagerRole() || currentRole() === "division_head";
+  return isHrManagerRole() || ["division_head", "division_hr"].includes(currentRole());
 }
 
 function renderPersonnelTagConfig() {
@@ -20797,12 +20799,14 @@ function hrFlowEmployeePickerHtml() {
 function hrFlowCreateFormHtml() {
   const type = hrFlowsState.createType;
   if (!type) {
-    const canStartPeopleFlow = ["hr", "system_admin", "division_head"].includes(currentRole());
+    const canStartPeopleFlow = ["hr", "system_admin", "division_head", "division_hr"].includes(currentRole());
+    const canStartTransfer = ["hr", "system_admin", "division_head"].includes(currentRole());
     const canStartOffboard = currentRole() === "division_head";
     return `
       <div class="hr-inline-form">
         ${canStartPeopleFlow ? "<span>发起流程：</span>" : "<span>请处理分配给您的审批事项。</span>"}
-        ${canStartPeopleFlow ? '<button class="ghost-button compact-button" data-hr-flow-new="onboard" type="button">入职申请</button><button class="ghost-button compact-button" data-hr-flow-new="transfer" type="button">调岗申请</button>' : ""}
+        ${canStartPeopleFlow ? '<button class="ghost-button compact-button" data-hr-flow-new="onboard" type="button">入职申请</button>' : ""}
+        ${canStartTransfer ? '<button class="ghost-button compact-button" data-hr-flow-new="transfer" type="button">调岗申请</button>' : ""}
         ${canStartOffboard ? '<button class="ghost-button compact-button" data-hr-flow-new="offboard" type="button">发起离职申请</button>' : ""}
       </div>
     `;
@@ -20925,7 +20929,7 @@ function renderHrFlows() {
   }
   // 校长只处理人事审批待办，不需要也无权读取组织岗位配置；
   // 仅在确实可能发起/编辑人事流程的角色下加载这些候选项。
-  if (!hrOrgState.loaded && !hrOrgState.loading && ["hr", "system_admin", "division_head"].includes(currentRole())) {
+  if (!hrOrgState.loaded && !hrOrgState.loading && ["hr", "system_admin", "division_head", "division_hr"].includes(currentRole())) {
     loadHrOrgData();
   }
 

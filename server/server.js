@@ -2335,13 +2335,17 @@ async function handleApi(req, res, db, url) {
       const hrContext = { clientIp: clientIpFor(req), userAgent: req.headers["user-agent"] || "" };
 
       if (req.method === "GET" && url.pathname === "/api/hr/org-units") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head", "division_hr"]);
         if (!auth) return;
         if (auth.account.role === "finance" && !canManagePayrollConfig(auth.account)) {
           sendError(res, 403, "仅总校财务可以查看组织与岗位");
           return;
         }
-        sendJson(res, 200, { units: queryOrgUnits(db) });
+        const hrScope = auth.account.role === "division_hr" ? hrScopeFor(db, auth.account) : null;
+        const units = queryOrgUnits(db).filter(
+          (unit) => !hrScope || hrScope.stageIds.has(unit.stageId) || hrScope.orgUnitIds.has(unit.id),
+        );
+        sendJson(res, 200, { units });
         return;
       }
 
@@ -2375,7 +2379,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/positions") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "finance", "admin", "division_head", "division_hr"]);
         if (!auth) return;
         if (auth.account.role === "finance" && !canManagePayrollConfig(auth.account)) {
           sendError(res, 403, "仅总校财务可以查看组织与岗位");
@@ -2436,7 +2440,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/employees") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr"]);
         if (!auth) return;
         sendJson(res, 200, queryEmployees(db, Object.fromEntries(url.searchParams), hrScopeFor(db, auth.account)));
         return;
@@ -2445,7 +2449,7 @@ async function handleApi(req, res, db, url) {
       // 调岗、离职不能依赖手输工号：按当前账号的人事权限返回可点选人员。
       // 只暴露选择器所需的公开字段，且排除已离职、停用和正在办理离职的人员。
       if (req.method === "GET" && url.pathname === "/api/hr/flow-employee-options") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr"]);
         if (!auth) return;
         const result = queryEmployees(
           db,
@@ -2589,7 +2593,7 @@ async function handleApi(req, res, db, url) {
         const employeeId = employeeMatch[1];
         const subPath = employeeMatch[2] || "";
         if (req.method === "GET" && !subPath) {
-          const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+          const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr"]);
           if (!auth) return;
           const detail = getEmployeeDetail(db, employeeId, {
             includeAgreementMonthlySalary: auth.account.role === "system_admin",
@@ -2782,14 +2786,14 @@ async function handleApi(req, res, db, url) {
       // ---- M3 审批流 ----
 
       if (req.method === "GET" && url.pathname === "/api/hr/todos") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr", "principal"]);
         if (!auth) return;
         sendJson(res, 200, { count: countHrTodos(db, auth.account) });
         return;
       }
 
       if (req.method === "POST" && url.pathname === "/api/hr/flows") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const flow = createHrFlow(db, auth.account, body, hrContext);
@@ -2801,7 +2805,7 @@ async function handleApi(req, res, db, url) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hr/flows") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr", "principal"]);
         if (!auth) return;
         sendJson(res, 200, { flows: queryHrFlows(db, Object.fromEntries(url.searchParams), auth.account) });
         return;
@@ -2809,7 +2813,7 @@ async function handleApi(req, res, db, url) {
 
       const flowMatch = url.pathname.match(/^\/api\/hr\/flows\/([^/]+)\/(approve|reject|withdraw)$/);
       if (flowMatch && req.method === "POST") {
-        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "principal"]);
+        const auth = requireAuth(req, res, db, ["hr", "system_admin", "division_head", "division_hr", "principal"]);
         if (!auth) return;
         const body = await readJsonBody(req);
         const action = flowMatch[2];

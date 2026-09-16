@@ -3036,7 +3036,11 @@ function gradeCoverageText(db, teacher) {
   const assignmentGrades = (db.teacherAssignments || [])
     .filter((assignment) => assignment.teacherIds.includes(teacher.id))
     .map((assignment) => assignment.grade);
-  const grades = Array.from(new Set(assignmentGrades.length ? assignmentGrades : stage?.grades || [])).sort(
+  // 名册可先标明教师的任教年级；在尚未进入“按班级配置任课老师”前，
+  // 它只用于人员/薪资展示，不能被误当成已完成的排课任命。
+  const rosterGrade = Number(teacher.grade);
+  const fallbackGrades = Number.isFinite(rosterGrade) && rosterGrade > 0 ? [rosterGrade] : stage?.grades || [];
+  const grades = Array.from(new Set(assignmentGrades.length ? assignmentGrades : fallbackGrades)).sort(
     (a, b) => a - b,
   );
   if (!grades.length) return "未设置年级";

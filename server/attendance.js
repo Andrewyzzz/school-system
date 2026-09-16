@@ -75,7 +75,13 @@ function canReadAllStages(account) {
 }
 
 export function canManageAttendance(account) {
-  return accountHasRole(account, "division_head") || accountHasRole(account, "system_admin");
+  // 学部主任默认可上传本学部考勤；学部可另行指定考勤负责人，且该负责人
+  // 仍受 scopeStageIds 严格约束，不能代传其他学部的数据。
+  return (
+    accountHasRole(account, "division_head") ||
+    accountHasRole(account, "attendance_manager") ||
+    accountHasRole(account, "system_admin")
+  );
 }
 
 export function readableAttendanceStageIds(db, account) {
