@@ -111,6 +111,12 @@ const productionEnv = await read("config/production.env.example");
   assert.match(install, /chmod 700 "\$\{BACKUP_DIR\}"/, "备份目录必须 700——里面是全校工资与身份证");
   assert.match(install, /chmod 600 "\$\{CONF\}"/, "配置文件必须 600——里面有数据库口令与加密密钥");
   assert.match(install, /set -euo pipefail/, "出错必须立即中止，不能带着半截状态继续往下做");
+  assert.match(install, /LC_ALL=C free -m/, "中文服务器 locale 下也必须能正确读取内存");
+  assert.match(install, /git rsync python3/, "部署代码使用 rsync，基础依赖必须安装 rsync");
+  assert.match(install, /OFFLINE_NPM=/, "校内无外网时必须支持传入 Node 运行依赖后继续部署");
+  assert.match(install, /node_modules\/pg\/package\.json/, "离线模式必须校验 Node 运行依赖是否真的已传入");
+  assert.match(install, /OFFLINE_PIP=/, "校内无 PyPI 时必须支持跳过在线安装求解器");
+  assert.match(install, /PIP_WHEELHOUSE=/, "必须支持使用传入的 OR-Tools 离线软件包");
 }
 
 // ---------------------------------------------------------------------------

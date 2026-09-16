@@ -15,6 +15,11 @@ DB_NAME="${DB_NAME:-school_system}"
 PG_VERSION="${PG_VERSION:-16}"
 NODE_MAJOR="${NODE_MAJOR:-22}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/school-system}"
+# 部分校内测试网不允许服务器访问 npm/PyPI。依赖可由运维电脑下载后
+# 传入 APP_DIR，再以这两个开关完成剩余安装步骤。
+OFFLINE_NPM="${OFFLINE_NPM:-0}"
+OFFLINE_PIP="${OFFLINE_PIP:-0}"
+PIP_WHEELHOUSE="${PIP_WHEELHOUSE:-}"
 
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m  ! %s\033[0m\n' "$*"; }
@@ -34,7 +39,8 @@ case "${ID}" in
 esac
 
 # 内存与磁盘：部署到一半才发现空间不够，收拾起来比事先检查麻烦得多
-MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+# Ubuntu 中文 locale 会把 Mem: 翻译成“内存：”，导致 awk 取不到数值。
+MEM_MB=$(LC_ALL=C free -m | awk '/^Mem:/{print $2}')
 DISK_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
 [ "${MEM_MB}" -ge 3500 ] || warn "内存 ${MEM_MB}MB，低于建议的 4GB（1000+ 教师、排课求解会吃内存）"
 [ "${DISK_GB}" -ge 40 ] || warn "根分区可用 ${DISK_GB}GB，低于建议的 50GB（含数据库与 180 天备份）"
@@ -45,7 +51,7 @@ log "2/8 安装依赖"
 # ---------------------------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates gnupg git python3 python3-venv python3-pip nginx ufw >/dev/null
+apt-get install -y -qq curl ca-certificates gnupg git rsync python3 python3-venv python3-pip nginx ufw >/dev/null
 
 if ! command -v node >/dev/null || [ "$(node -v | sed 's/v\([0-9]*\).*/\1/')" -lt "${NODE_MAJOR}" ]; then
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - >/dev/null
@@ -91,13 +97,28 @@ if [ "${SRC_DIR}" != "${APP_DIR}" ]; then
     "${SRC_DIR}/" "${APP_DIR}/"
 fi
 cd "${APP_DIR}"
-sudo -u "${APP_USER}" npm ci --omit=dev >/dev/null 2>&1 || sudo -u "${APP_USER}" npm install --omit=dev >/dev/null
+if [ "${OFFLINE_NPM}" = "1" ]; then
+  [ -f "${APP_DIR}/node_modules/pg/package.json" ] \
+    || die "离线模式缺少 Node 运行依赖：请先将 node_modules 传入 ${APP_DIR}"
+  ok "使用已传入的 Node 运行依赖（离线模式）"
+else
+  sudo -u "${APP_USER}" npm ci --omit=dev >/dev/null 2>&1 \
+    || sudo -u "${APP_USER}" npm install --omit=dev >/dev/null
+fi
 ok "应用代码已部署"
 
 # 排课求解器：不装 ortools 也能跑，但会静默退化成启发式算法，
 # 排出来的课表质量下降且没有任何提示，所以生产必须装
 python3 -m venv "${APP_DIR}/.venv-solver" 2>/dev/null || true
-if "${APP_DIR}/.venv-solver/bin/pip" install -q -r "${APP_DIR}/server/solver/requirements.txt"; then
+if [ -n "${PIP_WHEELHOUSE}" ]; then
+  if "${APP_DIR}/.venv-solver/bin/pip" install -q --no-index --find-links "${PIP_WHEELHOUSE}" -r "${APP_DIR}/server/solver/requirements.txt"; then
+    ok "OR-Tools 求解器就绪（离线软件包）"
+  else
+    warn "离线 OR-Tools 软件包安装失败，排课将退化为启发式算法"
+  fi
+elif [ "${OFFLINE_PIP}" = "1" ]; then
+  warn "未传入 OR-Tools 离线软件包，排课暂时使用启发式算法"
+elif "${APP_DIR}/.venv-solver/bin/pip" install -q -r "${APP_DIR}/server/solver/requirements.txt"; then
   ok "OR-Tools 求解器就绪"
 else
   warn "OR-Tools 安装失败，排课将退化为启发式算法"

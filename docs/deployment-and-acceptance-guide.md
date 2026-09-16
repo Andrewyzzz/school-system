@@ -29,6 +29,25 @@ sudo systemctl start school-system
 
 学校需提前准备的服务器、域名、证书、访问和备份条件见 `docs/学校测试环境部署交接清单.md`。
 
+### 校内服务器无法访问 GitHub、npm 或 PyPI 时
+
+服务器不必对外网开放。由一台可访问外网、同时能通过 SSH 访问校内服务器的运维电脑准备依赖后传入即可：
+
+```bash
+# 在运维电脑的项目目录执行（Node 运行依赖均为纯 JavaScript）
+tar -czf /tmp/school-system-node-modules.tar.gz node_modules
+scp /tmp/school-system-node-modules.tar.gz <账号>@<服务器>:/tmp/
+
+# 在校内服务器执行；先解压到应用目录，再以离线模式完成安装
+sudo tar -xzf /tmp/school-system-node-modules.tar.gz -C /opt/school-system
+sudo chown -R <运行账号>:<运行账号> /opt/school-system/node_modules
+cd <项目源码目录>
+sudo env APP_USER=<运行账号> APP_DIR=/opt/school-system DB_NAME=school_system \
+  OFFLINE_NPM=1 OFFLINE_PIP=1 bash deploy/install.sh
+```
+
+以上可使应用先正常运行；未传入 OR-Tools 时排课会暂时退化为启发式算法。正式验收前，再由运维电脑下载适用于服务器 Python 版本与 x86_64 Linux 的 OR-Tools wheel 及其依赖，传入服务器，并设置 `PIP_WHEELHOUSE=<wheel目录>` 重跑安装脚本。
+
 ---
 
 ## 1. 系统组成与部署形态
