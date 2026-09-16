@@ -117,6 +117,10 @@ const productionEnv = await read("config/production.env.example");
   assert.match(install, /node_modules\/pg\/package\.json/, "离线模式必须校验 Node 运行依赖是否真的已传入");
   assert.match(install, /OFFLINE_PIP=/, "校内无 PyPI 时必须支持跳过在线安装求解器");
   assert.match(install, /PIP_WHEELHOUSE=/, "必须支持使用传入的 OR-Tools 离线软件包");
+  assert.ok(!/sudo -u postgres -E/.test(install), "新版 Ubuntu 的 sudo -E 会丢失数据库口令，不能使用");
+  assert.match(install, /sudo -u postgres env[\s\\]+DB_APP_PASSWORD=/, "数据库口令必须通过 env 显式传给 postgres 账号");
+  assert.match(install, /GRANT CREATE ON SCHEMA public TO school_app/, "空库首次启动时程序账号必须能建表");
+  assert.match(install, /数据库权限与审计触发器已复核/, "应用建表后必须重新授权并挂上审计触发器");
 }
 
 // ---------------------------------------------------------------------------

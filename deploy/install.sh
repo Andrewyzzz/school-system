@@ -165,9 +165,17 @@ CONFEOF
   chown "${APP_USER}:${APP_USER}" "${CONF}"
   chmod 600 "${CONF}"
 
-  DB_APP_PASSWORD="${DB_APP_PWD}" DB_OPS_PASSWORD="${DB_OPS_PWD}" DB_READONLY_PASSWORD="${DB_RO_PWD}" \
+  # 不使用 sudo -E：Ubuntu 26 已禁用该方式，变量会被静默丢掉，
+  # 结果就是刚创建的 school_app 没有口令，应用无法连接数据库。
+  sudo -u postgres env \
+    DB_APP_PASSWORD="${DB_APP_PWD}" DB_OPS_PASSWORD="${DB_OPS_PWD}" DB_READONLY_PASSWORD="${DB_RO_PWD}" \
     DATABASE_URL="postgresql:///${DB_NAME}" \
-    sudo -u postgres -E node "${APP_DIR}/scripts/provision-db-roles.js" >/dev/null
+    node "${APP_DIR}/scripts/provision-db-roles.js" >/dev/null
+
+  # 空库首次启动时由应用创建文档表与索引；PostgreSQL 15+ 默认不再给 PUBLIC
+  # CREATE 权限，必须显式授予程序账号，否则服务能连库却无法建表。
+  sudo -u postgres psql -d "${DB_NAME}" -v ON_ERROR_STOP=1 \
+    -c 'GRANT CREATE ON SCHEMA public TO school_app' >/dev/null
   ok "已生成配置与数据库账号"
 
   cat <<KEYEOF
@@ -220,6 +228,12 @@ fi
 HEALTH=$(curl -fsS "http://127.0.0.1:4173/api/health" 2>/dev/null || echo "")
 [ -n "${HEALTH}" ] || die "健康检查未通过，服务可能未正常监听"
 echo "  ${HEALTH}" | head -c 300; echo
+
+# 应用首次启动才会生成业务表；此时重新授权并挂上审计触发器，避免首次
+# 授权时看见的是空库而导致运维/只读账号没有已存在表的正确权限。
+sudo -u postgres env DATABASE_URL="postgresql:///${DB_NAME}" \
+  node "${APP_DIR}/scripts/provision-db-roles.js" >/dev/null
+ok "数据库权限与审计触发器已复核"
 
 cat <<'NEXTEOF'
 
